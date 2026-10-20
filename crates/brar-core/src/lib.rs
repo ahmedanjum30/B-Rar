@@ -3,10 +3,12 @@
 mod format;
 mod path;
 mod rar;
+mod rar5;
 mod sevenz;
 mod sink;
 mod stream;
 mod time;
+mod whole;
 mod zip;
 
 use std::{

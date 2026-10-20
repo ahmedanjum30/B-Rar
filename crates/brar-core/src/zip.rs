@@ -6,14 +6,7 @@
 //! reader over a memory map (page faults on the map cost 0.5 s, zlib-rs vs libdeflate 0.37 s,
 //! the reader layers 0.16 s). Everything else goes through the zip crate.
 
-use std::{
-    cell::RefCell,
-    fs::File,
-    io::{self, Cursor},
-    path::Path,
-    sync::{Condvar, Mutex},
-    time::SystemTime,
-};
+use std::{cell::RefCell, fs::File, io::Cursor, path::Path, sync::Mutex, time::SystemTime};
 
 use libdeflater::Decompressor;
 use zip::{
@@ -22,11 +15,12 @@ use zip::{
     read::{ArchiveOffset, Config, ZipFile},
 };
 
-use crate::{EntryInfo, Error, IoContext, Options, Result, mmap, sink::{SMALL_FILE, Sink}, time};
-
-/// Most bytes the fast path holds in memory at once (compressed + decoded, across threads).
-/// Entries bigger than this stream through the zip crate instead.
-const FAST_PATH_BUDGET: u64 = 2 << 30;
+use crate::{
+    EntryInfo, Error, IoContext, Options, Result, mmap,
+    sink::{SMALL_FILE, Sink},
+    time,
+    whole::{BUDGET as FAST_PATH_BUDGET, Budget, read_at},
+};
 
 thread_local! {
     static DECOMPRESSOR: RefCell<Decompressor> = RefCell::new(Decompressor::new());
@@ -171,26 +165,6 @@ fn extract_fast(file: &File, e: &Plain, sink: &Sink, budget: &Budget) -> Result<
     }
 }
 
-/// Fills `buf` from `file` at `offset`, without a shared file cursor (safe across threads).
-fn read_at(file: &File, mut offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(windows)]
-    use std::os::windows::fs::FileExt;
-    #[cfg(unix)]
-    use std::os::unix::fs::FileExt;
-    while !buf.is_empty() {
-        #[cfg(windows)]
-        let n = file.seek_read(buf, offset)?;
-        #[cfg(unix)]
-        let n = file.read_at(buf, offset)?;
-        if n == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        buf = &mut buf[n..];
-        offset += n as u64;
-    }
-    Ok(())
-}
-
 fn extract_entry(mut archive: ZipArchive<Cursor<&[u8]>>, i: usize, password: Option<&[u8]>, sink: &Sink) -> Result<()> {
     let mut f = match password {
         Some(pw) => archive.by_index_decrypt(i, pw)?,
@@ -200,44 +174,6 @@ fn extract_entry(mut archive: ZipArchive<Cursor<&[u8]>>, i: usize, password: Opt
     let (size, modified, encrypted) = (f.size(), mtime(&f), f.encrypted());
     sink.file(&name, Some(size), modified, &mut f)
         .map_err(|e| e.for_entry(&name, encrypted && password.is_some()))
-}
-
-/// Caps the bytes held by fast-path jobs at once. A job larger than what's free waits until
-/// the others finish; one job always runs, so nothing can deadlock.
-struct Budget {
-    state: Mutex<(u64, usize)>, // (bytes in use, jobs holding a lease)
-    freed: Condvar,
-    limit: u64,
-}
-
-struct Lease<'a> {
-    budget: &'a Budget,
-    bytes: u64,
-}
-
-impl Budget {
-    fn new(limit: u64) -> Self {
-        Self { state: Mutex::new((0, 0)), freed: Condvar::new(), limit }
-    }
-
-    fn take(&self, bytes: u64) -> Lease<'_> {
-        let mut state = self.state.lock().unwrap();
-        while state.1 > 0 && state.0 + bytes > self.limit {
-            state = self.freed.wait(state).unwrap();
-        }
-        state.0 += bytes;
-        state.1 += 1;
-        Lease { budget: self, bytes }
-    }
-}
-
-impl Drop for Lease<'_> {
-    fn drop(&mut self) {
-        let mut state = self.budget.state.lock().unwrap();
-        state.0 -= self.bytes;
-        state.1 -= 1;
-        self.budget.freed.notify_all();
-    }
 }
 
 fn mtime<R: std::io::Read>(f: &ZipFile<'_, R>) -> Option<SystemTime> {
