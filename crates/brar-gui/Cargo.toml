@@ -1,13 +1,13 @@
 ﻿[package]
 name = "brar-gui"
-description = "Windows progress UI for brar (used by the Explorer menu)"
+description = "B-Rar's window (progress, prompts), opened from the Explorer menu"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "brar-gui"
+name = "B-Rar-GUI"
 path = "src/main.rs"
 
 [dependencies]

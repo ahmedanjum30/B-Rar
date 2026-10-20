@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="brar.gui" version="1.0.0.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="B-Rar.GUI" version="1.0.0.0" processorArchitecture="*"/>
   <!-- Common Controls v6: required for TaskDialog and the modern look. -->
   <dependency>
     <dependentAssembly>

@@ -1,8 +1,8 @@
-//! Explorer context-menu handler (`IExplorerCommand`) for brar, registered by the MSIX
-//! package. On Windows 11 this is what puts brar in the short right-click menu.
+//! Explorer context-menu handler (`IExplorerCommand`) for B-Rar, registered by the MSIX
+//! package. On Windows 11 this is what puts B-Rar in the short right-click menu.
 //!
 //! It runs inside Explorer, so it stays tiny: it only builds the menu and launches
-//! `brar-gui.exe` (installed next to this DLL), and it never lets a panic cross into Explorer.
+//! `B-Rar-GUI.exe` (installed next to this DLL), and it never lets a panic cross into Explorer.
 
 use std::{
     ffi::OsStr,
@@ -34,6 +34,9 @@ use windows::{
 /// Must match the CLSID in the MSIX manifest; never change it after release.
 pub const CLSID_BRAR: GUID = GUID::from_u128(0x91F265B3_8846_4B4F_9721_DA1F07BEC959);
 
+/// The window app, installed next to this DLL.
+const GUI_EXE: &str = "B-Rar-GUI.exe";
+
 #[derive(Clone, Copy)]
 enum Verb {
     Ask,
@@ -44,13 +47,13 @@ enum Verb {
 
 const VERBS: [Verb; 4] = [Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test];
 
-/// The "brar" entry; its submenu holds the verbs.
+/// The "B-Rar" entry; its submenu holds the verbs.
 #[implement(IExplorerCommand)]
 struct Root;
 
 impl IExplorerCommand_Impl for Root_Impl {
     fn GetTitle(&self, _: Ref<IShellItemArray>) -> Result<PWSTR> {
-        co_string("brar")
+        co_string("B-Rar")
     }
 
     fn GetIcon(&self, _: Ref<IShellItemArray>) -> Result<PWSTR> {
@@ -159,7 +162,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
     fn Invoke(&self, items: Ref<IShellItemArray>, _: Ref<IBindCtx>) -> Result<()> {
         let verb = self.0;
         guard(|| {
-            let gui = install_dir().join("brar-gui.exe");
+            let gui = install_dir().join(GUI_EXE);
             for archive in selected(&items) {
                 let mut cmd = Command::new(&gui);
                 match verb {
@@ -258,7 +261,7 @@ fn folder_name(archive: &std::path::Path) -> String {
 }
 
 fn icon() -> String {
-    format!("{},0", install_dir().join("brar-gui.exe").display())
+    format!("{},0", install_dir().join(GUI_EXE).display())
 }
 
 /// The folder this DLL was loaded from (the package's install folder).

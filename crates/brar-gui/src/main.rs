@@ -1,11 +1,11 @@
-//! brar-gui: the window behind brar's Explorer menu. No console, a native progress dialog.
+//! B-Rar-GUI: the window behind B-Rar's Explorer menu (progress, prompts, results; no console).
 //!
 //! ```text
-//! brar-gui x <archive>             extract to a folder named after the archive
-//! brar-gui x <archive> --here      extract next to the archive
-//! brar-gui x <archive> --ask       pick the destination folder first
-//! brar-gui x <archive> -o <dir>    extract to <dir>
-//! brar-gui t <archive>             test the archive
+//! B-Rar-GUI x <archive>             extract to a folder named after the archive
+//! B-Rar-GUI x <archive> --here      extract next to the archive
+//! B-Rar-GUI x <archive> --ask       pick the destination folder first
+//! B-Rar-GUI x <archive> -o <dir>    extract to <dir>
+//! B-Rar-GUI t <archive>             test the archive
 //! ```
 #![windows_subsystem = "windows"]
 
@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(msg) => {
-            shell::error_box("brar", &msg);
+            shell::error_box("B-Rar", &msg);
             ExitCode::FAILURE
         }
     }
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, String> {
     let mut args = env::args_os().skip(1);
     let usage = || {
-        "usage:\n  brar-gui x <archive> [--here | --ask | -o <dir>]\n  brar-gui t <archive>".to_owned()
+        "usage:\n  B-Rar-GUI x <archive> [--here | --ask | -o <dir>]\n  B-Rar-GUI t <archive>".to_owned()
     };
     let command = args.next().ok_or_else(usage)?;
     let archive = PathBuf::from(args.next().ok_or_else(usage)?);

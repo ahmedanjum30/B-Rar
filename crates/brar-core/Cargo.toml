@@ -1,6 +1,6 @@
 [package]
 name = "brar-core"
-description = "Archive reading engine for brar"
+description = "Archive reading engine for B-Rar"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

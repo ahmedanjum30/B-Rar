@@ -1,4 +1,4 @@
-//! The brar window: progress, "file already exists", password and result pages, talking to
+//! The B-Rar window: progress, "file already exists", password and result pages, talking to
 //! the extraction running on a worker thread.
 
 use std::{
@@ -26,7 +26,7 @@ const LOGO_PNG: &[u8] = include_bytes!("../../../assets/brar-256.png");
 
 pub fn run(archive: PathBuf, mode: Mode) -> ExitCode {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("brar")
+        .with_title("B-Rar")
         .with_inner_size(Page::Running.size())
         .with_resizable(false)
         .with_maximize_button(false);
@@ -37,7 +37,7 @@ pub fn run(archive: PathBuf, mode: Mode) -> ExitCode {
     let succeeded = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&succeeded);
     let result = eframe::run_native(
-        "brar",
+        "B-Rar",
         options,
         Box::new(move |cc| {
             style::install(&cc.egui_ctx);
@@ -45,7 +45,7 @@ pub fn run(archive: PathBuf, mode: Mode) -> ExitCode {
         }),
     );
     if let Err(e) = result {
-        shell::error_box("brar", &format!("Could not open the brar window: {e}"));
+        shell::error_box("B-Rar", &format!("Could not open the B-Rar window: {e}"));
         return ExitCode::FAILURE;
     }
     if succeeded.load(Ordering::Relaxed) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
@@ -300,14 +300,14 @@ impl eframe::App for App {
                 }
                 ctx.request_repaint_after(Duration::from_millis(100));
                 match p.total_bytes() {
-                    0 => format!("{} - brar", self.name),
-                    total => format!("{:.0}% - {} - brar", percent(p.done_bytes(), total), self.name),
+                    0 => format!("{} - B-Rar", self.name),
+                    total => format!("{:.0}% - {} - B-Rar", percent(p.done_bytes(), total), self.name),
                 }
             }
-            Page::Conflict(_) => "File already exists - brar".into(),
-            Page::Password { .. } => "Password - brar".into(),
-            Page::Done { .. } => "Done - brar".into(),
-            Page::Failed(_) => "Error - brar".into(),
+            Page::Conflict(_) => "File already exists - B-Rar".into(),
+            Page::Password { .. } => "Password - B-Rar".into(),
+            Page::Done { .. } => "Done - B-Rar".into(),
+            Page::Failed(_) => "Error - B-Rar".into(),
         };
         self.set_title(ctx, title);
 

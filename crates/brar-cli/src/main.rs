@@ -10,9 +10,9 @@ use anyhow::Context;
 use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Resolution, Summary};
 use clap::{Args, Parser, Subcommand};
 
-/// brar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2).
+/// B-Rar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2).
 #[derive(Parser)]
-#[command(version, about)]
+#[command(name = "B-Rar", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

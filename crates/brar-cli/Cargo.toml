@@ -1,13 +1,13 @@
 [package]
 name = "brar-cli"
-description = "Fast archive extractor"
+description = "B-Rar: fast archive extractor (command line)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "brar"
+name = "B-Rar"
 path = "src/main.rs"
 
 [dependencies]

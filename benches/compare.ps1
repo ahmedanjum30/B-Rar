@@ -1,6 +1,6 @@
-﻿<#
+<#
 .SYNOPSIS
-  Times `brar x` against WinRAR and bsdtar (Windows' built-in tar.exe) on archives built from
+  Times `B-Rar x` against WinRAR and bsdtar (Windows' built-in tar.exe) on archives built from
   a corpus directory, and checks every tool extracts the same file count and byte total.
 .EXAMPLE
   ./benches/compare.ps1 -Corpus C:\some\folder -Runs 3 -Formats zip,rar
@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory)] [string] $Corpus,
     [string] $Work = (Join-Path $PSScriptRoot '..\bench-data'),
     [string] $WinRarDir = 'C:\Program Files\WinRAR',
-    [string] $Brar = (Join-Path $PSScriptRoot '..\target\release\brar.exe'),
+    [string] $Brar = (Join-Path $PSScriptRoot '..\target\release\B-Rar.exe'),
     [int] $Runs = 2,
     [string[]] $Formats = @('zip', 'rar', '7z', 'tar', 'tar.gz', 'tar.xz', 'tar.zst')
 )
@@ -60,7 +60,7 @@ function Tree-Stats([string] $dir) {
 }
 
 $tools = [ordered]@{
-    brar   = { param($a, $d) & $Brar x $a -o $d; Check 'brar' }
+    'B-Rar' = { param($a, $d) & $Brar x $a -o $d; Check 'B-Rar' }
     WinRAR = { param($a, $d)
                if ($a.EndsWith('.rar')) { & $unrar x -y -idq $a "$d\"; Check 'unrar' }
                else { $p = Start-Process $winrar -ArgumentList @('x', '-y', '-ibck', "`"$a`"", "`"$d\`"") -Wait -PassThru
@@ -78,18 +78,18 @@ $results = foreach ($format in $Formats) {
             if (-not $best.ContainsKey($name) -or $t -lt $best[$name]) { $best[$name] = $t }
         }
     }
-    # Compare the last extraction of each tool against brar's.
-    $ref = Tree-Stats (Join-Path $Work 'out-brar')
-    $mismatch = @($tools.Keys | Where-Object { $_ -ne 'brar' -and (Tree-Stats (Join-Path $Work "out-$_")) -ne $ref })
-    $fastestOther = ($tools.Keys | Where-Object { $_ -ne 'brar' } | ForEach-Object { $best[$_] } | Measure-Object -Minimum).Minimum
+    # Compare the last extraction of each tool against B-Rar's.
+    $ref = Tree-Stats (Join-Path $Work 'out-B-Rar')
+    $mismatch = @($tools.Keys | Where-Object { $_ -ne 'B-Rar' -and (Tree-Stats (Join-Path $Work "out-$_")) -ne $ref })
+    $fastestOther = ($tools.Keys | Where-Object { $_ -ne 'B-Rar' } | ForEach-Object { $best[$_] } | Measure-Object -Minimum).Minimum
     [pscustomobject]@{
         Format     = $format
         'MB'       = [math]::Round((Get-Item $archive).Length / 1MB)
-        'brar s'   = [math]::Round($best['brar'], 2)
+        'B-Rar s'   = [math]::Round($best['B-Rar'], 2)
         'WinRAR s' = [math]::Round($best['WinRAR'], 2)
         'bsdtar s' = [math]::Round($best['bsdtar'], 2)
-        'vs best'  = '{0:N1}x' -f ($fastestOther / $best['brar'])
-        Output     = if ($mismatch) { "DIFFERS: $($mismatch -join ',') (brar: $ref)" } else { "identical ($ref)" }
+        'vs best'  = '{0:N1}x' -f ($fastestOther / $best['B-Rar'])
+        Output     = if ($mismatch) { "DIFFERS: $($mismatch -join ',') (B-Rar: $ref)" } else { "identical ($ref)" }
     }
 }
 $results | Format-Table -AutoSize | Out-String -Width 250

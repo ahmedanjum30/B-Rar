@@ -1,6 +1,6 @@
 [package]
 name = "brar-shell"
-description = "Explorer context-menu handler for brar (Windows 11 short menu, via the MSIX package)"
+description = "Explorer context-menu handler for B-Rar (Windows 11 short menu, via the MSIX package)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,3 +18,6 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell_Common",
 ] }
 windows-core = "0.62.2"
+
+[build-dependencies]
+embed-resource = "3.0.12"

@@ -1,4 +1,4 @@
-//! brar-core: fast, parallel archive reading (zip, 7z, rar, tar and single-stream codecs).
+//! brar-core, B-Rar's engine: fast, parallel archive reading (zip, 7z, rar, tar and single-stream codecs).
 
 mod format;
 mod path;
@@ -136,7 +136,7 @@ impl Options {
     pub(crate) fn pool(&self) -> Result<rayon::ThreadPool> {
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.thread_count())
-            .thread_name(|i| format!("brar-decode-{i}"))
+            .thread_name(|i| format!("B-Rar-decode-{i}"))
             .build()
             .map_err(|e| Error::RawIo(io::Error::other(e)))
     }

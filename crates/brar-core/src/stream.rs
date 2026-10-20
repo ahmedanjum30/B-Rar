@@ -122,7 +122,7 @@ pub(crate) fn extract(path: &Path, codec: Codec, sink: &Sink, opts: &Options) ->
 fn read_ahead(mut inner: Box<dyn Read + Send>) -> ReadAhead {
     let (tx, rx) = sync_channel(16);
     thread::Builder::new()
-        .name("brar-inflate".into())
+        .name("B-Rar-inflate".into())
         .spawn(move || {
             loop {
                 let mut buf = vec![0; CHUNK];

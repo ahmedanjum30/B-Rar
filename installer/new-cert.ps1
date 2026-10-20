@@ -1,4 +1,4 @@
-# One-time setup: creates brar's self-signed code-signing certificate and trusts it on this PC.
+# One-time setup: creates B-Rar's self-signed code-signing certificate and trusts it on this PC.
 #
 # The certificate (with its private key) lives in your personal store, Cert:\CurrentUser\My,
 # never in the repository. Trusting it means adding the public part to the machine's
@@ -8,7 +8,7 @@
 # updates to an installed MSIX must be signed with the same certificate.
 param([string] $Subject = 'CN=Ahmad Anjum')
 $ErrorActionPreference = 'Stop'
-$friendly = 'brar MSIX signing'
+$friendly = 'B-Rar MSIX signing'
 
 $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $Subject -and $_.FriendlyName -eq $friendly } |
     Sort-Object NotAfter -Descending | Select-Object -First 1
@@ -24,7 +24,7 @@ if (-not $cert) {
 
 $trusted = Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Thumbprint -eq $cert.Thumbprint
 if (-not $trusted) {
-    $cer = Join-Path ([IO.Path]::GetTempPath()) 'brar-signing.cer'
+    $cer = Join-Path ([IO.Path]::GetTempPath()) 'B-Rar-signing.cer'
     Export-Certificate -Cert $cert -FilePath $cer | Out-Null
     "asking for admin rights to trust the certificate on this PC..."
     $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @(

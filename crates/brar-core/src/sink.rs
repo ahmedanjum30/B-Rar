@@ -160,7 +160,7 @@ impl Sink {
         }
         let writers = rayon::ThreadPoolBuilder::new()
             .num_threads(opts.thread_count())
-            .thread_name(|i| format!("brar-write-{i}"))
+            .thread_name(|i| format!("B-Rar-write-{i}"))
             .build()
             .map_err(|e| Error::RawIo(io::Error::other(e)))?;
         Ok(Self {
