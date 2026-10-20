@@ -1,0 +1,20 @@
+[package]
+name = "brar-cli"
+description = "Fast archive extractor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "brar"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+brar-core = { path = "../brar-core" }
+clap = { version = "4.6.7", features = ["derive"] }
+rpassword = "7.5.4"
+
+[build-dependencies]
+embed-resource = "3.0.12"

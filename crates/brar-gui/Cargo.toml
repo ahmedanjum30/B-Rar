@@ -1,0 +1,20 @@
+﻿[package]
+name = "brar-gui"
+description = "Windows progress UI for brar (used by the Explorer menu)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "brar-gui"
+path = "src/main.rs"
+
+[dependencies]
+brar-core = { path = "../brar-core" }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+jiff = "0.2.38"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+
+[build-dependencies]
+embed-resource = "3.0.12"

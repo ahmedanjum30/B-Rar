@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/brar-core", "crates/brar-cli", "crates/brar-gui", "crates/brar-shell"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+
+[patch.crates-io]
+# Exposes RAR's full-precision modification time (see vendor/unrar/src/open_archive.rs).
+unrar = { path = "vendor/unrar" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
+
+# Fast-to-build profile for benchmarking iterations.
+[profile.bench-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
