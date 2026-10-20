@@ -37,15 +37,30 @@ ratio); two files of 545 MB and 519 MB are 85% of the data.
 **B-Rar: 1.5× faster than WinRAR and 7-Zip, but 1.23× slower than Windows tar.** All exited 0;
 output identical across all four (0 SHA-256 mismatches).
 
-Why (B-Rar `t`: 3.44 s wall, 3.84 s CPU, about 1.1 cores busy; 7-Zip `t`: 6.77 s, 1.0 core): with
-85% of the data in two files, parallel decoding can't help much, so single-stream Deflate speed
-decides. B-Rar's `zlib-rs` (with runtime CPU detection on) manages ~160 MB/s on the 545 MB file
-versus tar's ~330 MB/s overall: Chromium's zlib has SIMD fast paths for literal-heavy streams
-like this one.
+### After two fixes (same day): B-Rar 2.73 s
 
-**Next step:** decode ZIP entries with libdeflate (the fastest Deflate decoder; whole-buffer
-API fits ZIP, since sizes are known up front), decompressing straight into a memory-mapped
-output file. Then re-run.
+| Tool | Time | vs B-Rar |
+|---|---|---|
+| **B-Rar (fixed)** | **2.73 s** | — |
+| Windows tar | 3.82 s | 1.40× slower |
+| WinRAR.exe | 7.09 s | 2.60× slower |
+| 7-Zip 26.04 | 7.26 s | 2.66× slower |
+
+(Single B-Rar run at 22:38:58, same archive and target drive; output identical to WinRAR's.)
+
+Investigation: a standalone test showed Deflate itself was fine. B-Rar's path decodes the 545 MB
+entry at 316 MB/s (zlib-rs alone 340–354 MB/s, libdeflate 441 MB/s, CRC32 18.5 GB/s). Two bugs
+cost the time instead:
+1. **Scheduling:** the rayon parallel iterator handed the two largest entries (sorted next to each
+   other) to one thread, so they decoded back to back. Now each entry is its own FIFO job, started
+   biggest first.
+2. **Opening the archive:** the zip crate's default `ArchiveOffset::Detect` scans the file for
+   the central directory, 0.59 s on this 1.1 GB archive. B-Rar now tries the standard layout
+   (`Known(0)`) first and only falls back to the scan.
+
+Test mode went 3.44 s → 1.93–2.10 s; extraction 4.71 s → 2.73 s.
+
+**Possible next step:** libdeflate for the per-entry decode (~1.3× faster than zlib-rs above).
 
 ---
 

@@ -51,7 +51,8 @@ pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
     let per_block = (threads / blocks.clamp(1, threads)).max(1) as u32;
 
     opts.pool()?.install(|| {
-        (0..blocks).into_par_iter().try_for_each(|block| {
+        // One block per task, so big blocks never queue behind each other on one thread.
+        (0..blocks).into_par_iter().with_max_len(1).try_for_each(|block| {
             let encrypted = opts.password.is_some()
                 && archive.blocks[block]
                     .coders
