@@ -18,6 +18,57 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-20: single core, 1.1 GB RAR5, WinRAR vs UnRAR vs B-Rar
+
+**Archive:** `italian-repack.rar` (1.1 GB, RAR5 `-m5 -md32m`, 79 files, 1.22 GiB unpacked).
+
+**Method:** every tool pinned to one CPU core with process affinity (`start /affinity 1`, mask
+verified as 1 inside the run, inherited by the tool and any threads it starts), plus each tool's
+own single-thread switch (`-mt1` for WinRAR/UnRAR, `-t 1` for B-Rar). Order WinRAR → UnRAR →
+B-Rar, 20 s apart, extracting to E:.
+
+| # | Tool | Start → end | Time | Speed |
+|---|---|---|---|---|
+| 1 | WinRAR.exe `-mt1` | 22:13:19 → 22:13:32 | 13.13 s | 95 MiB/s |
+| 2 | UnRAR.exe `-mt1` | 22:14:00 → 22:14:12 | 12.12 s | 103 MiB/s |
+| 3 | **B-Rar** `-t 1` | 22:14:41 → 22:14:53 | **12.12 s** | **103 MiB/s** |
+
+**On one core B-Rar ties UnRAR and is 8% faster than WinRAR.exe.** All exited 0; output
+identical to WinRAR's (0 SHA-256 mismatches, 79 files).
+
+Reading: all three run the same unRAR decoder, so on a single core the decoder sets the pace and
+B-Rar adds no overhead of its own. Its 1.7–2.4× wins on many cores come entirely from decoding
+several files at once. (WinRAR.exe is a little slower than its console tool, likely GUI overhead.)
+
+---
+
+## 2026-10-20: 1.04 GB 7z (LZMA2, solid), single runs, 20 s apart
+
+**Archive:** `Italian-GameDrive.7z` from Downloads (C:), made by the user with 7-Zip. 1.04 GB,
+LZMA2:25 (32 MB dictionary), solid, 1 block. Unpacks to 1.22 GiB in 79 files.
+
+**Method:** one run per tool, 7-Zip first, then B-Rar 20 s later, each extracting to its own
+folder on E:.
+
+| # | Tool | Command | Start → end | Time | Speed |
+|---|---|---|---|---|---|
+| 1 | **7-Zip 26.04** | `7z x <7z> -oE:\bench-7zip -y -mmt=on` | 22:09:21 → 22:09:25 | **4.11 s** | **305 MiB/s** |
+| 2 | B-Rar | `B-Rar x <7z> -o E:\bench-B-Rar -y` | 22:09:51 → 22:09:58 | 6.33 s | 198 MiB/s |
+
+**7-Zip is 1.54× faster than B-Rar on its own format.** Both exited 0; output identical (0
+SHA-256 mismatches across 79 files).
+
+Why (measured with `t`, test mode): both tools keep about 6 cores busy (7-Zip: 23.1 CPU-s in
+3.94 s; B-Rar: 36.4 CPU-s in 6.25 s), so parallelism is equal. The gap is per-core decoder speed:
+B-Rar's 7z path uses the pure-Rust `lzma-rust2` LZMA decoder, which needs ~1.6× the CPU time of
+7-Zip's hand-optimized decoder. Because the archive is solid with one block, B-Rar's per-file
+parallelism (which wins on RAR) can't help here.
+
+**Next step:** decode 7z's LZMA/LZMA2 with a faster engine: the 7-Zip LZMA SDK (public domain C,
+the decoder 7-Zip itself uses) or liblzma (already linked for .xz). Then re-run this test.
+
+---
+
 ## 2026-10-20: 28.6 GB RAR5, single runs, 20 s apart
 
 **Archive:** `2347080-GameDrive.Org.rar` from Downloads (C:). 28.6 GB, RAR5, `-m5 -md=32m`, not
@@ -81,8 +132,7 @@ floor is the time to decode the 545 MB file.
 
 ## Not benchmarked yet
 
-ZIP, 7z and tar.* have not been benchmarked against 7-Zip yet. 7-Zip is likely strongest on its
-own 7z format. `benches/compare.ps1` builds archives from a corpus folder and compares B-Rar,
+ZIP and tar.* have not been benchmarked against 7-Zip yet. `benches/compare.ps1` builds archives from a corpus folder and compares B-Rar,
 WinRAR and bsdtar.
 
 ## Incident: archive damaged on disk
