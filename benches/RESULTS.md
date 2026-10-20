@@ -18,6 +18,29 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-20: single core, ZIP, after the write fix: tar vs B-Rar
+
+Same archive (`Italian.zip`), both pinned to one core, 10 s pauses, 3 alternating pairs, median.
+
+| Tool | Median | Runs |
+|---|---|---|
+| Windows tar | **5.12 s** | 4.69, 5.12, 5.28 |
+| B-Rar | 5.44 s | 4.83, 5.44, 5.71 |
+
+**B-Rar is now 6% behind tar on one core (was 39%).** Output identical. (Both ran slower than
+in the earlier session; the machine was slower overall, so compare the ratio, not the times.)
+
+What changed: profiling showed B-Rar made **144,604 write calls** for 1.22 GB (8.9 KB each,
+exactly what the Deflate reader hands back per read), costing 1.45 s. B-Rar now fills its 1 MiB
+buffer before each write: **1,313 calls, 0.48 s.**
+
+Single-core breakdown (decode-only = `tar -xOf > NUL` / `B-Rar t`): tar 3.51 s decode + ~0.6 s
+writing; B-Rar 3.9–4.1 s decode + ~0.5 s writing. The remaining gap is decoding: tar's
+Chromium zlib inflates faster per core than zlib-rs. **Next step:** libdeflate (441 MB/s vs
+zlib-rs 316–354 MB/s in the standalone test).
+
+---
+
 ## 2026-10-20: single core, 1.1 GB ZIP (Deflate)
 
 **Archive:** `Italian.zip` (see the ZIP section below). **Method:** each tool pinned to one core

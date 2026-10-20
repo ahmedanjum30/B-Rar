@@ -420,12 +420,20 @@ fn copy(reader: &mut dyn Read, writer: &mut dyn Write, shared: &Shared) -> io::R
     BUF.with_borrow_mut(|buf| {
         let mut total = 0;
         loop {
-            let n = match reader.read(buf) {
-                Ok(0) => return Ok(total),
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
+            // Decoders hand back small pieces (~9 KB for Deflate); fill the whole buffer before
+            // writing, or a big file costs ~100,000 write calls instead of ~1,000.
+            let mut n = 0;
+            while n < buf.len() {
+                match reader.read(&mut buf[n..]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if n == 0 {
+                return Ok(total);
+            }
             writer.write_all(&buf[..n])?;
             total += n as u64;
             shared.advance(n as u64);
