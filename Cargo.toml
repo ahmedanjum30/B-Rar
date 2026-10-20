@@ -9,8 +9,10 @@ rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
 [patch.crates-io]
-# Exposes RAR's full-precision modification time (see vendor/unrar/src/open_archive.rs).
+# Exposes RAR's full-precision modification time and a progress hook (vendor/unrar/src).
 unrar = { path = "vendor/unrar" }
+# Disables unRAR's quick-open cache in DLL mode (vendor/unrar_sys/vendor/unrar/dll.cpp).
+unrar_sys = { path = "vendor/unrar_sys" }
 
 [profile.release]
 opt-level = 3

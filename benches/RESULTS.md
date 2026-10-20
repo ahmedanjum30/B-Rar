@@ -18,6 +18,34 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21: why 7-Zip is faster on RAR (one core), and a many-files bug
+
+Decode-only (`t`), one core (affinity 1), CPU seconds:
+
+| Archive | 7-Zip | UnRAR | B-Rar (before fix) | B-Rar (fixed) |
+|---|---|---|---|---|
+| `italian-repack.rar` (1.1 GB game data, 79 files, barely compressible) | **7.28** | 10.73 | 11.28 | ≈ UnRAR |
+| `source-m5.rar` (144 MB; 1,038 MB of source code, 57,224 entries, 7.2× compressible) | **2.45** | 6.81 | 39.78 | 7.17 |
+
+Wall time on `source-m5.rar`: one core 7-Zip 2.85 s, UnRAR 8.57 s, B-Rar 43.44 s → **7.86 s**; all
+cores 7-Zip 2.53 s, UnRAR 7.52 s, B-Rar 6.57 s → **5.10 s**.
+
+**Bug (fixed):** in DLL mode unRAR seeks back after every file, and with a RAR5 "quick open"
+record present, `QuickOpen::Seek` reloads the whole cache on such a seek: **620 µs per header**
+(57k headers = 35 s) vs 10.6 µs on the same archive built with `-qo-`. Patched in the vendored
+`unrar_sys` (`dll.cpp`: `Cmd.QOpenMode=QOPEN_NONE`): 12.6 µs per header.
+
+**Why 7-Zip is faster per core:** its own RAR5 decoder (Igor Pavlov's `Rar5Decoder`) does the same
+work with 1.5× less CPU on barely compressible data and 2.6–2.8× less on compressible data. It isn't
+our build: RARLAB's own `UnRAR.exe` (MSVC) is exactly as slow, and unRAR's 8-byte match copying
+(`UNPACK_COPY8`) is enabled. The gap is in the decoder design (bit reading, Huffman tables, match
+copying, write-out path), larger where matches dominate.
+
+**Still open (all cores, many small files):** B-Rar's parallel RAR path burns 46 CPU-s where UnRAR
+needs 7, because every worker reads all 57k headers to find its own files.
+
+---
+
 ## 2026-10-21: 7z, all cores vs one core: WinRAR, 7-Zip, tar, B-Rar
 
 **Archive:** `Italian-GameDrive.7z` (1.04 GB, LZMA2:25, solid, 1 block, 79 files, 1.22 GiB).
