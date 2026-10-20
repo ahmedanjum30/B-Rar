@@ -8,6 +8,7 @@ mod sevenz;
 mod sink;
 mod stream;
 mod time;
+mod volumes;
 mod whole;
 mod zip;
 
@@ -51,6 +52,10 @@ pub enum Error {
     WrongPassword,
     #[error("\"{0}\" is damaged (checksum mismatch); the archive is corrupt or incomplete")]
     Damaged(String),
+    #[error("missing volume: {} (all parts must be in the same folder)", .0.display())]
+    MissingVolume(PathBuf),
+    #[error("not supported: {0}")]
+    Unsupported(&'static str),
 }
 
 impl Error {
@@ -300,13 +305,38 @@ pub struct Summary {
 }
 
 pub fn list(archive: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
-    let result = match detect(archive)? {
-        Format::Zip => zip::list(archive),
-        Format::SevenZ => sevenz::list(archive, opts),
-        Format::Rar => rar::list(archive, opts),
-        Format::Stream(codec) => stream::list(archive, codec, opts),
+    let (input, format) = open(archive)?;
+    let result = match format {
+        Format::Zip => zip::list(&input),
+        Format::SevenZ => sevenz::list(&input, opts),
+        Format::Rar => rar::list(&input.first, opts).map_err(|e| missing_rar_part(&input, e)),
+        Format::Stream(codec) => stream::list(&input, codec, opts),
     };
     result.map_err(Error::normalize)
+}
+
+/// unRAR reports a missing volume as a generic open or CRC error; name the part instead.
+fn missing_rar_part(input: &volumes::Input, e: Error) -> Error {
+    let e = e.normalize();
+    if matches!(e, Error::Cancelled | Error::PasswordRequired | Error::WrongPassword) {
+        return e;
+    }
+    match volumes::RarSet::of(&input.first).and_then(|set| set.missing()) {
+        Some(part) => Error::MissingVolume(part),
+        None => e,
+    }
+}
+
+/// Resolves which part(s) to read and detects the format from the (combined) data.
+fn open(archive: &Path) -> Result<(volumes::Input, Format)> {
+    let input = volumes::resolve(archive)?;
+    let format = format::detect_bytes(&input.head(512)?).ok_or(Error::UnknownFormat)?;
+    if format == Format::Rar && input.split.is_some() {
+        // A RAR cut into .001/.002 pieces by a file splitter (not RAR's own volumes): unRAR
+        // reads from a real file, so it would need joining first.
+        return Err(Error::Unsupported("a RAR archive split into .001/.002 files; join the parts into one file first"));
+    }
+    Ok((input, format))
 }
 
 /// Extracts `archive` into `dest`, creating it if needed.
@@ -320,13 +350,13 @@ pub fn test(archive: &Path, opts: &Options) -> Result<Summary> {
 }
 
 fn run(archive: &Path, dest: Option<&Path>, opts: &Options) -> Result<Summary> {
-    let format = detect(archive)?;
+    let (input, format) = open(archive)?;
     let sink = sink::Sink::new(dest, opts)?;
     let result = match format {
-        Format::Zip => zip::extract(archive, &sink, opts),
-        Format::SevenZ => sevenz::extract(archive, &sink, opts),
-        Format::Rar => rar::extract(archive, &sink, opts),
-        Format::Stream(codec) => stream::extract(archive, codec, &sink, opts),
+        Format::Zip => zip::extract(&input, &sink, opts),
+        Format::SevenZ => sevenz::extract(&input, &sink, opts),
+        Format::Rar => rar::extract(&input.first, &sink, opts).map_err(|e| missing_rar_part(&input, e)),
+        Format::Stream(codec) => stream::extract(&input, codec, &sink, opts),
     };
     // Always drain background writes, but report the decoder's error first.
     let summary = sink.finish();

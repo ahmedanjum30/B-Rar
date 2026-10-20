@@ -49,6 +49,49 @@ pub(crate) fn parse(path: &Path) -> Result<Option<Archive>> {
     Ok(parse_bytes(&map))
 }
 
+/// One header block: CRC32 (4) | header size (vint) | body (type, flags, [extra size],
+/// [data size], type-specific fields, extra area), followed by its data area.
+struct Header<'a> {
+    kind: u64,
+    flags: u64,
+    body: &'a [u8],
+    /// Offset in `body` of the type-specific fields.
+    fields: usize,
+    extra: &'a [u8],
+    data_start: u64,
+    data_size: u64,
+    /// Offset of the next header.
+    next: usize,
+}
+
+/// Reads and CRC-checks the header at `pos`.
+fn header_at(b: &[u8], pos: usize) -> Option<Header<'_>> {
+    let crc = u32::from_le_bytes(b.get(pos..pos + 4)?.try_into().ok()?);
+    let mut p = pos + 4;
+    let size = vint(b, &mut p)? as usize;
+    let body_end = p.checked_add(size)?;
+    let body = b.get(p..body_end)?;
+    if crc32fast::hash(b.get(pos + 4..body_end)?) != crc {
+        return None;
+    }
+    let mut q = 0usize;
+    let kind = vint(body, &mut q)?;
+    let flags = vint(body, &mut q)?;
+    let extra_size = if flags & 0x1 != 0 { vint(body, &mut q)? as usize } else { 0 };
+    let data_size = if flags & 0x2 != 0 { vint(body, &mut q)? } else { 0 };
+    let data_start = body_end as u64;
+    Some(Header {
+        kind,
+        flags,
+        body,
+        fields: q,
+        extra: body.get(body.len().checked_sub(extra_size)?..)?,
+        data_start,
+        data_size,
+        next: usize::try_from(data_start.checked_add(data_size)?).ok()?,
+    })
+}
+
 fn parse_bytes(b: &[u8]) -> Option<Archive> {
     if b.get(..8)? != SIGNATURE {
         return None;
@@ -56,27 +99,10 @@ fn parse_bytes(b: &[u8]) -> Option<Archive> {
     let mut pos = 8usize;
     let mut entries = Vec::new();
     loop {
-        // CRC32 (4) | header size (vint) | header body (type, flags, ...).
-        let crc = u32::from_le_bytes(b.get(pos..pos + 4)?.try_into().ok()?);
-        let mut p = pos + 4;
-        let size = vint(b, &mut p)? as usize;
-        let body_start = p;
-        let body_end = body_start.checked_add(size)?;
-        let body = b.get(body_start..body_end)?;
-        if crc32fast::hash(b.get(pos + 4..body_end)?) != crc {
-            return None;
-        }
-        let mut q = 0usize;
-        let kind = vint(body, &mut q)?;
-        let flags = vint(body, &mut q)?;
-        let extra_size = if flags & 0x1 != 0 { vint(body, &mut q)? as usize } else { 0 };
-        let data_size = if flags & 0x2 != 0 { vint(body, &mut q)? } else { 0 };
-        let data_start = body_end as u64;
-        let next = data_start.checked_add(data_size)?;
-        let extra = body.get(body.len().checked_sub(extra_size)?..)?;
-        match kind {
+        let h = header_at(b, pos)?;
+        match h.kind {
             HEAD_MAIN => {
-                let archive_flags = vint(body, &mut q)?;
+                let archive_flags = vint(h.body, &mut h.fields.clone())?;
                 // Volumes (0x1) and solid archives (0x4) go to unRAR as a whole.
                 if archive_flags & (0x1 | 0x4) != 0 {
                     return None;
@@ -84,22 +110,40 @@ fn parse_bytes(b: &[u8]) -> Option<Archive> {
             }
             HEAD_FILE => {
                 // Split across volumes (0x8 / 0x10): not in a single-volume archive.
-                if flags & (0x8 | 0x10) != 0 {
+                if h.flags & (0x8 | 0x10) != 0 {
                     return None;
                 }
                 let index = entries.len();
-                entries.push(file_entry(body, q, extra, index, data_start, data_size)?);
+                entries.push(file_entry(h.body, h.fields, h.extra, index, h.data_start, h.data_size)?);
             }
             HEAD_CRYPT => return None,
             HEAD_END => break,
             _ => {} // service headers (comments, quick open, ACLs...) and unknown blocks
         }
-        pos = usize::try_from(next).ok()?;
+        pos = h.next;
         if pos >= b.len() {
             break;
         }
     }
     Some(Archive { entries })
+}
+
+/// For one RAR5 volume: does its end-of-archive record say another volume follows?
+/// `false` when unsure (not RAR5, unreadable, no end record).
+pub(crate) fn more_volumes_follow(path: &Path) -> bool {
+    let Ok(map) = mmap(path) else { return false };
+    if map.get(..8) != Some(&SIGNATURE[..]) {
+        return false;
+    }
+    let mut pos = 8usize;
+    while let Some(h) = header_at(&map, pos) {
+        if h.kind == HEAD_END {
+            // End-of-archive flags: 0x1 = "volume, and not the last one".
+            return vint(h.body, &mut h.fields.clone()).is_some_and(|f| f & 0x1 != 0);
+        }
+        pos = h.next;
+    }
+    false
 }
 
 fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start: u64, packed: u64) -> Option<Entry> {

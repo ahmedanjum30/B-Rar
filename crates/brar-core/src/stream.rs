@@ -4,7 +4,6 @@
 //! parser, and small files go to the background writer pool.
 
 use std::{
-    fs::File,
     io::{self, BufReader, Read},
     path::Path,
     sync::mpsc::{Receiver, sync_channel},
@@ -16,12 +15,14 @@ use crate::{
     format::{Codec, is_tar},
     sink::Sink,
     time,
+    volumes::Input,
 };
 
 const CHUNK: usize = 1 << 20;
 
-fn decoder(path: &Path, codec: Codec, opts: &Options) -> Result<Box<dyn Read + Send>> {
-    let file = File::open(path).at(path)?;
+fn decoder(input: &Input, codec: Codec, opts: &Options) -> Result<Box<dyn Read + Send>> {
+    let path = input.first.as_path();
+    let file = input.reader()?;
     if codec == Codec::None {
         return Ok(Box::new(file));
     }
@@ -46,10 +47,10 @@ fn decoder(path: &Path, codec: Codec, opts: &Options) -> Result<Box<dyn Read + S
 }
 
 /// Opens the stream and peeks at the first tar header to tell `x.tar.gz` from `x.gz`.
-fn open(path: &Path, codec: Codec, opts: &Options) -> Result<(bool, Box<dyn Read + Send>)> {
-    let mut reader = read_ahead(decoder(path, codec, opts)?);
+fn open(input: &Input, codec: Codec, opts: &Options) -> Result<(bool, Box<dyn Read + Send>)> {
+    let mut reader = read_ahead(decoder(input, codec, opts)?);
     let mut head = Vec::with_capacity(512);
-    (&mut reader).take(512).read_to_end(&mut head).at(path)?;
+    (&mut reader).take(512).read_to_end(&mut head).at(&input.first)?;
     let tar = codec == Codec::None || is_tar(&head);
     Ok((tar, Box::new(io::Cursor::new(head).chain(reader))))
 }
@@ -63,15 +64,16 @@ fn single_name(path: &Path) -> String {
     }
 }
 
-pub(crate) fn list(path: &Path, codec: Codec, opts: &Options) -> Result<Vec<EntryInfo>> {
-    let (is_tar, mut reader) = open(path, codec, opts)?;
+pub(crate) fn list(input: &Input, codec: Codec, opts: &Options) -> Result<Vec<EntryInfo>> {
+    let path = input.first.as_path();
+    let (is_tar, mut reader) = open(input, codec, opts)?;
     if !is_tar {
         let size = io::copy(&mut reader, &mut io::sink()).at(path)?;
         return Ok(vec![EntryInfo {
-            name: single_name(path),
+            name: single_name(&input.name),
             is_dir: false,
             size,
-            packed: std::fs::metadata(path).ok().map(|m| m.len()),
+            packed: input.split.is_none().then(|| std::fs::metadata(path).ok().map(|m| m.len())).flatten(),
             modified: None,
         }]);
     }
@@ -91,11 +93,12 @@ pub(crate) fn list(path: &Path, codec: Codec, opts: &Options) -> Result<Vec<Entr
     Ok(entries)
 }
 
-pub(crate) fn extract(path: &Path, codec: Codec, sink: &Sink, opts: &Options) -> Result<()> {
-    let (is_tar, mut reader) = open(path, codec, opts)?;
+pub(crate) fn extract(input: &Input, codec: Codec, sink: &Sink, opts: &Options) -> Result<()> {
+    let path = input.first.as_path();
+    let (is_tar, mut reader) = open(input, codec, opts)?;
     if !is_tar {
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        return sink.file(&single_name(path), None, modified, &mut reader);
+        return sink.file(&single_name(&input.name), None, modified, &mut reader);
     }
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().at(path)? {

@@ -1,20 +1,32 @@
 //! 7z: solid blocks are independent, so blocks decode in parallel; LZMA2 streams written with
 //! multithreading can additionally split across threads inside one block.
 
-use std::{io::Cursor, path::Path, time::SystemTime};
+use std::{
+    io::{Cursor, Read, Seek},
+    time::SystemTime,
+};
 
 use rayon::prelude::*;
 use sevenz_rust2::{Archive, ArchiveEntry, BlockDecoder, EncoderMethod, Password};
 
-use crate::{EntryInfo, Error, Options, Result, mmap, sink::Sink, time};
+use crate::{EntryInfo, Error, Options, Result, mmap, sink::Sink, time, volumes::Input};
 
 fn password(opts: &Options) -> Password {
     opts.password.as_deref().map_or_else(Password::empty, Password::from)
 }
 
-pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
-    let map = mmap(path)?;
-    let archive = Archive::read(&mut Cursor::new(&map[..]), &password(opts))?;
+pub(crate) fn list(input: &Input, opts: &Options) -> Result<Vec<EntryInfo>> {
+    match &input.split {
+        None => {
+            let map = mmap(&input.first)?;
+            list_from(&mut Cursor::new(&map[..]), opts)
+        }
+        Some(parts) => list_from(&mut parts.clone(), opts),
+    }
+}
+
+fn list_from<R: Read + Seek>(reader: &mut R, opts: &Options) -> Result<Vec<EntryInfo>> {
+    let archive = Archive::read(reader, &password(opts))?;
     Ok(archive
         .files
         .iter()
@@ -29,10 +41,20 @@ pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
         .collect())
 }
 
-pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
-    let map = mmap(path)?;
+pub(crate) fn extract(input: &Input, sink: &Sink, opts: &Options) -> Result<()> {
+    match &input.split {
+        None => {
+            let map = mmap(&input.first)?;
+            extract_from(&|| Cursor::new(&map[..]), sink, opts)
+        }
+        Some(parts) => extract_from(&|| parts.clone(), sink, opts),
+    }
+}
+
+/// `new_reader` hands out independent readers over the archive, one per decoding thread.
+fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), sink: &Sink, opts: &Options) -> Result<()> {
     let password = password(opts);
-    let archive = Archive::read(&mut Cursor::new(&map[..]), &password)?;
+    let archive = Archive::read(&mut new_reader(), &password)?;
 
     sink.set_total(archive.files.iter().filter(|f| !f.is_directory).map(|f| f.size).sum());
 
@@ -58,7 +80,7 @@ pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
                     .coders
                     .iter()
                     .any(|c| c.encoder_method_id() == EncoderMethod::ID_AES256_SHA256);
-            let mut source = Cursor::new(&map[..]);
+            let mut source = new_reader();
             let decoder = BlockDecoder::new(per_block, block, &archive, &password, &mut source);
             let mut failure = None;
             let result = decoder.for_each_entries(&mut |entry, reader| {

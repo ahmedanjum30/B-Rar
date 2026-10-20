@@ -6,7 +6,13 @@
 //! reader over a memory map (page faults on the map cost 0.5 s, zlib-rs vs libdeflate 0.37 s,
 //! the reader layers 0.16 s). Everything else goes through the zip crate.
 
-use std::{cell::RefCell, fs::File, io::Cursor, path::Path, sync::Mutex, time::SystemTime};
+use std::{
+    cell::RefCell,
+    fs::File,
+    io::{self, Cursor, Read, Seek},
+    sync::Mutex,
+    time::SystemTime,
+};
 
 use libdeflater::Decompressor;
 use zip::{
@@ -19,6 +25,7 @@ use crate::{
     EntryInfo, Error, IoContext, Options, Result, mmap,
     sink::{SMALL_FILE, Sink},
     time,
+    volumes::Input,
     whole::{BUDGET as FAST_PATH_BUDGET, Budget, read_at},
 };
 
@@ -26,9 +33,21 @@ thread_local! {
     static DECOMPRESSOR: RefCell<Decompressor> = RefCell::new(Decompressor::new());
 }
 
-pub(crate) fn list(path: &Path) -> Result<Vec<EntryInfo>> {
-    let map = mmap(path)?;
-    let mut archive = open(&map)?;
+/// Positioned read of the archive's bytes (one file, or all parts of a split archive).
+type ReadAt<'a> = &'a (dyn Fn(u64, &mut [u8]) -> io::Result<()> + Sync);
+
+pub(crate) fn list(input: &Input) -> Result<Vec<EntryInfo>> {
+    match &input.split {
+        None => {
+            let map = mmap(&input.first)?;
+            list_from(Cursor::new(&map[..]))
+        }
+        Some(parts) => list_from(parts.clone()),
+    }
+}
+
+fn list_from<R: Read + Seek + Clone>(reader: R) -> Result<Vec<EntryInfo>> {
+    let mut archive = open(reader)?;
     (0..archive.len())
         .map(|i| {
             let f = archive.by_index_raw(i)?;
@@ -47,11 +66,11 @@ pub(crate) fn list(path: &Path) -> Result<Vec<EntryInfo>> {
 /// says). The zip crate's default auto-detection scans the file for the directory, which took
 /// 0.6 s on a 1.1 GB archive; it remains the fallback for ZIPs with data in front (e.g.
 /// self-extracting .exe files).
-fn open(map: &[u8]) -> Result<ZipArchive<Cursor<&[u8]>>> {
+fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
     let known = Config { archive_offset: ArchiveOffset::Known(0) };
-    match ZipArchive::with_config(known, Cursor::new(map)) {
+    match ZipArchive::with_config(known, reader.clone()) {
         Ok(archive) => Ok(archive),
-        Err(_) => Ok(ZipArchive::new(Cursor::new(map))?),
+        Err(_) => Ok(ZipArchive::new(reader)?),
     }
 }
 
@@ -71,10 +90,19 @@ enum Job {
     Fallback(usize),
 }
 
-pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
-    let map = mmap(path)?;
-    let archive = open(&map)?;
-    let file = File::open(path).at(path)?;
+pub(crate) fn extract(input: &Input, sink: &Sink, opts: &Options) -> Result<()> {
+    match &input.split {
+        None => {
+            let map = mmap(&input.first)?;
+            let file = File::open(&input.first).at(&input.first)?;
+            extract_from(Cursor::new(&map[..]), &|offset, buf| read_at(&file, offset, buf), sink, opts)
+        }
+        Some(parts) => extract_from(parts.clone(), &|offset, buf| parts.read_at(offset, buf), sink, opts),
+    }
+}
+
+fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt, sink: &Sink, opts: &Options) -> Result<()> {
+    let archive = open(reader)?;
 
     let mut jobs = Vec::with_capacity(archive.len());
     let mut total = 0;
@@ -118,13 +146,13 @@ pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
     let failure = Mutex::new(None);
     opts.pool()?.scope_fifo(|s| {
         for (_, job) in &jobs {
-            let (archive, failure, file, budget) = (&archive, &failure, &file, &budget);
+            let (archive, failure, budget) = (&archive, &failure, &budget);
             s.spawn_fifo(move |_| {
                 if failure.lock().unwrap().is_some() {
                     return;
                 }
                 let result = match job {
-                    Job::Fast(entry) => extract_fast(file, entry, sink, budget),
+                    Job::Fast(entry) => extract_fast(read_at, entry, sink, budget),
                     Job::Fallback(i) => extract_entry(archive.clone(), *i, password, sink),
                 };
                 if let Err(e) = result {
@@ -136,13 +164,13 @@ pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
     failure.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
-fn extract_fast(file: &File, e: &Plain, sink: &Sink, budget: &Budget) -> Result<()> {
+fn extract_fast(read_at: ReadAt, e: &Plain, sink: &Sink, budget: &Budget) -> Result<()> {
     sink.check()?;
     sink.start(&e.name);
     let _lease = budget.take(e.packed + if e.stored { 0 } else { e.size });
 
     let mut packed = vec![0u8; e.packed as usize];
-    read_at(file, e.data_start, &mut packed).map_err(|_| Error::Damaged(e.name.clone()))?;
+    read_at(e.data_start, &mut packed).map_err(|_| Error::Damaged(e.name.clone()))?;
     let data = if e.stored {
         packed
     } else {
@@ -165,7 +193,7 @@ fn extract_fast(file: &File, e: &Plain, sink: &Sink, budget: &Budget) -> Result<
     }
 }
 
-fn extract_entry(mut archive: ZipArchive<Cursor<&[u8]>>, i: usize, password: Option<&[u8]>, sink: &Sink) -> Result<()> {
+fn extract_entry<R: Read + Seek>(mut archive: ZipArchive<R>, i: usize, password: Option<&[u8]>, sink: &Sink) -> Result<()> {
     let mut f = match password {
         Some(pw) => archive.by_index_decrypt(i, pw)?,
         None => archive.by_index(i)?,
