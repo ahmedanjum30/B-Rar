@@ -130,6 +130,30 @@ pub struct Options {
     pub progress: Option<Arc<Progress>>,
     /// What to do when an extracted file already exists.
     pub on_conflict: ConflictPolicy,
+    /// Extract only these entries; `None` extracts everything.
+    pub selection: Option<Selection>,
+}
+
+/// Part of an archive to extract, as chosen in a file browser.
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    /// Archive paths of files and folders; a folder includes everything under it. Either
+    /// slash works.
+    pub items: Vec<String>,
+    /// Folder the paths are made relative to when writing (the folder being browsed), so
+    /// extracting `docs/a.txt` from inside `docs` writes `a.txt`. Empty keeps full paths.
+    pub base: String,
+}
+
+/// Archive paths compare with `/` separators, no leading slash and no leading `./` (common
+/// in tarballs), whichever the format uses.
+pub fn normalize_name(name: &str) -> String {
+    let name = name.replace('\\', "/");
+    let mut rest = name.trim_matches('/');
+    while let Some(r) = rest.strip_prefix("./") {
+        rest = r.trim_start_matches('/');
+    }
+    if rest == "." { String::new() } else { rest.to_owned() }
 }
 
 impl Options {
@@ -373,4 +397,19 @@ pub(crate) fn mmap(path: &Path) -> Result<memmap2::Mmap> {
     // SAFETY: the archive is opened read-only; if another process truncates it while we read,
     // the worst case is a crash, the same trade-off every mmap-based reader makes.
     unsafe { memmap2::Mmap::map(&file) }.at(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_name;
+
+    #[test]
+    fn names_normalize() {
+        assert_eq!(normalize_name(r"docs\sub\a.txt"), "docs/sub/a.txt");
+        assert_eq!(normalize_name("/docs/sub/"), "docs/sub");
+        assert_eq!(normalize_name("./docs/a.txt"), "docs/a.txt");
+        assert_eq!(normalize_name(".//./a"), "a");
+        assert_eq!(normalize_name("./"), "");
+        assert_eq!(normalize_name(".hidden/x"), ".hidden/x");
+    }
 }

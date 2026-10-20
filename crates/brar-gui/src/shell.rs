@@ -44,7 +44,8 @@ pub fn error_box(title: &str, message: &str) {
     }
 }
 
-pub fn open_folder(path: &Path) {
+/// Opens a folder in Explorer, or a file in its default app.
+pub fn open_path(path: &Path) {
     let path = wide(path);
     // SAFETY: NUL-terminated string that outlives the call.
     unsafe {

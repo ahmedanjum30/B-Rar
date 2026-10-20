@@ -82,10 +82,11 @@ enum Fail {
 const BIG_FILE: u64 = 64 << 20;
 
 fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
-    sink.set_total(archive.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum());
+    let picked: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| sink.selected(&e.name)).collect();
+    sink.set_total(picked.iter().filter(|e| !e.is_dir).map(|e| e.size).sum());
     let mut candidates = Vec::new();
     let mut retry = Vec::new();
-    for e in &archive.entries {
+    for e in picked {
         if e.is_dir {
             sink.dir(&e.name)?;
         } else if e.supported && e.packed.saturating_add(e.size) <= BUDGET {
@@ -200,7 +201,12 @@ fn extract_unrar(path: &Path, sink: &Sink, opts: &Options, only: Option<&HashSet
     let sizes: Vec<Option<u64>> = open(path, opts)
         .open_for_listing()?
         .enumerate()
-        .map(|(i, h)| h.map(|h| (wanted(i) && !h.is_directory() && !h.is_split_before()).then_some(h.unpacked_size)))
+        .map(|(i, h)| {
+            h.map(|h| {
+                let picked = wanted(i) && sink.selected(&h.filename.to_string_lossy());
+                (picked && !h.is_directory() && !h.is_split_before()).then_some(h.unpacked_size)
+            })
+        })
         .collect::<std::result::Result<_, _>>()?;
     if only.is_none() {
         sink.set_total(sizes.iter().flatten().sum());
@@ -224,11 +230,12 @@ fn extract_unrar(path: &Path, sink: &Sink, opts: &Options, only: Option<&HashSet
         // Floor the cost: each file also pays fixed open/close overhead.
         load[w] += sizes[i].unwrap_or(0).max(64 << 10);
     }
-    // Directories go to worker 0; they're just a mkdir.
+    // Directories go to worker 0; they're just a mkdir. Entries outside `only` keep owner 0
+    // too, so `wanted` must still filter: another decoder may be writing them right now.
     opts.pool()?.install(|| {
         (0..workers)
             .into_par_iter()
-            .try_for_each(|w| extract_where(path, sink, opts, |i| owner[i] == w))
+            .try_for_each(|w| extract_where(path, sink, opts, |i| wanted(i) && owner[i] == w))
     })
 }
 
@@ -248,6 +255,10 @@ fn extract_where(path: &Path, sink: &Sink, opts: &Options, keep: impl Fn(usize) 
             continue;
         }
         let name = entry.filename.to_string_lossy().into_owned();
+        if !sink.selected(&name) {
+            archive = header.skip()?;
+            continue;
+        }
         let size = entry.unpacked_size;
         let modified = mtime(entry);
         // RAR4 can't verify a password up front; a wrong one shows up as a CRC error.

@@ -39,13 +39,14 @@ const GUI_EXE: &str = "B-Rar-GUI.exe";
 
 #[derive(Clone, Copy)]
 enum Verb {
+    Open,
     Ask,
     ToFolder,
     Here,
     Test,
 }
 
-const VERBS: [Verb; 4] = [Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test];
+const VERBS: [Verb; 5] = [Verb::Open, Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test];
 
 /// The "B-Rar" entry; its submenu holds the verbs.
 #[implement(IExplorerCommand)]
@@ -131,6 +132,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
         let verb = self.0;
         guard(|| {
             let title = match verb {
+                Verb::Open => "Open in B-Rar".to_owned(),
                 Verb::Ask => "Extract files...".to_owned(),
                 Verb::ToFolder => match selected(&items).as_slice() {
                     [one] => format!("Extract to \"{}\\\"", folder_name(one)),
@@ -166,6 +168,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
             for archive in selected(&items) {
                 let mut cmd = Command::new(&gui);
                 match verb {
+                    Verb::Open => cmd.arg(&archive),
                     Verb::Ask => cmd.arg("x").arg(&archive).arg("--ask"),
                     Verb::ToFolder => cmd.arg("x").arg(&archive),
                     Verb::Here => cmd.arg("x").arg(&archive).arg("--here"),

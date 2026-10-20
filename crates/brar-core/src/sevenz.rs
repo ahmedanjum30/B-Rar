@@ -56,7 +56,16 @@ fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), sink: &Sink
     let password = password(opts);
     let archive = Archive::read(&mut new_reader(), &password)?;
 
-    sink.set_total(archive.files.iter().filter(|f| !f.is_directory).map(|f| f.size).sum());
+    let picked: Vec<bool> = archive.files.iter().map(|f| sink.selected(&f.name)).collect();
+    let total = archive.files.iter().zip(&picked).filter(|(f, p)| **p && !f.is_directory);
+    sink.set_total(total.map(|(f, _)| f.size).sum());
+    // Blocks holding no picked file aren't decoded at all.
+    let mut wanted = vec![false; archive.blocks.len()];
+    for (block, _) in archive.stream_map.file_block_index.iter().zip(&picked).filter(|(_, p)| **p) {
+        if let Some(b) = block {
+            wanted[*b] = true;
+        }
+    }
 
     // Directories and empty files have no data stream and belong to no block.
     for f in archive.files.iter().filter(|f| !f.has_stream && !f.is_anti_item) {
@@ -74,7 +83,7 @@ fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), sink: &Sink
 
     opts.pool()?.install(|| {
         // One block per task, so big blocks never queue behind each other on one thread.
-        (0..blocks).into_par_iter().with_max_len(1).try_for_each(|block| {
+        (0..blocks).into_par_iter().with_max_len(1).filter(|&b| wanted[b]).try_for_each(|block| {
             let encrypted = opts.password.is_some()
                 && archive.blocks[block]
                     .coders

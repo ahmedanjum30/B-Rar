@@ -104,6 +104,9 @@ pub(crate) fn extract(input: &Input, codec: Codec, sink: &Sink, opts: &Options) 
     for entry in archive.entries().at(path)? {
         let mut entry = entry.at(path)?;
         let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+        if !sink.selected(&name) {
+            continue; // the tar reader skips the unread data itself
+        }
         let kind = entry.header().entry_type();
         let modified = entry.header().mtime().ok().and_then(time::unix);
         if kind.is_dir() {

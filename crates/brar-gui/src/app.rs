@@ -22,9 +22,9 @@ use crate::{
     style::{self, Icon, palette, semibold},
 };
 
-const LOGO_PNG: &[u8] = include_bytes!("../../../assets/brar-256.png");
+pub const LOGO_PNG: &[u8] = include_bytes!("../../../assets/brar-256.png");
 
-pub fn run(archive: PathBuf, mode: Mode) -> ExitCode {
+pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("B-Rar")
         .with_inner_size(Page::Running.size())
@@ -41,7 +41,7 @@ pub fn run(archive: PathBuf, mode: Mode) -> ExitCode {
         options,
         Box::new(move |cc| {
             style::install(&cc.egui_ctx);
-            Ok(Box::new(App::new(&cc.egui_ctx, archive, mode, flag)))
+            Ok(Box::new(App::new(&cc.egui_ctx, archive, mode, flag, password)))
         }),
     );
     if let Err(e) = result {
@@ -152,7 +152,7 @@ struct App {
 }
 
 impl App {
-    fn new(ctx: &egui::Context, archive: PathBuf, mode: Mode, succeeded: Arc<AtomicBool>) -> Self {
+    fn new(ctx: &egui::Context, archive: PathBuf, mode: Mode, succeeded: Arc<AtomicBool>, password: Option<String>) -> Self {
         let logo = eframe::icon_data::from_png_bytes(LOGO_PNG)
             .map(|i| egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba))
             .unwrap_or_default();
@@ -173,13 +173,13 @@ impl App {
             focus_password: false,
             apply_to_all: false,
         };
-        app.start(ctx, None);
+        app.start(ctx, password);
         app
     }
 
     fn dest(&self) -> Option<&Path> {
         match &self.mode {
-            Mode::Extract { dest } => Some(dest),
+            Mode::Extract { dest, .. } => Some(dest),
             Mode::Test => None,
         }
     }
@@ -216,12 +216,16 @@ impl App {
             password,
             progress: Some(progress),
             on_conflict: ConflictPolicy::Ask(Arc::new(ask)),
+            selection: match &self.mode {
+                Mode::Extract { selection, .. } => selection.clone(),
+                Mode::Test => None,
+            },
             ..Options::default()
         };
         let (shared, ctx, archive, mode) = (Arc::clone(&self.shared), ctx.clone(), self.archive.clone(), self.mode.clone());
         self.worker = Some(std::thread::spawn(move || {
             let result = match &mode {
-                Mode::Extract { dest } => brar_core::extract(&archive, dest, &opts),
+                Mode::Extract { dest, .. } => brar_core::extract(&archive, dest, &opts),
                 Mode::Test => brar_core::test(&archive, &opts),
             };
             *shared.outcome.lock().unwrap() = Some(result);
@@ -523,7 +527,7 @@ impl App {
         buttons(ui, |ui| {
             if let Some(dest) = &dest {
                 if style::primary_button(ui, "Open folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                    shell::open_folder(dest);
+                    shell::open_path(dest);
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
                 if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -609,7 +613,7 @@ fn seconds(secs: f64) -> String {
     if secs < 60.0 { format!("{secs:.2} s") } else { clock(Duration::from_secs_f64(secs)) }
 }
 
-fn human(bytes: u64) -> String {
+pub fn human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;

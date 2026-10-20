@@ -19,7 +19,7 @@ use std::{
 };
 
 use crate::{
-    Conflict, ConflictPolicy, Error, IoContext, Options, Progress, Resolution, Result, Summary,
+    Conflict, ConflictPolicy, Error, IoContext, Options, Progress, Resolution, Result, Summary, normalize_name,
     path::safe_join,
 };
 
@@ -37,6 +37,24 @@ pub(crate) struct Sink {
     dest: Option<PathBuf>,
     writers: rayon::ThreadPool,
     shared: Arc<Shared>,
+    pick: Option<Pick>,
+}
+
+/// [`crate::Selection`], prepared for lookups.
+struct Pick {
+    items: std::collections::HashSet<String>,
+    base: String,
+}
+
+impl Pick {
+    /// The entry, or a folder it is in, was picked.
+    fn contains(&self, name: &str) -> bool {
+        let name = normalize_name(name);
+        if self.items.contains(&name) {
+            return true;
+        }
+        name.match_indices('/').any(|(at, _)| self.items.contains(&name[..at]))
+    }
 }
 
 struct Shared {
@@ -181,7 +199,16 @@ impl Sink {
                 skipped: AtomicU64::default(),
                 kept: AtomicU64::default(),
             }),
+            pick: opts.selection.as_ref().map(|s| Pick {
+                items: s.items.iter().map(|i| normalize_name(i)).filter(|i| !i.is_empty()).collect(),
+                base: normalize_name(&s.base),
+            }),
         })
+    }
+
+    /// Is `name` part of the selection? Everything is when there is no selection.
+    pub(crate) fn selected(&self, name: &str) -> bool {
+        self.pick.as_ref().is_none_or(|p| p.contains(name))
     }
 
     pub(crate) fn progress(&self) -> Option<&Arc<Progress>> {
@@ -207,8 +234,20 @@ impl Sink {
     }
 
     /// Resolves `name` under the destination; `None` in test mode.
+    /// With a selection, names are relative to its `base` folder, the one the user was looking at.
     pub(crate) fn target(&self, name: &str) -> Result<Option<PathBuf>> {
-        self.dest.as_deref().map(|d| safe_join(d, name)).transpose()
+        let Some(dest) = self.dest.as_deref() else { return Ok(None) };
+        match self.pick.as_ref().filter(|p| !p.base.is_empty()) {
+            None => safe_join(dest, name).map(Some),
+            Some(p) => {
+                let name = normalize_name(name);
+                match name.strip_prefix(p.base.as_str()) {
+                    Some("") => Ok(Some(dest.to_path_buf())),
+                    Some(rest) if rest.starts_with('/') => safe_join(dest, &rest[1..]).map(Some),
+                    _ => safe_join(dest, &name).map(Some),
+                }
+            }
+        }
     }
 
     /// For writers outside the sink (unRAR): where to write `path`, after the conflict
@@ -222,6 +261,9 @@ impl Sink {
 
     pub(crate) fn dir(&self, name: &str) -> Result<()> {
         self.check()?;
+        if !self.selected(name) {
+            return Ok(());
+        }
         if let Some(path) = self.target(name)? {
             fs::create_dir_all(&path).at(&path)?;
         }
@@ -249,6 +291,11 @@ impl Sink {
         reader: &mut dyn Read,
     ) -> Result<()> {
         self.check()?;
+        if !self.selected(name) {
+            // Not picked, but a sequential stream still has to get past it.
+            io::copy(reader, &mut io::sink())?;
+            return Ok(());
+        }
         self.start(name);
         let shared = &*self.shared;
         let Some(path) = self.target(name)? else {
@@ -271,6 +318,9 @@ impl Sink {
     /// writes (a single huge write measured 3-5x slower on Windows).
     pub(crate) fn file_bytes(&self, name: &str, mtime: Option<SystemTime>, data: &[u8]) -> Result<()> {
         self.check()?;
+        if !self.selected(name) {
+            return Ok(());
+        }
         self.start(name);
         let shared = &*self.shared;
         let len = data.len() as u64;
@@ -302,7 +352,7 @@ impl Sink {
         mtime: Option<SystemTime>,
         reader: &mut dyn Read,
     ) -> Result<()> {
-        if self.dest.is_none() || size > SMALL_FILE {
+        if self.dest.is_none() || size > SMALL_FILE || !self.selected(name) {
             return self.file(name, Some(size), mtime, reader);
         }
         let mut data = Vec::with_capacity(size as usize);
@@ -322,6 +372,9 @@ impl Sink {
 
     fn write_owned(&self, name: &str, mtime: Option<SystemTime>, data: Vec<u8>, report: bool) -> Result<()> {
         self.check()?;
+        if !self.selected(name) {
+            return Ok(());
+        }
         self.start(name);
         let len = data.len() as u64;
         let Some(path) = self.target(name)? else {

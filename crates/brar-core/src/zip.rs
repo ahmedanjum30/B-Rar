@@ -110,6 +110,9 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
         let mut archive = archive.clone();
         for i in 0..archive.len() {
             let f = archive.by_index_raw(i)?;
+            if !sink.selected(&f.name()?) {
+                continue;
+            }
             if f.is_dir() {
                 sink.dir(&f.name()?)?;
                 continue;

@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Resolution, Summary};
+use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Resolution, Selection, Summary};
 use clap::{Args, Parser, Subcommand};
 
 /// B-Rar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2).
@@ -24,6 +24,11 @@ enum Command {
     #[command(visible_alias = "x")]
     Extract {
         archive: PathBuf,
+        /// Only these files or folders (archive paths) [default: everything].
+        files: Vec<String>,
+        /// Write the picked entries relative to this archive folder, not with full paths.
+        #[arg(long, value_name = "FOLDER", requires = "files")]
+        from: Option<String>,
         /// Output directory [default: a folder named after the archive].
         #[arg(short, long, conflicts_with = "here")]
         output: Option<PathBuf>,
@@ -112,13 +117,16 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Extract { archive, output, here, overwrite, skip_existing, rename_existing, common } => {
+        Command::Extract { archive, files, from, output, here, overwrite, skip_existing, rename_existing, common } => {
             let dest = match (output, here) {
                 (Some(dir), _) => dir,
                 (None, true) => archive_dir(&archive),
                 (None, false) => brar_core::suggested_dir(&archive),
             };
             let mut opts = common.options();
+            if !files.is_empty() {
+                opts.selection = Some(Selection { items: files, base: from.unwrap_or_default() });
+            }
             opts.on_conflict = match (overwrite, skip_existing, rename_existing) {
                 (true, _, _) => ConflictPolicy::Always(Resolution::Overwrite),
                 (_, true, _) => ConflictPolicy::Always(Resolution::Skip),

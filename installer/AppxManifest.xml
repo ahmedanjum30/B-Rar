@@ -43,6 +43,30 @@
           </uap3:AppExecutionAlias>
         </uap3:Extension>
 
+        <!-- "Open with > B-Rar": browse the archive. It doesn't take over the default app. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="archive">
+            <uap:DisplayName>Archive</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.zip</uap:FileType>
+              <uap:FileType>.7z</uap:FileType>
+              <uap:FileType>.rar</uap:FileType>
+              <uap:FileType>.tar</uap:FileType>
+              <uap:FileType>.gz</uap:FileType>
+              <uap:FileType>.tgz</uap:FileType>
+              <uap:FileType>.xz</uap:FileType>
+              <uap:FileType>.txz</uap:FileType>
+              <uap:FileType>.zst</uap:FileType>
+              <uap:FileType>.tzst</uap:FileType>
+              <uap:FileType>.bz2</uap:FileType>
+              <uap:FileType>.tbz</uap:FileType>
+              <uap:FileType>.tbz2</uap:FileType>
+              <uap:FileType>.001</uap:FileType>
+              <uap:FileType>.r00</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+
         <!-- The Windows 11 short right-click menu, served by B-Rar-Shell.dll. -->
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
