@@ -18,6 +18,31 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-20: single core, 1.1 GB ZIP (Deflate)
+
+**Archive:** `Italian.zip` (see the ZIP section below). **Method:** each tool pinned to one core
+with process affinity (mask verified as 1), plus its own single-thread switch where it has one
+(`-mt1` WinRAR, `-mmt=1` 7-Zip, `-t 1` B-Rar; tar is single-threaded). Order WinRAR → 7-Zip → tar
+→ B-Rar; 20 s pauses, except 10 s before B-Rar (the user's new default for future runs). B-Rar
+includes the ZIP fixes from commit 6817553.
+
+| # | Tool | Start → end | Time | Speed |
+|---|---|---|---|---|
+| 1 | WinRAR.exe `-mt1` | 22:41:56 → 22:42:04 | 8.14 s | 154 MiB/s |
+| 2 | 7-Zip `-mmt=1` | 22:42:34 → 22:42:43 | 8.17 s | 153 MiB/s |
+| 3 | **Windows tar** | 22:43:11 → 22:43:15 | **4.08 s** | **307 MiB/s** |
+| 4 | B-Rar `-t 1` | 22:43:35 → 22:43:41 | 5.69 s | 220 MiB/s |
+
+On one core: **B-Rar is 1.43× faster than WinRAR and 7-Zip, but 1.39× slower than tar.** All exited
+0; output identical (0 SHA-256 mismatches).
+
+Reading: with one core there's no parallelism, so this is pure per-core Deflate speed plus file
+writing. tar's Chromium zlib decodes faster per core than zlib-rs (~316 MB/s on its own in the
+standalone test). libdeflate (441 MB/s in that test) would likely close most of this gap, and it
+would also make the multi-core result faster still.
+
+---
+
 ## 2026-10-20: 1.1 GB ZIP (Deflate), single runs, 20 s apart
 
 **Archive:** `Italian.zip` from Downloads (C:), made by the user. 1.1 GB, Deflate (79 entries,
