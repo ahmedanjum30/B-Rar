@@ -18,6 +18,30 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21: 7z, all cores vs one core: WinRAR, 7-Zip, tar, B-Rar
+
+**Archive:** `Italian-GameDrive.7z` (1.04 GB, LZMA2:25, solid, 1 block, 79 files, 1.22 GiB).
+**Method:** single runs, 5 s pauses, B-Rar last in each group; all cores (01:05–01:07), then one
+core with process affinity (01:07–01:10). UnRAR can't open 7z.
+
+| Tool | All cores | One core |
+|---|---|---|
+| WinRAR.exe | 5.10 s | 24.20 s |
+| **7-Zip 26.04** | **4.13 s** | **23.11 s** |
+| Windows tar | 43.96 s | 47.40 s |
+| B-Rar | 6.31 s | 35.24 s |
+
+All eight outputs identical (0 SHA-256 mismatches).
+
+- **7-Zip fastest in both modes.** B-Rar is 1.53× slower on all cores and 1.52× slower on one core:
+  the same ratio both ways, which points squarely at the decoder (pure-Rust `lzma-rust2` vs 7-Zip's
+  LZMA), not at parallelism or I/O.
+- WinRAR's 7z decoder is close to 7-Zip's (5% slower on one core).
+- Windows tar (libarchive) is ~10× slower than everyone else on 7z.
+- Fix: decode LZMA/LZMA2 with the 7-Zip LZMA SDK (see the 7z section below).
+
+---
+
 ## 2026-10-21: RAR, all cores vs one core: WinRAR, UnRAR, 7-Zip, B-Rar
 
 **Archive:** `italian-repack.rar` (1.1 GB, RAR5 `-m5 -md32m`, not solid, 79 files, 1.22 GiB).
