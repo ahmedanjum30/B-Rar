@@ -1,7 +1,8 @@
-# Renders assets\brar.ico (16-256 px, PNG-compressed entries). Re-run after changing the design.
+# Renders brar's icon: assets\brar.ico (16-256 px, PNG-compressed entries), assets\brar-256.png
+# and the MSIX logos in assets\msix. Re-run after changing the design.
 Add-Type -AssemblyName System.Drawing
-$sizes = 16, 20, 24, 32, 40, 48, 64, 256
-$pngs = foreach ($s in $sizes) {
+
+function Render([int] $s) {
     $bmp = New-Object Drawing.Bitmap $s, $s
     $g = [Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAliasGridFit'; $g.InterpolationMode = 'HighQualityBicubic'
@@ -20,6 +21,10 @@ $pngs = foreach ($s in $sizes) {
     $ms = New-Object IO.MemoryStream; $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
     , $ms.ToArray()
 }
+
+# Windows .ico
+$sizes = 16, 20, 24, 32, 40, 48, 64, 256
+$pngs = foreach ($s in $sizes) { Render $s }
 $out = New-Object IO.MemoryStream; $bw = New-Object IO.BinaryWriter $out
 $bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]$sizes.Count)
 $offset = 6 + 16 * $sizes.Count
@@ -32,3 +37,14 @@ for ($i = 0; $i -lt $sizes.Count; $i++) {
 foreach ($p in $pngs) { $bw.Write($p) }
 [IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'brar.ico'), $out.ToArray())
 [IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'brar-256.png'), $pngs[-1])
+
+# MSIX logos. "targetsize" variants are used for the taskbar, Settings and file lists;
+# "altform-unplated" ones are drawn without a colored plate behind them.
+$msix = Join-Path $PSScriptRoot 'msix'
+New-Item -ItemType Directory -Force $msix | Out-Null
+$logos = @{ 'Square44x44Logo.png' = 44; 'Square150x150Logo.png' = 150; 'StoreLogo.png' = 50 }
+foreach ($t in 16, 24, 32, 48, 256) {
+    $logos["Square44x44Logo.targetsize-$t.png"] = $t
+    $logos["Square44x44Logo.targetsize-${t}_altform-unplated.png"] = $t
+}
+foreach ($name in $logos.Keys) { [IO.File]::WriteAllBytes((Join-Path $msix $name), (Render $logos[$name])) }
