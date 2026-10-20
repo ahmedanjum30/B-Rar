@@ -18,6 +18,37 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-20: 1.1 GB ZIP (Deflate), single runs, 20 s apart
+
+**Archive:** `Italian.zip` from Downloads (C:), made by the user. 1.1 GB, Deflate (79 entries,
+plus 3 stored folders), unpacks to 1.22 GiB in 79 files. Poorly compressible game data (~90%
+ratio); two files of 545 MB and 519 MB are 85% of the data.
+
+**Method:** one run per tool, WinRAR → 7-Zip → Windows tar → B-Rar, 20 s apart, extracting to
+`E:\bench-zip-<tool>`. (UnRAR can't open ZIP, so Windows' built-in `tar.exe` took its place.)
+
+| # | Tool | Start → end | Time | Speed |
+|---|---|---|---|---|
+| 1 | WinRAR.exe | 22:22:45 → 22:22:52 | 7.09 s | 177 MiB/s |
+| 2 | 7-Zip 26.04 (`-mmt=on`) | 22:23:19 → 22:23:27 | 7.26 s | 173 MiB/s |
+| 3 | **Windows tar** (bsdtar 3.8.8, Chromium zlib) | 22:23:53 → 22:23:57 | **3.82 s** | **328 MiB/s** |
+| 4 | B-Rar | 22:24:24 → 22:24:28 | 4.71 s | 266 MiB/s |
+
+**B-Rar: 1.5× faster than WinRAR and 7-Zip, but 1.23× slower than Windows tar.** All exited 0;
+output identical across all four (0 SHA-256 mismatches).
+
+Why (B-Rar `t`: 3.44 s wall, 3.84 s CPU, about 1.1 cores busy; 7-Zip `t`: 6.77 s, 1.0 core): with
+85% of the data in two files, parallel decoding can't help much, so single-stream Deflate speed
+decides. B-Rar's `zlib-rs` (with runtime CPU detection on) manages ~160 MB/s on the 545 MB file
+versus tar's ~330 MB/s overall: Chromium's zlib has SIMD fast paths for literal-heavy streams
+like this one.
+
+**Next step:** decode ZIP entries with libdeflate (the fastest Deflate decoder; whole-buffer
+API fits ZIP, since sizes are known up front), decompressing straight into a memory-mapped
+output file. Then re-run.
+
+---
+
 ## 2026-10-20: single core, 1.1 GB RAR5, WinRAR vs UnRAR vs B-Rar
 
 **Archive:** `italian-repack.rar` (1.1 GB, RAR5 `-m5 -md32m`, 79 files, 1.22 GiB unpacked).
@@ -132,7 +163,7 @@ floor is the time to decode the 545 MB file.
 
 ## Not benchmarked yet
 
-ZIP and tar.* have not been benchmarked against 7-Zip yet. `benches/compare.ps1` builds archives from a corpus folder and compares B-Rar,
+tar.* has not been benchmarked yet. `benches/compare.ps1` builds archives from a corpus folder and compares B-Rar,
 WinRAR and bsdtar.
 
 ## Incident: archive damaged on disk
