@@ -18,6 +18,27 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21: ZIP, all cores vs one core: WinRAR, 7-Zip, B-Rar
+
+**Archive:** `Italian.zip` (1.1 GB Deflate, 79 files, 1.22 GiB). **Method:** single runs, 10 s
+pauses, B-Rar last in each group; all cores first (00:48–00:49), then one core with process
+affinity (00:49–00:50). B-Rar includes the libdeflate fast path (406d4c7).
+
+| Tool | All cores | One core |
+|---|---|---|
+| WinRAR.exe | 7.18 s | 8.11 s |
+| 7-Zip 26.04 | 7.32 s | 8.01 s |
+| **B-Rar** | **2.37 s** | **4.12 s** |
+| B-Rar advantage | **3.0× / 3.1×** | **1.97× / 1.94×** |
+
+(Windows tar for reference: one core 4.37 s median on 2026-10-21; all cores 3.82 s on 2026-10-20.)
+
+All six outputs identical (0 SHA-256 mismatches). WinRAR and 7-Zip gain only ~12% from 16
+threads because they extract ZIP entries one at a time; B-Rar decodes entries in parallel, so the
+gap widens from ~2× on one core to ~3× on all cores.
+
+---
+
 ## 2026-10-21: single core, ZIP, with libdeflate: B-Rar beats tar
 
 Same archive (`Italian.zip`, 1.1 GB Deflate, 79 files), both pinned to one core, 10 s pauses,
