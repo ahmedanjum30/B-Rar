@@ -78,19 +78,32 @@ enum Fail {
     Stop(Error),
 }
 
+/// Files at least this big may go to unRAR's multithreaded decoder (see [`extract_rar5`]).
+const BIG_FILE: u64 = 64 << 20;
+
 fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
     sink.set_total(archive.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum());
-    let mut fast = Vec::new();
+    let mut candidates = Vec::new();
     let mut retry = Vec::new();
     for e in &archive.entries {
         if e.is_dir {
             sink.dir(&e.name)?;
         } else if e.supported && e.packed.saturating_add(e.size) <= BUDGET {
-            fast.push(e);
+            candidates.push(e);
         } else {
             retry.push(e.index);
         }
     }
+
+    // Per file, the faster decoder: B-Rar's own decodes one file per thread and beats unRAR per
+    // core; unRAR splits a single file across threads. So a file that alone outweighs its fair
+    // share of the work (and is big) goes to unRAR, everything else to B-Rar's decoder, both at
+    // once. On one core B-Rar's decoder takes everything.
+    let threads = opts.thread_count() as u64;
+    let work: u64 = candidates.iter().map(|e| e.size).sum();
+    let cut = if threads > 1 { (work / threads).max(BIG_FILE) } else { u64::MAX };
+    let (big, mut fast): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|e| e.size >= cut);
+    let big: HashSet<usize> = big.iter().map(|e| e.index).collect();
     // Biggest first, one FIFO job each (see zip.rs for why not a parallel iterator).
     fast.sort_unstable_by_key(|e| Reverse(e.packed));
 
@@ -98,32 +111,38 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     let budget = Budget::new(BUDGET);
     let failed = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
-    opts.pool()?.scope_fifo(|s| {
-        for e in &fast {
-            let (file, budget, failed, stop) = (&file, &budget, &failed, &stop);
-            s.spawn_fifo(move |_| {
-                if stop.lock().unwrap().is_some() {
-                    return;
-                }
-                match extract_fast(file, e, sink, budget) {
-                    Ok(()) => {}
-                    Err(Fail::Retry) => failed.lock().unwrap().push(e.index),
-                    Err(Fail::Stop(err)) => {
-                        stop.lock().unwrap().get_or_insert(err);
+    let big_result = std::thread::scope(|scope| -> Result<Result<()>> {
+        let big_job = (!big.is_empty()).then(|| scope.spawn(|| extract_unrar(path, sink, opts, Some(&big))));
+        opts.pool()?.scope_fifo(|s| {
+            for e in &fast {
+                let (file, budget, failed, stop) = (&file, &budget, &failed, &stop);
+                s.spawn_fifo(move |_| {
+                    if stop.lock().unwrap().is_some() {
+                        return;
                     }
-                }
-            });
-        }
-    });
+                    match extract_fast(file, e, sink, budget) {
+                        Ok(()) => {}
+                        Err(Fail::Retry) => failed.lock().unwrap().push(e.index),
+                        Err(Fail::Stop(err)) => {
+                            stop.lock().unwrap().get_or_insert(err);
+                        }
+                    }
+                });
+            }
+        });
+        Ok(big_job.map_or(Ok(()), |job| job.join().expect("unRAR thread panicked")))
+    })?;
     if let Some(err) = stop.into_inner().unwrap() {
         return Err(err);
     }
+    big_result?;
     let failed = failed.into_inner().unwrap();
     // BRAR_STATS=1: how many files each decoder handled (to catch silent fallbacks in tests).
     if std::env::var_os("BRAR_STATS").is_some() {
         eprintln!(
-            "rar5: {} files by B-Rar's decoder, {} failed its check, {} not supported -> unRAR",
+            "rar5: {} files by B-Rar's decoder, {} big files by unRAR (multithreaded), {} failed the check, {} not supported -> unRAR",
             fast.len() - failed.len(),
+            big.len(),
             failed.len(),
             retry.len()
         );
