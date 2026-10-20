@@ -40,6 +40,17 @@ Re-check at 23:11–23:13 (same code as pushed in 280fe97, same method):
 B-Rar 7% behind, consistent with the first series. B-Rar won one pair (4.85 vs 5.12 s); runs vary by
 about ±10% on this machine, so pairs alone aren't conclusive.
 
+Re-check at 23:26–23:28 on a quieter machine (the user closed other tasks; same code and method):
+
+| Tool | Median | Runs |
+|---|---|---|
+| Windows tar | **4.17 s** | 4.28, 4.14, 4.17 |
+| B-Rar | 4.58 s | 4.58, 4.72, 4.55 |
+
+**B-Rar 10% behind tar**, and tar won all three pairs. With less background noise the runs are
+tight (±2%), so this is the most reliable single-core figure so far: the decode-speed gap
+(Chromium zlib vs zlib-rs) is real. Output identical.
+
 What changed: profiling showed B-Rar made **144,604 write calls** for 1.22 GB (8.9 KB each,
 exactly what the Deflate reader hands back per read), costing 1.45 s. B-Rar now fills its 1 MiB
 buffer before each write: **1,313 calls, 0.48 s.**
