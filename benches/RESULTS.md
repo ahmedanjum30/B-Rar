@@ -30,6 +30,16 @@ Same archive (`Italian.zip`), both pinned to one core, 10 s pauses, 3 alternatin
 **B-Rar is now 6% behind tar on one core (was 39%).** Output identical. (Both ran slower than
 in the earlier session; the machine was slower overall, so compare the ratio, not the times.)
 
+Re-check at 23:11–23:13 (same code as pushed in 280fe97, same method):
+
+| Tool | Median | Runs |
+|---|---|---|
+| Windows tar | **5.12 s** | 5.26, 5.12, 4.45 |
+| B-Rar | 5.47 s | 5.47, 4.85, 5.68 |
+
+B-Rar 7% behind, consistent with the first series. B-Rar won one pair (4.85 vs 5.12 s); runs vary by
+about ±10% on this machine, so pairs alone aren't conclusive.
+
 What changed: profiling showed B-Rar made **144,604 write calls** for 1.22 GB (8.9 KB each,
 exactly what the Deflate reader hands back per read), costing 1.45 s. B-Rar now fills its 1 MiB
 buffer before each write: **1,313 calls, 0.48 s.**
