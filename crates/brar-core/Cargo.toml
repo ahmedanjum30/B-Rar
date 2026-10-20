@@ -8,8 +8,10 @@ license.workspace = true
 
 [dependencies]
 bzip2 = "0.6.1"
+crc32fast = "1.5.3"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 jiff = "0.2"
+libdeflater = "1.26.1"
 liblzma = { version = "0.4.9", default-features = false, features = ["parallel", "static"] }
 memmap2 = "0.9.11"
 rayon = "1.12.0"

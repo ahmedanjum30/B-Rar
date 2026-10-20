@@ -267,6 +267,32 @@ impl Sink {
         Ok(())
     }
 
+    /// Writes an entry already fully decoded in memory, on the calling thread, in 1 MiB
+    /// writes (a single huge write measured 3-5x slower on Windows).
+    pub(crate) fn file_bytes(&self, name: &str, mtime: Option<SystemTime>, data: &[u8]) -> Result<()> {
+        self.check()?;
+        self.start(name);
+        let shared = &*self.shared;
+        let len = data.len() as u64;
+        let Some(path) = self.target(name)? else {
+            shared.advance(len);
+            shared.record_file(len);
+            return Ok(());
+        };
+        let Some(mut file) = shared.open(&path, Some(len), mtime)? else {
+            shared.advance(len);
+            return Ok(());
+        };
+        for chunk in data.chunks(COPY_BUF) {
+            file.write_all(chunk).at(&path)?;
+            shared.advance(chunk.len() as u64);
+            shared.check_running()?;
+        }
+        set_mtime(&file, mtime);
+        shared.record_file(len);
+        Ok(())
+    }
+
     /// Like [`Sink::file`], but small files are read into memory here and written on the
     /// writer pool, so a sequential decoder never waits on file creation.
     pub(crate) fn file_buffered(

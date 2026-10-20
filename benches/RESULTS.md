@@ -18,6 +18,39 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21: single core, ZIP, with libdeflate: B-Rar beats tar
+
+Same archive (`Italian.zip`, 1.1 GB Deflate, 79 files), both pinned to one core, 10 s pauses,
+3 alternating pairs, median.
+
+| Tool | Median | Runs |
+|---|---|---|
+| **B-Rar** | **3.81 s** | 3.81, 3.84, 3.72 |
+| Windows tar | 4.37 s | 4.56, 4.37, 4.30 |
+
+**B-Rar is now 1.15× faster than tar on one core** (was 10% slower), winning all three pairs.
+Output identical (0 SHA-256 mismatches); names, sizes and mtimes match WinRAR's output.
+
+What changed: a fast path for plain Deflate and stored entries. A standalone single-core test on
+the 545 MB entry found three costs in the old path (2.36 s total):
+
+| Variant (545 MB entry, one core) | Time | MB/s |
+|---|---|---|
+| zip crate reader over a memory map (old B-Rar) | 2.36 s | 231 |
+| zip crate reader over a heap copy | 1.86 s | 293 |
+| zlib-rs directly | 1.70 s | 320 |
+| **libdeflate, one call, heap input** (new B-Rar) | **1.33 s** | **409** |
+
+So: page faults on the memory-mapped archive 0.5 s, the zip crate's reader layers 0.16 s, and
+zlib-rs vs libdeflate 0.37 s. The fast path reads each entry with positioned reads, decodes it in
+one libdeflate 1.26 call, checks the CRC, and writes in 1 MiB blocks; a 2 GiB budget caps memory.
+Encrypted entries and other methods (Deflate64, bzip2, LZMA, zstd) still use the zip crate.
+
+All cores, same archive, single run: **1.94 s** (was 2.73 s; tar 3.82 s, WinRAR 7.09 s, 7-Zip
+7.26 s in the earlier session).
+
+---
+
 ## 2026-10-20: single core, ZIP, after the write fix: tar vs B-Rar
 
 Same archive (`Italian.zip`), both pinned to one core, 10 s pauses, 3 alternating pairs, median.
