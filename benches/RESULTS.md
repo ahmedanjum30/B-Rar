@@ -18,6 +18,34 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21: RAR, all cores vs one core: WinRAR, UnRAR, 7-Zip, B-Rar
+
+**Archive:** `italian-repack.rar` (1.1 GB, RAR5 `-m5 -md32m`, not solid, 79 files, 1.22 GiB).
+**Method:** single runs, **5 s pauses** (the user's new default), B-Rar last in each group; all
+cores (00:52–00:53), then one core with process affinity (00:53–00:55).
+
+| Tool | All cores | One core |
+|---|---|---|
+| WinRAR.exe | 4.08 s | 13.13 s |
+| UnRAR.exe | 3.57 s | 12.08 s |
+| 7-Zip 26.04 | 7.60 s | **8.37 s** |
+| **B-Rar** | **2.04 s** | 12.28 s |
+
+All eight outputs identical (0 SHA-256 mismatches).
+
+- **All cores: B-Rar fastest**, 1.75× faster than UnRAR, 2.0× faster than WinRAR, 3.7× faster
+  than 7-Zip.
+- **One core: 7-Zip fastest**, 1.47× faster than B-Rar. B-Rar ties UnRAR, since both run the
+  official unRAR decoder.
+- Correction to earlier notes: 7-Zip's own RAR5 decoder is *faster per core* than unRAR's (8.37 s
+  vs 12.08 s). 7-Zip is slow on all cores only because it decodes RAR on one thread (7.60 s vs
+  8.37 s), whereas unRAR multithreads RAR5 internally (WinRAR 13.13 s → 4.08 s) and B-Rar adds
+  file-level parallelism on top.
+- To win on one core too, B-Rar needs a faster RAR decoder than unRAR's (e.g. 7-Zip's Rar5Decoder,
+  licensed LGPL with the unRAR restriction).
+
+---
+
 ## 2026-10-21: ZIP, all cores vs one core: WinRAR, 7-Zip, B-Rar
 
 **Archive:** `Italian.zip` (1.1 GB Deflate, 79 files, 1.22 GiB). **Method:** single runs, 10 s
