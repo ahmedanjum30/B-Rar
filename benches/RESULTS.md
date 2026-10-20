@@ -18,6 +18,39 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21 (04:16): full matrix, every format, all cores vs one core
+
+After the RAR per-file fix (commit 9768fa7). One run per cell, 5 s apart, competitors first and
+B-Rar last. "One core" = the tool started with `start /affinity 1` (plus `-mt1` / `-mmt=1` /
+`-t 1`). Every run's output was counted (files and bytes) to catch partial extractions. Idle PC.
+
+| Archive | Mode | B-Rar | WinRAR | UnRAR | 7-Zip | Windows tar | Winner |
+|---|---|---|---|---|---|---|---|
+| ZIP 1.2 GB (79 files) | all cores | **3.03 s** | 7.09 s | — | 8.08 s | 4.05 s | B-Rar, 1.3× over tar |
+| | one core | **3.69 s** | 6.75 s | — | 7.74 s | 4.05 s | B-Rar, 1.1× over tar |
+| RAR5 1.1 GB (79 files) | all cores | **2.01 s** | 4.04 s | 4.05 s | 8.09 s | 15.13 s | B-Rar, 2.0× over WinRAR |
+| | one core | **6.41 s** | 11.86 s | 11.33 s | 7.75 s | 15.27 s | B-Rar, 1.2× over 7-Zip |
+| 7z 1.04 GB (LZMA2, 79 files) | all cores | 7.04 s | 5.05 s | — | **5.04 s** | 44.39 s | 7-Zip, 1.4× over B-Rar |
+| | one core | 32.66 s | 22.09 s | — | **21.68 s** | 45.30 s | 7-Zip, 1.5× over B-Rar |
+| ZIP, 47k small files | all cores | **7.04 s** | 26.26 s | — | 27.22 s | 17.13 s ✗ | B-Rar, 3.7× over WinRAR |
+| | one core | **13.82 s** | 26.94 s | — | 27.13 s | 17.05 s ✗ | B-Rar, 1.9× over WinRAR |
+| RAR5, 48k small files | all cores | **7.08 s** | 28.24 s | 27.20 s | 24.22 s | 26.26 s ✗ | B-Rar, 3.4× over 7-Zip |
+| | one core | **15.63 s** | 27.74 s | 26.30 s | 23.75 s | 27.13 s ✗ | B-Rar, 1.5× over 7-Zip |
+| tar.gz, 47k small files | all cores | **6.06 s** | 24.22 s | — | n/a † | 17.12 s | B-Rar, 2.8× over tar |
+| | one core | **12.73 s** | 24.39 s | — | n/a † | 17.38 s | B-Rar, 1.4× over tar |
+
+- ✗ Windows tar failed: it stopped on one file with a non-ASCII name and wrote 47,013 of 47,014
+  (ZIP) / 48,350 of 48,351 (RAR) files. Its time is for an incomplete extraction.
+- † 7-Zip only removes the gzip layer in one pass (writes `c.tar`, 3.8-4.0 s); unpacking the
+  files needs a second run, so it isn't comparable.
+- B-Rar's ZIP time was 2.37 s in the run below; 3.03 s here is run-to-run noise on one sample.
+- The "many small files are slow" result from earlier today (about 55 s for 48k files) was taken
+  while a game was running. On an idle PC B-Rar is the fastest by 3-4×.
+- Where B-Rar loses: 7z (LZMA decoding, lzma-rust2), and bzip2 (single-threaded, not in this
+  table: 15.6 s for a 1 GB tar.bz2 in the end-to-end run).
+
+---
+
 ## 2026-10-21: why 7-Zip is faster on RAR (one core), and a many-files bug
 
 Decode-only (`t`), one core (affinity 1), CPU seconds:
