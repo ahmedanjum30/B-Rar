@@ -18,6 +18,40 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-22 (02:08): full RAR benchmark, idle PC, Defender off and on
+
+Every RAR5 archive in bench-data, all cores, best of 2, 5 s apart, competitors first.
+"B-Rar (installed)" is the MSIX package installed from this build (7ab90db); "unpackaged" is
+the same binary run from `target\release`. Password `secret` where encrypted.
+
+**Defender real-time protection off:**
+
+| Archive | WinRAR | UnRAR | 7-Zip | B-Rar unpackaged | B-Rar installed |
+|---|---|---|---|---|---|
+| one 545 MB file | 2.02 s | 1.56 s | 3.13 s | **0.45 s** | 0.50 s |
+| 1.1 GB, 2 big + 77 files | 4.04 s | 3.37 s | 7.58 s | **0.80 s** | 0.88 s |
+| solid 1 GB game | 4.04 s | 3.35 s | 7.21 s | **1.02 s** | **1.02 s** |
+| solid 48k source files | 29.21 s | 27.78 s | 24.04 s | 6.60 s | **6.57 s** |
+| solid 1 GB game, 256 MB dictionary | 5.04 s | 3.80 s | 7.45 s | **1.14 s** | 1.16 s |
+| encrypted 545 MB file | 3.03 s | 1.87 s | 3.22 s | **0.48 s** | 0.58 s |
+| encrypted headers, solid 1 GB, 4 volumes | 5.03 s | 4.13 s | 7.67 s | **1.08 s** | 1.12 s |
+| encrypted 1.1 GB, 12 volumes | 5.02 s | 4.27 s | 8.04 s | **0.91 s** | 1.05 s |
+
+**Defender real-time protection on** (the first four archives; Defender was switched off
+during the fifth):
+
+| Archive | WinRAR | UnRAR | 7-Zip | B-Rar unpackaged | B-Rar installed |
+|---|---|---|---|---|---|
+| one 545 MB file | 2.02 s | 1.59 s | 3.14 s | **0.46 s** | 0.54 s |
+| 1.1 GB, 2 big + 77 files | 4.03 s | 3.52 s | 7.61 s | 0.94 s | **0.87 s** |
+| solid 1 GB game | 4.02 s | 3.36 s | 7.24 s | 1.11 s | **1.08 s** |
+| solid 48k source files | 31.17 s | 28.77 s | 25.50 s | 50.44 s | **8.85 s** |
+
+With Defender on, an unpackaged process creating files from 16 threads at once is slowed
+dramatically (a plain test program: 5 s -> 53 s for these 48k files), while the one-at-a-time
+writers (WinRAR, UnRAR, 7-Zip) lose only ~5%, and the installed package is barely affected.
+So the portable (unpackaged) B-Rar needs fewer writer threads when Defender is on; see the
+next entry. (The 28.6 GB archive was no longer on disk, so it wasn't re-run.)
 ## 2026-10-22 (00:30): phase B profiled; header scan alongside decoding
 
 A sampling profile of phase B (`rar5_profile` with `BRAR_PROFILE_ENGINE=1`) put 39% of its

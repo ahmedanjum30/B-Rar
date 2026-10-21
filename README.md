@@ -32,8 +32,8 @@ One run per tool on the same PC (16 threads, NVMe SSD), extracting to the same d
 | Archive | B-Rar | WinRAR | 7-Zip | Windows tar |
 |---|---|---|---|---|
 | ZIP, 1.2 GB | **3.0 s** | 7.1 s | 8.1 s | 4.1 s |
-| RAR5, 1.1 GB | **2.0 s** | 4.0 s | 8.1 s | 15.1 s |
-| RAR5, 48,000 small files | **7.1 s** | 28.2 s | 24.2 s | 26.3 s ¹ |
+| RAR5, 1.1 GB | **0.8 s** | 4.0 s | 7.6 s | 15.1 s |
+| RAR5, 48,000 small files | **6.6 s** | 29.2 s | 24.0 s | 26.3 s ¹ |
 | ZIP, 47,000 small files | **7.0 s** | 26.3 s | 27.2 s | 17.1 s ¹ |
 | tar.gz, 47,000 small files | **6.1 s** | 24.2 s | n/a | 17.1 s |
 | 7z (LZMA2), 1.0 GB | 7.0 s | 5.1 s | **5.0 s** | 44.4 s |
