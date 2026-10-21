@@ -251,6 +251,7 @@ dependencies = [
  "eframe",
  "embed-resource",
  "jiff",
+ "raw-window-handle",
  "windows",
 ]
 

@@ -27,7 +27,7 @@ pub const LOGO_PNG: &[u8] = include_bytes!("../../../assets/brar-256.png");
 pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("B-Rar")
-        .with_inner_size(Page::Running.size())
+        .with_inner_size(vec2(Page::Running.width(), 220.0))
         .with_resizable(false)
         .with_maximize_button(false);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
@@ -78,23 +78,12 @@ enum Page {
 }
 
 impl Page {
-    fn size(&self) -> Vec2 {
+    /// Window width; the height follows the content.
+    fn width(&self) -> f32 {
         match self {
-            Page::Running => vec2(520.0, 214.0),
-            Page::Conflict(_) => vec2(540.0, 274.0),
-            Page::Password { .. } => vec2(480.0, 222.0),
-            Page::Done { .. } => vec2(520.0, 196.0),
-            Page::Failed(_) => vec2(520.0, 210.0),
-        }
-    }
-
-    fn kind(&self) -> u8 {
-        match self {
-            Page::Running => 0,
-            Page::Conflict(_) => 1,
-            Page::Password { .. } => 2,
-            Page::Done { .. } => 3,
-            Page::Failed(_) => 4,
+            Page::Conflict(_) => 540.0,
+            Page::Password { .. } => 480.0,
+            Page::Running | Page::Done { .. } | Page::Failed(_) => 520.0,
         }
     }
 }
@@ -142,7 +131,7 @@ struct App {
     worker: Option<JoinHandle<()>>,
     succeeded: Arc<AtomicBool>,
     page: Page,
-    shown_kind: u8,
+    shown_size: Vec2,
     clock: Clock,
     title: String,
     password: String,
@@ -165,7 +154,7 @@ impl App {
             worker: None,
             succeeded,
             page: Page::Running,
-            shown_kind: 0,
+            shown_size: Vec2::ZERO,
             clock: Clock::new(),
             title: String::new(),
             password: String::new(),
@@ -281,6 +270,19 @@ impl eframe::App for App {
                     self.focus_password = true;
                     Page::Password { wrong: matches!(e, Error::WrongPassword) }
                 }
+                // Denied partway (one protected subfolder, say): the same hand-over to an
+                // elevated copy as main.rs does up front.
+                Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => {
+                    match crate::elevate(&self.archive, &self.mode) {
+                        Ok(true) => {
+                            self.succeeded.store(true, Ordering::Relaxed);
+                            ctx.send_viewport_cmd(ViewportCommand::Close);
+                            Page::Running
+                        }
+                        Ok(false) => Page::Failed(crate::declined(self.dest().unwrap_or(Path::new("")))),
+                        Err(message) => Page::Failed(message),
+                    }
+                }
                 Err(e) => Page::Failed(e.to_string()),
             };
         }
@@ -291,10 +293,6 @@ impl eframe::App for App {
             self.page = Page::Conflict(ask);
         }
 
-        if self.page.kind() != self.shown_kind {
-            self.shown_kind = self.page.kind();
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.page.size()));
-        }
 
         let title = match &self.page {
             Page::Running => {
@@ -322,8 +320,11 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let pal = palette(ui);
-        egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
+        // The page lays out at its natural height; the window then takes that height, so text
+        // scaling or a long message never cuts off the buttons.
+        ui.painter().rect_filled(ui.max_rect(), 0.0, pal.bg);
+        let shown = egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
+            ui.set_width(self.page.width() - 48.0);
             match &self.page {
                 Page::Running => self.running_page(ui),
                 Page::Conflict(_) => self.conflict_page(ui),
@@ -341,6 +342,11 @@ impl eframe::App for App {
                 }
             }
         });
+        let size = vec2(self.page.width(), shown.response.rect.height().ceil());
+        if (size - self.shown_size).length() > 0.5 {
+            self.shown_size = size;
+            ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(size));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -576,13 +582,12 @@ fn logo(ui: &mut Ui, texture: &TextureHandle) {
     ui.add(egui::Image::new(egui::load::SizedTexture::new(texture.id(), Vec2::splat(40.0))));
 }
 
-/// A right-aligned button row pinned to the bottom; add buttons right to left.
+/// The right-aligned button row that ends every page; add buttons right to left. The window is
+/// sized to the page's content (see `ui`), so this just follows the content above it.
 fn buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    let room = ui.available_height() - 32.0;
-    if room > 0.0 {
-        ui.add_space(room);
-    }
-    ui.with_layout(Layout::right_to_left(Align::Center), add);
+    ui.add_space(16.0);
+    let row = vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), add);
 }
 
 // ---- formatting ----------------------------------------------------------------------------

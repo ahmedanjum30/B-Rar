@@ -14,6 +14,7 @@ use std::{
 };
 
 use brar_core::{ConflictPolicy, EntryInfo, Error, Options, Resolution, Selection};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, PointerButton, Pos2, Rect, Response,
     RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
@@ -239,6 +240,8 @@ struct Browser {
     focus_password: bool,
     status: Option<(String, Instant)>,
     opening: usize,
+    /// This window, for dialogs that open over it.
+    hwnd: isize,
     temp: PathBuf,
     jobs: u32,
 }
@@ -271,6 +274,7 @@ impl Browser {
             focus_password: false,
             status: None,
             opening: 0,
+            hwnd: 0,
             temp: std::env::temp_dir().join("B-Rar").join(std::process::id().to_string()),
             jobs: 0,
         };
@@ -418,7 +422,7 @@ impl Browser {
             Action::Extract(dest) => {
                 let dest = match dest {
                     Some(d) => d,
-                    None => match shell::pick_folder(&self.archive) {
+                    None => match shell::pick_folder(&self.archive, self.hwnd) {
                         Ok(Some(d)) => d,
                         Ok(None) => return,
                         Err(e) => return self.say(e),
@@ -458,8 +462,11 @@ impl Browser {
             // Not on the command line, where other programs could read it.
             cmd.env(crate::PASSWORD_VAR, pw);
         }
-        if let Err(e) = cmd.spawn() {
-            self.say(format!("Couldn't start B-Rar: {e}"));
+        match cmd.spawn() {
+            // Let the new window come to the front; otherwise Windows only flashes its
+            // taskbar button (the red frame).
+            Ok(child) => shell::allow_foreground(child.id()),
+            Err(e) => self.say(format!("Couldn't start B-Rar: {e}")),
         }
     }
 
@@ -568,7 +575,13 @@ impl eframe::App for Browser {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // For dialogs that open over this window (the folder picker).
+        if let Ok(handle) = frame.window_handle()
+            && let RawWindowHandle::Win32(w) = handle.as_raw()
+        {
+            self.hwnd = w.hwnd.get();
+        }
         let pal = palette(ui);
         match &self.page {
             Page::Ready => self.browser_page(ui),
@@ -685,24 +698,18 @@ impl Browser {
 
         egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 8 }))
-            .show_separator_line(false)
+            .show_separator_line(true)
             .show(ui, |ui| self.toolbar(ui, &mut action));
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::symmetric(14, 6)))
-            .show_separator_line(false)
+            .show_separator_line(true)
             .show(ui, |ui| self.status_bar(ui));
+        // The list is part of the window, as in File Explorer: same background, edge to edge.
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let fill = ui.visuals().extreme_bg_color;
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color))
-                .corner_radius(CornerRadius::same(6))
-                .outer_margin(egui::Margin::symmetric(14, 0))
-                .inner_margin(egui::Margin::symmetric(0, 4))
-                .show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    self.table(ui, &mut action);
-                });
+            egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin { left: 6, right: 6, top: 2, bottom: 0 }).show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                self.table(ui, &mut action);
+            });
         });
 
         if let Some(action) = action {
@@ -770,14 +777,8 @@ impl Browser {
             ui.add_space(2.0);
             let count = self.selected.len();
             let what = if count > 0 { format!("{count} selected") } else { "all".to_owned() };
-            let dir = brar_core::suggested_dir(&self.archive);
-            let folder = file_name(&dir);
-            let quick = style::primary_button(ui, &format!("Extract to \"{folder}\\\""), true)
-                .on_hover_text(format!("Extract {what} to {}", dir.display()));
-            if quick.clicked() {
-                *action = Some(Action::Extract(Some(dir)));
-            }
-            if style::button(ui, "Extract to...").on_hover_text(format!("Pick a folder, then extract {what}")).clicked() {
+            let pick = style::primary_button(ui, "Extract to...", true);
+            if pick.on_hover_text(format!("Pick a folder, then extract {what}")).clicked() {
                 *action = Some(Action::Extract(None));
             }
             if style::button(ui, "Test").on_hover_text("Check every file in the archive for errors").clicked() {
@@ -997,11 +998,6 @@ impl Browser {
             ui.close();
         }
         ui.separator();
-        let dir = brar_core::suggested_dir(&self.archive);
-        if ui.button(format!("Extract to \"{}\\\"", file_name(&dir))).clicked() {
-            *action = Some(Action::Extract(Some(dir)));
-            ui.close();
-        }
         if ui.button("Extract to...").clicked() {
             *action = Some(Action::Extract(None));
             ui.close();

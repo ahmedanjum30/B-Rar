@@ -1,14 +1,14 @@
 //! Thin wrappers over the Windows shell: folder picker, message box, opening Explorer.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 
 use windows::{
     Win32::{
-        Foundation::ERROR_CANCELLED,
+        Foundation::{ERROR_CANCELLED, HWND},
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
             CoInitializeEx, CoTaskMemFree,
@@ -16,9 +16,10 @@ use windows::{
         UI::{
             Shell::{
                 FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
-                IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH, ShellExecuteW,
+                IShellItem, IsUserAnAdmin, SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW,
+                SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
             },
-            WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL},
+            WindowsAndMessaging::{AllowSetForegroundWindow, GetForegroundWindow, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL},
         },
     },
     core::{PCWSTR, w},
@@ -53,8 +54,83 @@ pub fn open_path(path: &Path) {
     }
 }
 
+/// Passes this window's right to take the foreground to process `pid`, so the window it opens
+/// comes to the front instead of flashing on the taskbar.
+pub fn allow_foreground(pid: u32) {
+    // SAFETY: plain Win32 call; failure just means Windows keeps its default behavior.
+    unsafe {
+        let _ = AllowSetForegroundWindow(pid);
+    }
+}
+
+/// Is this process running with administrator rights?
+pub fn is_elevated() -> bool {
+    // SAFETY: no arguments; reads the current process token.
+    unsafe { IsUserAnAdmin().as_bool() }
+}
+
+/// Starts this program again with administrator rights; Windows shows its UAC prompt.
+/// `Ok(false)` if the user said no.
+pub fn run_elevated(args: &[OsString]) -> Result<bool, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (exe, params) = (wide(&exe), wide(command_line(args)));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(exe.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` and the strings it points to outlive the call.
+    match unsafe { ShellExecuteExW(&mut info) } {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => Ok(false),
+        Err(e) => Err(format!("couldn't start B-Rar as administrator: {e}")),
+    }
+}
+
+/// Joins arguments the way the C runtime splits them again: quotes around anything with
+/// spaces, backslashes doubled only where they precede a quote.
+fn command_line(args: &[OsString]) -> OsString {
+    let mut line = String::new();
+    for arg in args {
+        let arg = arg.to_string_lossy();
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+            line.push_str(&arg);
+            continue;
+        }
+        line.push('"');
+        let mut slashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' => slashes += 1,
+                '"' => {
+                    line.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                    line.push('"');
+                    slashes = 0;
+                }
+                _ => {
+                    line.extend(std::iter::repeat_n('\\', slashes));
+                    line.push(c);
+                    slashes = 0;
+                }
+            }
+        }
+        line.extend(std::iter::repeat_n('\\', slashes * 2));
+        line.push('"');
+    }
+    line.into()
+}
+
 /// The standard Windows folder picker, opened in the archive's folder. `None` if cancelled.
-pub fn pick_folder(archive: &Path) -> Result<Option<PathBuf>, String> {
+/// `owner` is the window the picker opens over (and blocks); 0 means the window in front, which
+/// is Explorer when it has just started B-Rar.
+pub fn pick_folder(archive: &Path, owner: isize) -> Result<Option<PathBuf>, String> {
     let fail = |e: windows::core::Error| format!("folder picker failed: {e}");
     let name = archive.file_name().unwrap_or_default().to_string_lossy();
     let title = wide(format!("Extract {name} to"));
@@ -74,7 +150,8 @@ pub fn pick_folder(archive: &Path) -> Result<Option<PathBuf>, String> {
                 let _ = dialog.SetFolder(&item);
             }
         }
-        match dialog.Show(None) {
+        let owner = if owner != 0 { HWND(owner as *mut _) } else { GetForegroundWindow() };
+        match dialog.Show(Some(owner)) {
             Ok(()) => {}
             Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => return Ok(None),
             Err(e) => return Err(fail(e)),

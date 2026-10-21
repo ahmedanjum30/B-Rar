@@ -77,7 +77,7 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
             let mut value = || rest.next().ok_or_else(usage);
             match arg.as_str() {
                 "--here" => dest = Some(archive.parent().map(Path::to_path_buf).unwrap_or_default()),
-                "--ask" => match shell::pick_folder(&archive)? {
+                "--ask" => match shell::pick_folder(&archive, 0)? {
                     Some(dir) => dest = Some(dir),
                     None => return Ok(ExitCode::SUCCESS),
                 },
@@ -92,7 +92,63 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
             selection: items.map(|items| Selection { items, base }),
         }
     };
+    // A folder only administrators can write to (Program Files, another user's folder):
+    // hand the job to an elevated copy straight away, before anything is extracted.
+    if let Mode::Extract { dest, .. } = &mode
+        && needs_admin(dest)
+    {
+        return match elevate(&archive, &mode)? {
+            true => Ok(ExitCode::SUCCESS),
+            false => Err(declined(dest)),
+        };
+    }
     Ok(app::run(archive, mode, password))
+}
+
+/// Can this process write to `dest`? Only "access denied" counts: anything else is left for
+/// the extraction to report.
+fn needs_admin(dest: &Path) -> bool {
+    if shell::is_elevated() {
+        return false;
+    }
+    let denied = |e: &std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
+    if let Err(e) = std::fs::create_dir_all(dest) {
+        return denied(&e);
+    }
+    let probe = dest.join(format!(".B-Rar-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            false
+        }
+        Err(e) => denied(&e),
+    }
+}
+
+/// Restarts this job with administrator rights (Windows asks first). `false` if the user
+/// declined. The elevated copy asks for a password again: Windows doesn't pass this
+/// process's environment to it.
+pub fn elevate(archive: &Path, mode: &Mode) -> Result<bool, String> {
+    let Mode::Extract { dest, selection } = mode else {
+        return Err("only extraction can be elevated".into());
+    };
+    let mut args: Vec<OsString> = vec!["x".into(), archive.into(), "-o".into(), dest.into()];
+    if let Some(s) = selection {
+        let dir = env::temp_dir().join("B-Rar");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let file = dir.join(format!("elevate-{}.txt", std::process::id()));
+        std::fs::write(&file, s.items.join("\n")).map_err(|e| format!("{}: {e}", file.display()))?;
+        args.extend(["--items".into(), file.into(), "--base".into(), s.base.clone().into()]);
+    }
+    shell::run_elevated(&args)
+}
+
+pub fn declined(dest: &Path) -> String {
+    format!(
+        "B-Rar needs administrator permission to extract into\n{}\n\nChoose another folder, or allow the Windows prompt.",
+        dest.display()
+    )
 }
 
 fn read_items(file: &Path) -> Result<Vec<String>, String> {

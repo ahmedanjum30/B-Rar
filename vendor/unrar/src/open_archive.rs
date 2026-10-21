@@ -599,6 +599,9 @@ pub struct FileHeader {
     pub filename: PathBuf,
     flags: EntryFlags,
     pub unpacked_size: u64,
+    /// Compressed size (in this volume, for a file split across volumes).
+    /// brar patch: the upstream crate doesn't expose it.
+    pub packed_size: u64,
     pub file_crc: u32,
     pub file_time: u32,
     /// Modification time as a Windows FILETIME (100ns ticks since 1601), 0 if unknown.
@@ -673,6 +676,7 @@ impl From<native::HeaderDataEx> for FileHeader {
             filename: PathBuf::from(filename.to_os_string()),
             flags: EntryFlags::from_bits(header.flags).unwrap(),
             unpacked_size: unpack_unp_size(header.unp_size, header.unp_size_high),
+            packed_size: unpack_unp_size(header.pack_size, header.pack_size_high),
             file_crc: header.file_crc,
             file_time: header.file_time,
             mtime_filetime: packed_mtime(&header),

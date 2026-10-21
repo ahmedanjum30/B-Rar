@@ -52,7 +52,8 @@ pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
             name: h.filename.to_string_lossy().into_owned(),
             is_dir: h.is_directory(),
             size: h.unpacked_size,
-            packed: None,
+            // A file continued in the next volume only reports this volume's share.
+            packed: (!h.is_directory() && !h.is_split_after()).then_some(h.packed_size),
             modified: mtime(&h),
         });
     }

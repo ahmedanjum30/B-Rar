@@ -79,6 +79,19 @@ impl Error {
 }
 
 impl Error {
+    /// Windows refused to create or write a file: typically a folder only administrators can
+    /// write to, such as Program Files. Extracting elevated would succeed.
+    pub fn is_access_denied(&self) -> bool {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        let denied = |e: &io::Error| e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(ERROR_ACCESS_DENIED);
+        match self {
+            Error::Io { source, .. } | Error::RawIo(source) => denied(source),
+            // unRAR writes big files itself and only reports "couldn't create".
+            Error::Rar(e) => matches!(e.code, unrar::error::Code::ECreate),
+            _ => false,
+        }
+    }
+
     /// Corrupt-data errors. On an encrypted entry, with a password supplied, these almost
     /// always mean the password is wrong (ZipCrypto and RAR4 can't check it up front).
     pub(crate) fn is_bad_data(&self) -> bool {

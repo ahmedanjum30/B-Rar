@@ -21,6 +21,16 @@ codegen-units = 1
 debug = false
 strip = true
 
+# For local test builds (`installer\build.ps1 -Quick`), as in BDownloader: builds in parallel
+# and reuses unchanged code instead of optimising the whole program as one unit on one core.
+# Fine for trying things out; too slow to benchmark (no cross-crate inlining). Releases and
+# benchmarks use the full release profile above.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 # Fast-to-build profile for benchmarking iterations.
 [profile.bench-fast]
 inherits = "release"
