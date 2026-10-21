@@ -63,9 +63,7 @@ impl Error {
     fn normalize(self) -> Self {
         use unrar::error::Code;
         match self {
-            Error::Zip(::zip::result::ZipError::UnsupportedArchive(msg))
-                if msg == ::zip::result::ZipError::PASSWORD_REQUIRED =>
-            {
+            Error::Zip(::zip::result::ZipError::UnsupportedArchive(msg)) if msg == ::zip::result::ZipError::PASSWORD_REQUIRED => {
                 Error::PasswordRequired
             }
             Error::Zip(::zip::result::ZipError::InvalidPassword) => Error::WrongPassword,
@@ -107,7 +105,11 @@ impl Error {
     }
 
     pub(crate) fn wrong_password_if(self, encrypted_with_password: bool) -> Self {
-        if encrypted_with_password && self.is_bad_data() { Error::WrongPassword } else { self }
+        if encrypted_with_password && self.is_bad_data() {
+            Error::WrongPassword
+        } else {
+            self
+        }
     }
 
     /// Names the damaged `entry` for corrupt-data errors (or blames the password, see above).
@@ -371,7 +373,9 @@ fn open(archive: &Path) -> Result<(volumes::Input, Format)> {
     if format == Format::Rar && input.split.is_some() {
         // A RAR cut into .001/.002 pieces by a file splitter (not RAR's own volumes): unRAR
         // reads from a real file, so it would need joining first.
-        return Err(Error::Unsupported("a RAR archive split into .001/.002 files; join the parts into one file first"));
+        return Err(Error::Unsupported(
+            "a RAR archive split into .001/.002 files; join the parts into one file first",
+        ));
     }
     Ok((input, format))
 }

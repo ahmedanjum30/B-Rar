@@ -115,7 +115,5 @@ fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), sink: &Sink
 }
 
 fn mtime(f: &ArchiveEntry) -> Option<SystemTime> {
-    f.has_last_modified_date
-        .then(|| time::filetime(f.last_modified_date.into()))
-        .flatten()
+    f.has_last_modified_date.then(|| time::filetime(f.last_modified_date.into())).flatten()
 }

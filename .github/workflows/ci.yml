@@ -1,0 +1,49 @@
+name: CI
+
+# Only run when code or build settings change; docs-only commits skip CI.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/**"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/**"
+  workflow_dispatch:
+  # The release workflow runs these checks before building.
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Tests that need WinRAR's Rar.exe or 7-Zip to build their archives skip themselves.
+      - name: Test
+        run: cargo test --workspace

@@ -117,7 +117,17 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Extract { archive, files, from, output, here, overwrite, skip_existing, rename_existing, common } => {
+        Command::Extract {
+            archive,
+            files,
+            from,
+            output,
+            here,
+            overwrite,
+            skip_existing,
+            rename_existing,
+            common,
+        } => {
             let dest = match (output, here) {
                 (Some(dir), _) => dir,
                 (None, true) => archive_dir(&archive),
@@ -125,7 +135,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let mut opts = common.options();
             if !files.is_empty() {
-                opts.selection = Some(Selection { items: files, base: from.unwrap_or_default() });
+                opts.selection = Some(Selection {
+                    items: files,
+                    base: from.unwrap_or_default(),
+                });
             }
             opts.on_conflict = match (overwrite, skip_existing, rename_existing) {
                 (true, _, _) => ConflictPolicy::Always(Resolution::Overwrite),
@@ -168,11 +181,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 }
 
 /// Runs `op`, asking for a password (hidden input) when the archive needs one.
-fn with_password<T>(
-    archive: &Path,
-    mut opts: Options,
-    op: impl Fn(&Options) -> brar_core::Result<T>,
-) -> brar_core::Result<T> {
+fn with_password<T>(archive: &Path, mut opts: Options, op: impl Fn(&Options) -> brar_core::Result<T>) -> brar_core::Result<T> {
     let mut attempts = 0;
     loop {
         match op(&opts) {
@@ -207,7 +216,10 @@ fn ask_conflict(c: &Conflict<'_>) -> Decision {
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-            return Decision { resolution: Resolution::Cancel, apply_to_all: false };
+            return Decision {
+                resolution: Resolution::Cancel,
+                apply_to_all: false,
+            };
         }
         let (resolution, apply_to_all) = match line.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => (Resolution::Overwrite, false),
@@ -256,5 +268,9 @@ fn human(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

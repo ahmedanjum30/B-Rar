@@ -35,5 +35,7 @@ END
     );
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shell.rc");
     fs::write(&out, rc).unwrap();
-    embed_resource::compile_for_cdylib(&out, embed_resource::NONE).manifest_optional().unwrap();
+    embed_resource::compile_for_cdylib(&out, embed_resource::NONE)
+        .manifest_optional()
+        .unwrap();
 }

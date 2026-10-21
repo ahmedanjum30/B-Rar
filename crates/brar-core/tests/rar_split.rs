@@ -27,10 +27,19 @@ fn big_and_small_files_each_written_once() {
         fs::write(src.join(format!("small{i}.txt")), format!("small file {i}\n").repeat(500)).unwrap();
     }
     let archive = root.join("t.rar");
-    let made = Command::new(RAR).args(["a", "-ma5", "-m1", "-idq", "-ep1"]).arg(&archive).arg(src.join("*")).status().unwrap();
+    let made = Command::new(RAR)
+        .args(["a", "-ma5", "-m1", "-idq", "-ep1"])
+        .arg(&archive)
+        .arg(src.join("*"))
+        .status()
+        .unwrap();
     assert!(made.success());
 
-    let opts = Options { threads: 4, on_conflict: ConflictPolicy::Always(Resolution::Cancel), ..Options::default() };
+    let opts = Options {
+        threads: 4,
+        on_conflict: ConflictPolicy::Always(Resolution::Cancel),
+        ..Options::default()
+    };
     let tested = brar_core::test(&archive, &opts).unwrap();
     assert_eq!(tested.files, 42, "test mode counted some files twice");
 
@@ -40,7 +49,11 @@ fn big_and_small_files_each_written_once() {
     assert_eq!(summary.files, 42);
     for e in fs::read_dir(&src).unwrap() {
         let e = e.unwrap();
-        assert!(fs::read(e.path()).unwrap() == fs::read(out.join(e.file_name())).unwrap(), "{:?} differs", e.file_name());
+        assert!(
+            fs::read(e.path()).unwrap() == fs::read(out.join(e.file_name())).unwrap(),
+            "{:?} differs",
+            e.file_name()
+        );
     }
     let _ = fs::remove_dir_all(&root);
 }

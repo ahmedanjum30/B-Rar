@@ -46,7 +46,11 @@ impl Input {
 pub(crate) fn resolve(path: &Path) -> Result<Input> {
     if let Some(parts) = split_parts(path)? {
         let name = parts[0].with_extension("");
-        return Ok(Input { first: parts[0].clone(), name, split: Some(Volumes::open(&parts)?) });
+        return Ok(Input {
+            first: parts[0].clone(),
+            name,
+            split: Some(Volumes::open(&parts)?),
+        });
     }
     let first = match RarSet::of(path) {
         Some(set) => {
@@ -58,13 +62,19 @@ pub(crate) fn resolve(path: &Path) -> Result<Input> {
         }
         None => path.to_path_buf(),
     };
-    Ok(Input { name: first.clone(), first, split: None })
+    Ok(Input {
+        name: first.clone(),
+        first,
+        split: None,
+    })
 }
 
 /// `name.003` -> `[name.001, name.002, name.003, ...]`, as many as exist in sequence.
 /// `None` if the name doesn't end in a part number of 3+ digits.
 fn split_parts(path: &Path) -> Result<Option<Vec<PathBuf>>> {
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else { return Ok(None) };
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return Ok(None);
+    };
     if ext.len() < 3 || !ext.bytes().all(|b| b.is_ascii_digit()) {
         return Ok(None);
     }
@@ -122,16 +132,27 @@ impl RarSet {
             if let Some(at) = stem.rfind(".part") {
                 let digits = &stem[at + 5..];
                 if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-                    return Some(Self { dir, stem: name[..at].to_owned(), width: Some(digits.len()) });
+                    return Some(Self {
+                        dir,
+                        stem: name[..at].to_owned(),
+                        width: Some(digits.len()),
+                    });
                 }
             }
-            let set = Self { dir, stem: name[..name.len() - 4].to_owned(), width: None };
+            let set = Self {
+                dir,
+                stem: name[..name.len() - 4].to_owned(),
+                width: None,
+            };
             return set.part(2).is_file().then_some(set);
         }
         let (stem, ext) = name.rsplit_once('.')?;
         let e = ext.as_bytes();
-        (e.len() == 3 && (e[0] | 0x20) == b'r' && e[1].is_ascii_digit() && e[2].is_ascii_digit())
-            .then(|| Self { dir, stem: stem.to_owned(), width: None })
+        (e.len() == 3 && (e[0] | 0x20) == b'r' && e[1].is_ascii_digit() && e[2].is_ascii_digit()).then(|| Self {
+            dir,
+            stem: stem.to_owned(),
+            width: None,
+        })
     }
 
     /// Path of part `n` (1-based).
@@ -186,7 +207,11 @@ impl Volumes {
             parts.push((file, start, len));
             start += len;
         }
-        Ok(Self { parts: Arc::new(parts), len: start, pos: 0 })
+        Ok(Self {
+            parts: Arc::new(parts),
+            len: start,
+            pos: 0,
+        })
     }
 
     /// Index of the part holding byte `offset` (< len).

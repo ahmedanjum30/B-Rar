@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Response, RichText,
-    Sense, Shape, Stroke, TextStyle, Theme, Ui, Vec2, vec2,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, TextStyle,
+    Theme, Ui, Vec2, vec2,
 };
 
 pub const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
@@ -69,18 +69,31 @@ pub fn install(ctx: &egui::Context) {
             style.spacing.interact_size.y = 32.0;
 
             let v = &mut style.visuals;
-            v.panel_fill = if dark { Color32::from_rgb(32, 32, 32) } else { Color32::from_rgb(243, 243, 243) };
+            v.panel_fill = if dark {
+                Color32::from_rgb(32, 32, 32)
+            } else {
+                Color32::from_rgb(243, 243, 243)
+            };
             v.window_fill = v.panel_fill;
             v.selection.bg_fill = if dark { ACCENT_DARK } else { ACCENT };
             v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
             v.hyperlink_color = v.selection.bg_fill;
             let radius = CornerRadius::same(4);
             let (fill, hover, border) = if dark {
-                (Color32::from_rgb(45, 45, 45), Color32::from_rgb(55, 55, 55), Color32::from_rgb(70, 70, 70))
+                (
+                    Color32::from_rgb(45, 45, 45),
+                    Color32::from_rgb(55, 55, 55),
+                    Color32::from_rgb(70, 70, 70),
+                )
             } else {
                 (Color32::WHITE, Color32::from_rgb(249, 249, 249), Color32::from_rgb(208, 208, 208))
             };
-            for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            for w in [
+                &mut v.widgets.inactive,
+                &mut v.widgets.hovered,
+                &mut v.widgets.active,
+                &mut v.widgets.open,
+            ] {
                 w.corner_radius = radius;
                 w.bg_stroke = Stroke::new(1.0, border);
             }

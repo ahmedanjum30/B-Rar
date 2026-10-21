@@ -14,8 +14,7 @@ pub(crate) fn safe_join(dest: &Path, name: &str) -> Result<PathBuf> {
         if part.is_empty() || part == "." {
             continue;
         }
-        let unsafe_part = part.trim_end_matches(['.', ' ']).is_empty()
-            || part.contains([':', '\0']);
+        let unsafe_part = part.trim_end_matches(['.', ' ']).is_empty() || part.contains([':', '\0']);
         if unsafe_part {
             return Err(Error::UnsafePath(name.to_owned()));
         }

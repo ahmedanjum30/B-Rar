@@ -1,0 +1,28 @@
+name: Set up the B-Rar toolchain
+description: >
+  Rust for x86_64-pc-windows-gnu plus a MinGW-w64 C/C++ compiler. B-Rar builds with the GNU
+  toolchain because the bundled unRAR sources (unrar_sys) are compiled with g++, and the
+  static C runtime (.cargo/config.toml) keeps the programs free of MinGW DLLs.
+
+runs:
+  using: composite
+  steps:
+    - name: MinGW-w64 (gcc, g++, windres)
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: false
+        install: mingw-w64-ucrt-x86_64-gcc
+    - name: Put MinGW on PATH
+      shell: pwsh
+      run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+    - name: Rust (windows-gnu host)
+      shell: pwsh
+      run: |
+        # rust-toolchain.toml says "stable"; make the GNU triple the host so every cargo call
+        # builds for it without --target.
+        rustup set default-host x86_64-pc-windows-gnu
+        rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        rustc -vV
+        gcc --version | Select-Object -First 1

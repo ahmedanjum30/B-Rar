@@ -47,7 +47,13 @@ fn archives(tag: &str) -> (PathBuf, Vec<PathBuf>) {
             eprintln!("skipping {out}: {tool} not installed");
             return;
         }
-        let ok = Command::new(tool).args(args).arg(root.join(out)).arg("*").current_dir(&src).output().unwrap();
+        let ok = Command::new(tool)
+            .args(args)
+            .arg(root.join(out))
+            .arg("*")
+            .current_dir(&src)
+            .output()
+            .unwrap();
         assert!(ok.status.success(), "{tool} failed: {}", String::from_utf8_lossy(&ok.stdout));
         made.push(root.join(out));
     };
@@ -58,9 +64,18 @@ fn archives(tag: &str) -> (PathBuf, Vec<PathBuf>) {
     run(RAR, &["a", "-r", "-ma5", "-s", "-idq"], "t-solid.rar");
     let tar = root.join("t.tar");
     if Path::new(SEVEN_ZIP).exists() {
-        let ok = Command::new(SEVEN_ZIP).args(["a", "-ttar", "-bso0"]).arg(&tar).arg("*").current_dir(&src).status();
+        let ok = Command::new(SEVEN_ZIP)
+            .args(["a", "-ttar", "-bso0"])
+            .arg(&tar)
+            .arg("*")
+            .current_dir(&src)
+            .status();
         assert!(ok.unwrap().success());
-        let ok = Command::new(SEVEN_ZIP).args(["a", "-tgzip", "-bso0"]).arg(root.join("t.tar.gz")).arg(&tar).status();
+        let ok = Command::new(SEVEN_ZIP)
+            .args(["a", "-tgzip", "-bso0"])
+            .arg(root.join("t.tar.gz"))
+            .arg(&tar)
+            .status();
         assert!(ok.unwrap().success());
         made.push(root.join("t.tar.gz"));
     }
@@ -89,7 +104,10 @@ fn files_in(dir: &Path) -> Vec<String> {
 
 fn extract(archive: &Path, out: &Path, items: &[&str], base: &str) -> brar_core::Summary {
     let opts = Options {
-        selection: Some(Selection { items: items.iter().map(|s| s.to_string()).collect(), base: base.into() }),
+        selection: Some(Selection {
+            items: items.iter().map(|s| s.to_string()).collect(),
+            base: base.into(),
+        }),
         ..Options::default()
     };
     brar_core::extract(archive, out, &opts).unwrap_or_else(|e| panic!("{}: {e}", archive.display()))
@@ -116,7 +134,15 @@ fn picked_entries_only() {
         // A file and a folder, full paths. "docs2" must not count as inside "docs".
         let out = root.join(format!("{stem}-full"));
         let s = extract(archive, &out, &["a.txt", "docs/sub"], "");
-        check(archive, &out, &[("a.txt", "a.txt"), ("docs/sub/c.bin", "docs/sub/c.bin"), ("docs/sub/deeper/d.txt", "docs/sub/deeper/d.txt")]);
+        check(
+            archive,
+            &out,
+            &[
+                ("a.txt", "a.txt"),
+                ("docs/sub/c.bin", "docs/sub/c.bin"),
+                ("docs/sub/deeper/d.txt", "docs/sub/deeper/d.txt"),
+            ],
+        );
         assert_eq!(s.files, 3, "{}", archive.display());
 
         // Picked from inside "docs": written relative to it; backslashes work too.
@@ -143,7 +169,10 @@ fn test_mode_with_selection() {
     let (root, archives) = archives("test");
     for archive in &archives {
         let opts = Options {
-            selection: Some(Selection { items: vec!["docs".into()], base: String::new() }),
+            selection: Some(Selection {
+                items: vec!["docs".into()],
+                base: String::new(),
+            }),
             ..Options::default()
         };
         let s = brar_core::test(archive, &opts).unwrap();

@@ -1,4 +1,4 @@
-﻿//! ZIP: every entry is independently compressed, so all of them decode in parallel.
+//! ZIP: every entry is independently compressed, so all of them decode in parallel.
 //!
 //! Fast path (plain Deflate or stored entries, unencrypted): read the compressed bytes with
 //! positioned reads, decode in one libdeflate call, check the CRC, write in 1 MiB blocks.
@@ -67,7 +67,9 @@ fn list_from<R: Read + Seek + Clone>(reader: R) -> Result<Vec<EntryInfo>> {
 /// 0.6 s on a 1.1 GB archive; it remains the fallback for ZIPs with data in front (e.g.
 /// self-extracting .exe files).
 fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
-    let known = Config { archive_offset: ArchiveOffset::Known(0) };
+    let known = Config {
+        archive_offset: ArchiveOffset::Known(0),
+    };
     match ZipArchive::with_config(known, reader.clone()) {
         Ok(archive) => Ok(archive),
         Err(_) => Ok(ZipArchive::new(reader)?),
@@ -139,7 +141,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
     }
     sink.set_total(total);
     // Biggest first, so a huge entry never starts last and leaves the other cores idle.
-    jobs.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    jobs.sort_unstable_by_key(|j| std::cmp::Reverse(j.0));
 
     // One FIFO job per entry: jobs start strictly in that order, one per free thread. (A
     // parallel iterator splits the list into ranges instead, which let the two largest

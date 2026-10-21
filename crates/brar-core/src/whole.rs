@@ -13,10 +13,10 @@ pub(crate) const BUDGET: u64 = 2 << 30;
 
 /// Fills `buf` from `file` at `offset`, without a shared file cursor (safe across threads).
 pub(crate) fn read_at(file: &File, mut offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(windows)]
-    use std::os::windows::fs::FileExt;
     #[cfg(unix)]
     use std::os::unix::fs::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileExt;
     while !buf.is_empty() {
         #[cfg(windows)]
         let n = file.seek_read(buf, offset)?;
@@ -46,7 +46,11 @@ pub(crate) struct Lease<'a> {
 
 impl Budget {
     pub(crate) fn new(limit: u64) -> Self {
-        Self { state: Mutex::new((0, 0)), freed: Condvar::new(), limit }
+        Self {
+            state: Mutex::new((0, 0)),
+            freed: Condvar::new(),
+            limit,
+        }
     }
 
     pub(crate) fn take(&self, bytes: u64) -> Lease<'_> {

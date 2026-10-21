@@ -19,13 +19,12 @@ use windows::{
         System::{
             Com::{CoTaskMemFree, IBindCtx, IClassFactory, IClassFactory_Impl},
             LibraryLoader::{
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
-                GetModuleHandleExW,
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW,
             },
         },
         UI::Shell::{
-            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, IEnumExplorerCommand, IEnumExplorerCommand_Impl,
-            IExplorerCommand, IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand, IExplorerCommand_Impl,
+            IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
         },
     },
     core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, Result, implement},
@@ -120,7 +119,10 @@ impl IEnumExplorerCommand_Impl for Verbs_Impl {
     }
 
     fn Clone(&self) -> Result<IEnumExplorerCommand> {
-        Ok(Verbs { next: AtomicUsize::new(self.next.load(Ordering::Relaxed)) }.into())
+        Ok(Verbs {
+            next: AtomicUsize::new(self.next.load(Ordering::Relaxed)),
+        }
+        .into())
     }
 }
 
@@ -215,11 +217,7 @@ impl IClassFactory_Impl for Factory_Impl {
 /// # Safety
 /// Called by COM with valid pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn DllGetClassObject(
-    clsid: *const GUID,
-    iid: *const GUID,
-    object: *mut *mut core::ffi::c_void,
-) -> HRESULT {
+pub unsafe extern "system" fn DllGetClassObject(clsid: *const GUID, iid: *const GUID, object: *mut *mut core::ffi::c_void) -> HRESULT {
     // SAFETY: COM passes a valid CLSID pointer.
     if clsid.is_null() || unsafe { *clsid } != CLSID_BRAR {
         return CLASS_E_CLASSNOTAVAILABLE;

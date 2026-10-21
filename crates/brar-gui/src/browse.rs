@@ -14,11 +14,11 @@ use std::{
 };
 
 use brar_core::{ConflictPolicy, EntryInfo, Error, Options, Resolution, Selection};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, PointerButton, Pos2, Rect, Response,
-    RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, PointerButton, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind,
+    Ui, Vec2, ViewportCommand, pos2, vec2,
 };
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
     app::{LOGO_PNG, human},
@@ -34,7 +34,11 @@ pub fn run(archive: PathBuf, password: Option<String>) -> ExitCode {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
         viewport = viewport.with_icon(Arc::new(icon));
     }
-    let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        centered: true,
+        ..Default::default()
+    };
     let result = eframe::run_native(
         "B-Rar",
         options,
@@ -283,7 +287,10 @@ impl Browser {
     }
 
     fn options(&self) -> Options {
-        Options { password: self.password.clone(), ..Options::default() }
+        Options {
+            password: self.password.clone(),
+            ..Options::default()
+        }
     }
 
     fn list(&mut self, ctx: &egui::Context) {
@@ -389,7 +396,13 @@ impl Browser {
         }
         let last = self.rows.len() as isize - 1;
         let row = self.cursor.and_then(|c| self.row_of(c)).map_or(0, |r| r as isize);
-        let next = self.rows[if to == isize::MIN { 0 } else if to == isize::MAX { last as usize } else { (row + to).clamp(0, last) as usize }];
+        let next = self.rows[if to == isize::MIN {
+            0
+        } else if to == isize::MAX {
+            last as usize
+        } else {
+            (row + to).clamp(0, last) as usize
+        }];
         self.click(next, false, shift);
         self.reveal_cursor = true;
     }
@@ -397,7 +410,12 @@ impl Browser {
     /// What "extract" acts on: the selection, or everything in view when nothing is selected.
     fn picked(&self) -> Option<Vec<String>> {
         if !self.selected.is_empty() {
-            let mut items: Vec<String> = self.rows.iter().filter(|n| self.selected.contains(n)).map(|&n| self.tree.nodes[n].path.clone()).collect();
+            let mut items: Vec<String> = self
+                .rows
+                .iter()
+                .filter(|n| self.selected.contains(n))
+                .map(|&n| self.tree.nodes[n].path.clone())
+                .collect();
             items.dedup();
             return Some(items);
         }
@@ -478,7 +496,10 @@ impl Browser {
         let parent = n.path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
         let target = dir.join(&n.name);
         let opts = Options {
-            selection: Some(Selection { items: vec![n.path.clone()], base: parent }),
+            selection: Some(Selection {
+                items: vec![n.path.clone()],
+                base: parent,
+            }),
             on_conflict: ConflictPolicy::Always(Resolution::Overwrite),
             ..self.options()
         };
@@ -697,7 +718,12 @@ impl Browser {
         self.keyboard(ui, &mut action);
 
         egui::Panel::top("toolbar")
-            .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 8 }))
+            .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin {
+                left: 14,
+                right: 14,
+                top: 12,
+                bottom: 8,
+            }))
             .show_separator_line(true)
             .show(ui, |ui| self.toolbar(ui, &mut action));
         egui::Panel::bottom("status")
@@ -706,10 +732,18 @@ impl Browser {
             .show(ui, |ui| self.status_bar(ui));
         // The list is part of the window, as in File Explorer: same background, edge to edge.
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin { left: 6, right: 6, top: 2, bottom: 0 }).show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
-                self.table(ui, &mut action);
-            });
+            egui::Frame::new()
+                .fill(pal.bg)
+                .inner_margin(egui::Margin {
+                    left: 6,
+                    right: 6,
+                    top: 2,
+                    bottom: 0,
+                })
+                .show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    self.table(ui, &mut action);
+                });
         });
 
         if let Some(action) = action {
@@ -781,7 +815,10 @@ impl Browser {
             if pick.on_hover_text(format!("Pick a folder, then extract {what}")).clicked() {
                 *action = Some(Action::Extract(None));
             }
-            if style::button(ui, "Test").on_hover_text("Check every file in the archive for errors").clicked() {
+            if style::button(ui, "Test")
+                .on_hover_text("Check every file in the archive for errors")
+                .clicked()
+            {
                 *action = Some(Action::Test);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -833,7 +870,10 @@ impl Browser {
         ui.horizontal(|ui| {
             let t = &self.tree;
             let summary = if self.selected.is_empty() {
-                let (dirs, files) = self.rows.iter().fold((0, 0), |(d, f), &n| if t.nodes[n].is_dir { (d + 1, f) } else { (d, f + 1) });
+                let (dirs, files) = self
+                    .rows
+                    .iter()
+                    .fold((0, 0), |(d, f), &n| if t.nodes[n].is_dir { (d + 1, f) } else { (d, f + 1) });
                 let size: u64 = self.rows.iter().map(|&n| t.nodes[n].size).sum();
                 format!("{} · {} · {}", plural(dirs, "folder"), plural(files, "file"), human(size))
             } else {
@@ -866,7 +906,12 @@ impl Browser {
                 x += w;
                 r
             };
-            [(Column::Name, next(name)), (Column::Size, next(size)), (Column::Packed, next(packed)), (Column::Modified, next(modified))]
+            [
+                (Column::Name, next(name)),
+                (Column::Size, next(size)),
+                (Column::Packed, next(packed)),
+                (Column::Modified, next(modified)),
+            ]
         };
 
         // Header.
@@ -884,9 +929,21 @@ impl Browser {
             let right = column != Column::Name && column != Column::Modified;
             let painter = ui.painter_at(rect);
             let text_rect = if right {
-                painter.text(pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, label, FontId::new(13.0, semibold()), color)
+                painter.text(
+                    pos2(rect.right() - 10.0, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    label,
+                    FontId::new(13.0, semibold()),
+                    color,
+                )
             } else {
-                painter.text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(13.0, semibold()), color)
+                painter.text(
+                    pos2(rect.left() + 6.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::new(13.0, semibold()),
+                    color,
+                )
             };
             if self.sort.0 == column {
                 let ax = if right { text_rect.left() - 9.0 } else { text_rect.right() + 9.0 };
@@ -899,21 +956,35 @@ impl Browser {
                 painter.add(Shape::convex_polygon(tri, pal.weak, Stroke::NONE));
             }
             if response.clicked() {
-                self.sort = if self.sort.0 == column { (column, !self.sort.1) } else { (column, column == Column::Name) };
+                self.sort = if self.sort.0 == column {
+                    (column, !self.sort.1)
+                } else {
+                    (column, column == Column::Name)
+                };
                 self.stale = true;
             }
         }
         let line_y = head.bottom();
-        ui.painter().hline(head.x_range().shrink(8.0), line_y, Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color));
+        ui.painter().hline(
+            head.x_range().shrink(8.0),
+            line_y,
+            Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+        );
 
         if self.rows.is_empty() {
-            let message = if self.search.trim().is_empty() { "This folder is empty" } else { "No matches" };
+            let message = if self.search.trim().is_empty() {
+                "This folder is empty"
+            } else {
+                "No matches"
+            };
             ui.add_space(30.0);
             ui.vertical_centered(|ui| ui.label(RichText::new(message).color(pal.weak)));
             return;
         }
 
-        let reveal = std::mem::take(&mut self.reveal_cursor).then(|| self.cursor.and_then(|c| self.row_of(c))).flatten();
+        let reveal = std::mem::take(&mut self.reveal_cursor)
+            .then(|| self.cursor.and_then(|c| self.row_of(c)))
+            .flatten();
         let searching = !self.search.trim().is_empty();
         egui::ScrollArea::vertical().auto_shrink(false).show_viewport(ui, |ui, viewport| {
             let total = self.rows.len();
@@ -963,7 +1034,12 @@ impl Browser {
         }
         // In a multi-selection, outline the row the arrow keys move from.
         if self.cursor == Some(node) && self.selected.len() > 1 {
-            painter.rect_stroke(inner, CornerRadius::same(4), Stroke::new(1.0, pal.accent.gamma_multiply(0.6)), StrokeKind::Inside);
+            painter.rect_stroke(
+                inner,
+                CornerRadius::same(4),
+                Stroke::new(1.0, pal.accent.gamma_multiply(0.6)),
+                StrokeKind::Inside,
+            );
         }
         let font = FontId::proportional(13.5);
         let cy = rect.center().y;
@@ -973,7 +1049,11 @@ impl Browser {
             match column {
                 Column::Name => {
                     icon(&p, pos2(x + 8.0, cy), n.is_dir, &pal);
-                    let label = if searching { relative(&n.path, &self.tree.nodes[self.cwd].path) } else { n.name.as_str() };
+                    let label = if searching {
+                        relative(&n.path, &self.tree.nodes[self.cwd].path)
+                    } else {
+                        n.name.as_str()
+                    };
                     p.text(pos2(x + 30.0, cy), Align2::LEFT_CENTER, label, font.clone(), pal.text);
                 }
                 Column::Size => {
@@ -1025,10 +1105,19 @@ fn icon(p: &egui::Painter, at: Pos2, is_dir: bool, pal: &style::Palette) {
     } else {
         let page = Rect::from_min_size(pos2(at.x + 2.0, top), vec2(12.0, 15.0));
         p.rect_filled(page, CornerRadius::same(2), pal.track);
-        p.rect_stroke(page, CornerRadius::same(2), Stroke::new(1.0, pal.weak.gamma_multiply(0.7)), StrokeKind::Inside);
+        p.rect_stroke(
+            page,
+            CornerRadius::same(2),
+            Stroke::new(1.0, pal.weak.gamma_multiply(0.7)),
+            StrokeKind::Inside,
+        );
         for k in 0..3 {
             let y = top + 5.0 + k as f32 * 3.0;
-            p.hline(egui::Rangef::new(page.left() + 3.0, page.right() - 3.0), y, Stroke::new(1.0, pal.weak.gamma_multiply(0.6)));
+            p.hline(
+                egui::Rangef::new(page.left() + 3.0, page.right() - 3.0),
+                y,
+                Stroke::new(1.0, pal.weak.gamma_multiply(0.6)),
+            );
         }
     }
 }

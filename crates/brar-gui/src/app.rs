@@ -33,7 +33,11 @@ pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
         viewport = viewport.with_icon(Arc::new(icon));
     }
-    let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        centered: true,
+        ..Default::default()
+    };
     let succeeded = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&succeeded);
     let result = eframe::run_native(
@@ -48,7 +52,11 @@ pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
         shell::error_box("B-Rar", &format!("Could not open the B-Rar window: {e}"));
         return ExitCode::FAILURE;
     }
-    if succeeded.load(Ordering::Relaxed) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if succeeded.load(Ordering::Relaxed) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// State shared with the worker thread.
@@ -98,7 +106,12 @@ struct Clock {
 
 impl Clock {
     fn new() -> Self {
-        Self { started: Instant::now(), paused_since: None, paused_total: Duration::ZERO, samples: VecDeque::new() }
+        Self {
+            started: Instant::now(),
+            paused_since: None,
+            paused_total: Duration::ZERO,
+            samples: VecDeque::new(),
+        }
     }
 
     fn active(&self) -> Duration {
@@ -198,7 +211,10 @@ impl App {
                     reply,
                 });
                 ctx.request_repaint();
-                answer.recv().unwrap_or(Decision { resolution: Resolution::Cancel, apply_to_all: false })
+                answer.recv().unwrap_or(Decision {
+                    resolution: Resolution::Cancel,
+                    apply_to_all: false,
+                })
             }
         };
         let opts = Options {
@@ -224,7 +240,10 @@ impl App {
 
     fn answer(&mut self, resolution: Resolution) {
         if let Page::Conflict(ask) = std::mem::replace(&mut self.page, Page::Running) {
-            let _ = ask.reply.send(Decision { resolution, apply_to_all: self.apply_to_all });
+            let _ = ask.reply.send(Decision {
+                resolution,
+                apply_to_all: self.apply_to_all,
+            });
         }
     }
 
@@ -232,7 +251,10 @@ impl App {
     fn shutdown(&mut self) {
         self.progress().cancel();
         if let Some(ask) = self.shared.conflict.lock().unwrap().take() {
-            let _ = ask.reply.send(Decision { resolution: Resolution::Cancel, apply_to_all: true });
+            let _ = ask.reply.send(Decision {
+                resolution: Resolution::Cancel,
+                apply_to_all: true,
+            });
         }
         if let Page::Conflict(_) = self.page {
             self.answer(Resolution::Cancel);
@@ -259,7 +281,10 @@ impl eframe::App for App {
             self.page = match outcome {
                 Ok(summary) => {
                     self.succeeded.store(true, Ordering::Relaxed);
-                    Page::Done { summary, secs: self.clock.active().as_secs_f64() }
+                    Page::Done {
+                        summary,
+                        secs: self.clock.active().as_secs_f64(),
+                    }
                 }
                 Err(Error::Cancelled) => {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -268,21 +293,21 @@ impl eframe::App for App {
                 Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
                     self.password.clear();
                     self.focus_password = true;
-                    Page::Password { wrong: matches!(e, Error::WrongPassword) }
+                    Page::Password {
+                        wrong: matches!(e, Error::WrongPassword),
+                    }
                 }
                 // Denied partway (one protected subfolder, say): the same hand-over to an
                 // elevated copy as main.rs does up front.
-                Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => {
-                    match crate::elevate(&self.archive, &self.mode) {
-                        Ok(true) => {
-                            self.succeeded.store(true, Ordering::Relaxed);
-                            ctx.send_viewport_cmd(ViewportCommand::Close);
-                            Page::Running
-                        }
-                        Ok(false) => Page::Failed(crate::declined(self.dest().unwrap_or(Path::new("")))),
-                        Err(message) => Page::Failed(message),
+                Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => match crate::elevate(&self.archive, &self.mode) {
+                    Ok(true) => {
+                        self.succeeded.store(true, Ordering::Relaxed);
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                        Page::Running
                     }
-                }
+                    Ok(false) => Page::Failed(crate::declined(self.dest().unwrap_or(Path::new("")))),
+                    Err(message) => Page::Failed(message),
+                },
                 Err(e) => Page::Failed(e.to_string()),
             };
         }
@@ -292,7 +317,6 @@ impl eframe::App for App {
             self.apply_to_all = false;
             self.page = Page::Conflict(ask);
         }
-
 
         let title = match &self.page {
             Page::Running => {
@@ -376,7 +400,11 @@ impl App {
         let elapsed = self.clock.active();
         let rate = if paused { 0.0 } else { self.clock.rate() };
         ui.horizontal(|ui| {
-            let amount = if total > 0 { format!("{} of {}", human(done), human(total)) } else { human(done) };
+            let amount = if total > 0 {
+                format!("{} of {}", human(done), human(total))
+            } else {
+                human(done)
+            };
             ui.label(RichText::new(amount).color(pal.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let status = if paused {
@@ -470,7 +498,12 @@ impl App {
 
     fn password_page(&mut self, ui: &mut Ui, wrong: bool) {
         let pal = palette(ui);
-        header(ui, |ui| style::status_icon(ui, Icon::Lock), "Password required", &format!("{} is encrypted", self.name));
+        header(
+            ui,
+            |ui| style::status_icon(ui, Icon::Lock),
+            "Password required",
+            &format!("{} is encrypted", self.name),
+        );
         ui.add_space(14.0);
         let mut submit = false;
         ui.horizontal(|ui| {
@@ -539,9 +572,7 @@ impl App {
                 if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
-            } else if style::primary_button(ui, "Close", true).clicked()
-                || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
-            {
+            } else if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
             }
         });
@@ -550,13 +581,16 @@ impl App {
     fn failed_page(&mut self, ui: &mut Ui, message: &str) {
         let pal = palette(ui);
         let verb = if self.dest().is_some() { "extract" } else { "test" };
-        header(ui, |ui| style::status_icon(ui, Icon::Error), &format!("Couldn't {verb} the archive"), &self.name);
+        header(
+            ui,
+            |ui| style::status_icon(ui, Icon::Error),
+            &format!("Couldn't {verb} the archive"),
+            &self.name,
+        );
         ui.add_space(12.0);
         ui.add(egui::Label::new(RichText::new(message).color(pal.text)).wrap());
         buttons(ui, |ui| {
-            if style::primary_button(ui, "Close", true).clicked()
-                || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
-            {
+            if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
             }
         });
@@ -611,11 +645,19 @@ fn local_time(t: SystemTime) -> Option<String> {
 
 fn clock(d: Duration) -> String {
     let s = d.as_secs();
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 fn seconds(secs: f64) -> String {
-    if secs < 60.0 { format!("{secs:.2} s") } else { clock(Duration::from_secs_f64(secs)) }
+    if secs < 60.0 {
+        format!("{secs:.2} s")
+    } else {
+        clock(Duration::from_secs_f64(secs))
+    }
 }
 
 pub fn human(bytes: u64) -> String {
@@ -626,5 +668,9 @@ pub fn human(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

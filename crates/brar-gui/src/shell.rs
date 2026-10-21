@@ -9,15 +9,11 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{ERROR_CANCELLED, HWND},
-        System::Com::{
-            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-            CoInitializeEx, CoTaskMemFree,
-        },
+        System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree},
         UI::{
             Shell::{
-                FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
-                IShellItem, IsUserAnAdmin, SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW,
-                SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
+                FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, IsUserAnAdmin,
+                SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
             },
             WindowsAndMessaging::{AllowSetForegroundWindow, GetForegroundWindow, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL},
         },

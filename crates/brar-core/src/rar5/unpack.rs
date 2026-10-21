@@ -50,7 +50,13 @@ struct Bits<'a> {
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8], packed_len: usize) -> Self {
-        let mut b = Self { data, next: 0, buf: 0, cnt: 0, max_next: packed_len + 32 };
+        let mut b = Self {
+            data,
+            next: 0,
+            buf: 0,
+            cnt: 0,
+            max_next: packed_len + 32,
+        };
         b.refill();
         b
     }
@@ -170,10 +176,10 @@ impl Huffman {
             // Codes of each length are consecutive, so each symbol owns one contiguous run of
             // 2^(q - length) prefixes: fill runs instead of searching per prefix.
             let mut at = 0usize;
-            for len in 1..=q as usize {
+            for (len, &n) in count.iter().enumerate().take(q as usize + 1).skip(1) {
                 let span = 1usize << (q as usize - len);
                 let first = self.first[len] as usize;
-                for k in 0..count[len] as usize {
+                for k in 0..n as usize {
                     let entry = (self.symbols[first + k] << 5) | len as u16;
                     self.quick[at..at + span].fill(entry);
                     at += span;
@@ -423,7 +429,11 @@ fn read_block_header(bits: &mut Bits, limit: usize) -> Res<Block> {
     // The block ends `bit_size` bits into its last byte.
     let start = bits.pos() >> 3;
     let end = ((start + block_size as usize) * 8 + bit_size as usize).saturating_sub(8);
-    Ok(Block { end, last: flags & 0x40 != 0, has_tables: flags & 0x80 != 0 })
+    Ok(Block {
+        end,
+        last: flags & 0x40 != 0,
+        has_tables: flags & 0x80 != 0,
+    })
 }
 
 fn read_tables(bits: &mut Bits, t: &mut Tables, dist_codes: usize, limit: usize) -> Res<()> {
@@ -579,7 +589,12 @@ fn read_filter(bits: &mut Bits, pos: usize) -> Filter {
         channels = bits.take(5) as usize + 1;
     }
     // The start is relative to the current output position.
-    Filter { start: pos + start, len, kind, channels }
+    Filter {
+        start: pos + start,
+        len,
+        kind,
+        channels,
+    }
 }
 
 fn read_filter_number(bits: &mut Bits) -> u32 {

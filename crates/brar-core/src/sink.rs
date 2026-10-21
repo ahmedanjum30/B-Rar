@@ -18,10 +18,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{
-    Conflict, ConflictPolicy, Error, IoContext, Options, Progress, Resolution, Result, Summary, normalize_name,
-    path::safe_join,
-};
+use crate::{Conflict, ConflictPolicy, Error, IoContext, Options, Progress, Resolution, Result, Summary, normalize_name, path::safe_join};
 
 /// Files up to this size are buffered in memory and written in the background.
 pub(crate) const SMALL_FILE: u64 = 8 << 20;
@@ -105,7 +102,11 @@ impl Shared {
     /// Fails after a cancel, and blocks while paused.
     fn check_running(&self) -> Result<()> {
         let running = self.progress.as_ref().is_none_or(|p| p.wait_if_paused());
-        if !running || self.is_cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+        if !running || self.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 
     /// Decides what to do with an existing `path`: `Some(path to write)` or `None` to skip.
@@ -119,7 +120,11 @@ impl Shared {
                     Some(r) => r,
                     None => {
                         self.check_running()?;
-                        let decision = ask(&Conflict { path, new_size: size, new_modified: mtime });
+                        let decision = ask(&Conflict {
+                            path,
+                            new_size: size,
+                            new_modified: mtime,
+                        });
                         if decision.apply_to_all {
                             *self.sticky.lock().unwrap() = Some(decision.resolution);
                         }
@@ -283,13 +288,7 @@ impl Sink {
 
     /// Streams `reader` to the entry's file on the calling thread. Fully reading the reader
     /// is what lets zip/7z verify their CRCs, so test mode and skipped files drain it too.
-    pub(crate) fn file(
-        &self,
-        name: &str,
-        size: Option<u64>,
-        mtime: Option<SystemTime>,
-        reader: &mut dyn Read,
-    ) -> Result<()> {
+    pub(crate) fn file(&self, name: &str, size: Option<u64>, mtime: Option<SystemTime>, reader: &mut dyn Read) -> Result<()> {
         self.check()?;
         if !self.selected(name) {
             // Not picked, but a sequential stream still has to get past it.
@@ -345,13 +344,7 @@ impl Sink {
 
     /// Like [`Sink::file`], but small files are read into memory here and written on the
     /// writer pool, so a sequential decoder never waits on file creation.
-    pub(crate) fn file_buffered(
-        &self,
-        name: &str,
-        size: u64,
-        mtime: Option<SystemTime>,
-        reader: &mut dyn Read,
-    ) -> Result<()> {
+    pub(crate) fn file_buffered(&self, name: &str, size: u64, mtime: Option<SystemTime>, reader: &mut dyn Read) -> Result<()> {
         if self.dest.is_none() || size > SMALL_FILE || !self.selected(name) {
             return self.file(name, Some(size), mtime, reader);
         }

@@ -192,13 +192,7 @@ fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start:
         r = rec_end;
     }
 
-    let supported = !is_dir
-        && !special
-        && !solid
-        && !size_unknown
-        && crc.is_some()
-        && version <= 1
-        && method <= 5;
+    let supported = !is_dir && !special && !solid && !size_unknown && crc.is_some() && version <= 1 && method <= 5;
     Some(Entry {
         index,
         name,
