@@ -65,6 +65,13 @@ impl Keys {
         digest.iter().enumerate().fold(0u32, |v, (i, &b)| v ^ u32::from(b) << ((i & 3) * 8))
     }
 
+    /// What an archive with MAC checksums stores for data whose BLAKE2sp digest is `digest`.
+    pub(crate) fn mac_digest(&self, digest: &[u8; 32]) -> [u8; 32] {
+        let mut m = Hmac::<Sha256>::new_from_slice(&self.hash_key).expect("HMAC takes any key length");
+        m.update(digest);
+        m.finalize().into_bytes().into()
+    }
+
     /// Decrypts `data` (whole 16-byte blocks of ciphertext) in place; `prev` is the ciphertext
     /// block before it, or the IV at the start.
     pub(crate) fn decrypt(&self, mut prev: [u8; 16], data: &mut [u8]) {

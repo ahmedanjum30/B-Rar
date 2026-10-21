@@ -101,9 +101,10 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
             sink.dir(&e.name)?;
         } else if !e.supported {
             retry.push(e.index);
-        } else if e.packed.saturating_add(e.size) > BUDGET {
-            // Too big to decode in memory: the engine streams it (stored data is unRAR's).
-            if e.method == 0 { retry.push(e.index) } else { big.push(e) }
+        } else if e.method != 0 && e.packed.saturating_add(e.size) > BUDGET {
+            // Too big to decode in memory: the engine streams it. (Big stored files are
+            // streamed by the fast path.)
+            big.push(e);
         } else {
             candidates.push(e);
         }
@@ -203,26 +204,51 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     extract_unrar(path, sink, opts, Some(&only))
 }
 
-/// A solid archive: one stream across all files, decoded by the engine in parallel. Anything
-/// it can't do (stored files, no or a wrong password, damage) sends the whole archive to unRAR.
+/// A solid archive: one stream across all compressed files, decoded by the engine in
+/// parallel. Stored files aren't part of the stream (unRAR copies them as they are), so they
+/// are copied separately. Anything it can't do (no or a wrong password, damage) sends the whole
+/// archive to unRAR.
 fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
-    let files: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| !e.is_dir).collect();
-    if files.iter().any(|e| !e.supported || e.method == 0) {
+    let all: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| !e.is_dir).collect();
+    if all.iter().any(|e| !e.supported) {
         return extract_unrar(path, sink, opts, None);
     }
-    sink.set_total(files.iter().filter(|e| sink.selected(&e.name)).map(|e| e.size).sum());
+    let (stored, files): (Vec<_>, Vec<_>) = all.into_iter().partition(|e| e.method == 0);
+    sink.set_total(stored.iter().chain(&files).filter(|e| sink.selected(&e.name)).map(|e| e.size).sum());
     for e in archive.entries.iter().filter(|e| e.is_dir) {
         sink.dir(&e.name)?;
     }
-    let result = run_engine(&Source::open(&archive)?, &files, sink, opts.thread_count());
+    let src = Source::open(&archive)?;
+    let result = if files.is_empty() {
+        Ok(())
+    } else {
+        run_engine(&src, &files, sink, opts.thread_count())
+    };
     if std::env::var_os("BRAR_STATS").is_some() {
         let how = if result.is_ok() { "the engine" } else { "unRAR" };
-        eprintln!("rar5: solid archive, {} files by {how}", files.len());
+        eprintln!("rar5: solid archive, {} files by {how}, {} stored", files.len(), stored.len());
     }
     match result {
-        Ok(()) => Ok(()),
-        Err(Fail::Stop(err)) => Err(err),
-        Err(Fail::Retry) => extract_unrar(path, sink, opts, None),
+        Ok(()) => {}
+        Err(Fail::Stop(err)) => return Err(err),
+        Err(Fail::Retry) => return extract_unrar(path, sink, opts, None),
+    }
+    // After the engine: had it failed, unRAR would redo everything, these too.
+    let budget = Budget::new(BUDGET);
+    let mut retry = HashSet::new();
+    for e in stored.into_iter().filter(|e| sink.selected(&e.name)) {
+        match extract_fast(&src, e, sink, &budget) {
+            Ok(()) => {}
+            Err(Fail::Retry) => {
+                retry.insert(e.index);
+            }
+            Err(Fail::Stop(err)) => return Err(err),
+        }
+    }
+    if retry.is_empty() {
+        Ok(())
+    } else {
+        extract_unrar(path, sink, opts, Some(&retry))
     }
 }
 
@@ -329,6 +355,9 @@ impl rar5::parallel::Output for EngineOutput<'_> {
 
 fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> std::result::Result<(), Fail> {
     sink.check().map_err(Fail::Stop)?;
+    if e.method == 0 && e.size > SMALL_FILE {
+        return copy_stored(src, e, sink);
+    }
     sink.start(&e.name);
     let (packed, size) = (e.packed as usize, e.size as usize);
     let _lease = budget.take(e.packed + e.size);
@@ -352,7 +381,7 @@ fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> 
         out.truncate(size);
         out
     };
-    if !e.check.ok(crc32fast::hash(&data)) {
+    if !e.check.matches(&data) {
         return Err(Fail::Retry);
     }
     let written = if e.size <= SMALL_FILE {
@@ -361,6 +390,40 @@ fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> 
         sink.file_bytes(&e.name, e.modified, &data)
     };
     written.map_err(Fail::Stop)
+}
+
+/// A stored file bigger than [`SMALL_FILE`], streamed to disk in pieces and checked on the
+/// way; removed again if the check fails.
+fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Result<(), Fail> {
+    const PIECE: u64 = 4 << 20;
+    // Encrypted data is padded to whole AES blocks.
+    if e.packed < e.size || (e.packed != e.size && (e.crypt.is_none() || e.packed - e.size >= 16)) {
+        return Err(Fail::Retry);
+    }
+    let mut out = sink.begin_file(&e.name, Some(e.size), e.modified).map_err(Fail::Stop)?;
+    let mut hasher = e.check.hasher();
+    let mut buf = Vec::with_capacity(PIECE as usize);
+    let mut at = 0;
+    while at < e.size {
+        let to = (at + PIECE).min(e.size);
+        buf.clear();
+        if e.read(src, at, to, &mut buf).is_err() {
+            out.discard();
+            return Err(Fail::Retry);
+        }
+        hasher.update(&buf);
+        if let Err(err) = out.write(&buf) {
+            out.discard();
+            return Err(Fail::Stop(err));
+        }
+        at = to;
+    }
+    if !e.check.ok(hasher) {
+        out.discard();
+        return Err(Fail::Retry);
+    }
+    out.finish();
+    Ok(())
 }
 
 /// The unRAR path, for the whole archive or (`only`) just the given file-header indices.

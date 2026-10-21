@@ -35,19 +35,70 @@ pub(crate) struct Piece {
     pub len: u64,
 }
 
-/// The CRC32 a file's data must have, stored plainly or as a MAC (encrypted archives).
+/// The checksum a file's data must have: CRC32 or BLAKE2sp, stored plainly or as a MAC
+/// (encrypted archives).
 #[derive(Clone)]
 pub(crate) struct Check {
-    crc: u32,
+    sum: Sum,
     mac: Option<Arc<Keys>>,
 }
 
-impl Check {
-    pub(crate) fn ok(&self, crc: u32) -> bool {
-        match &self.mac {
-            Some(keys) => keys.mac(crc) == self.crc,
-            None => crc == self.crc,
+#[derive(Clone, Copy)]
+enum Sum {
+    Crc(u32),
+    Blake2([u8; 32]),
+}
+
+/// A checksum being computed, for [`Check::ok`].
+pub(crate) enum Hasher {
+    Crc(crc32fast::Hasher),
+    Blake2(Box<blake2s_simd::blake2sp::State>),
+}
+
+impl Hasher {
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        match self {
+            Hasher::Crc(h) => h.update(data),
+            Hasher::Blake2(h) => {
+                h.update(data);
+            }
         }
+    }
+}
+
+impl Check {
+    pub(crate) fn hasher(&self) -> Hasher {
+        match self.sum {
+            Sum::Crc(_) => Hasher::Crc(crc32fast::Hasher::new()),
+            Sum::Blake2(_) => Hasher::Blake2(Box::new(blake2s_simd::blake2sp::State::new())),
+        }
+    }
+
+    pub(crate) fn ok(&self, h: Hasher) -> bool {
+        match (self.sum, h) {
+            (Sum::Crc(want), Hasher::Crc(h)) => {
+                let crc = h.finalize();
+                match &self.mac {
+                    Some(keys) => keys.mac(crc) == want,
+                    None => crc == want,
+                }
+            }
+            (Sum::Blake2(want), Hasher::Blake2(h)) => {
+                let digest: [u8; 32] = *h.finalize().as_array();
+                match &self.mac {
+                    Some(keys) => keys.mac_digest(&digest) == want,
+                    None => digest == want,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Checks data that's all in memory.
+    pub(crate) fn matches(&self, data: &[u8]) -> bool {
+        let mut h = self.hasher();
+        h.update(data);
+        self.ok(h)
     }
 }
 
@@ -86,15 +137,22 @@ pub(crate) struct Archive {
     pub volumes: Vec<PathBuf>,
 }
 
-/// The archive's volumes, open for reading packed data.
+/// The archive's volumes, open for reading packed data: big reads (whole files, engine
+/// chunks) with positioned reads, small ones (block headers) from a memory map, where a
+/// syscall per header would cost more than the copy.
 pub(crate) struct Source {
     files: Vec<File>,
+    maps: Vec<memmap2::Mmap>,
 }
+
+/// Reads up to this size come from the map.
+const SMALL_READ: u64 = 4096;
 
 impl Source {
     pub(crate) fn open(archive: &Archive) -> Result<Self> {
         let files = archive.volumes.iter().map(|p| File::open(p).at(p)).collect::<Result<_>>()?;
-        Ok(Self { files })
+        let maps = archive.volumes.iter().map(|p| mmap(p)).collect::<Result<_>>()?;
+        Ok(Self { files, maps })
     }
 }
 
@@ -131,7 +189,11 @@ impl Entry {
         for p in &self.pieces {
             let (lo, hi) = (from.max(at) - at, to.min(at + p.len).saturating_sub(at));
             at += p.len;
-            if lo < hi {
+            if lo < hi && hi - lo <= SMALL_READ {
+                let map = src.maps.get(p.volume).ok_or(unpack::Corrupt)?;
+                let range = usize::try_from(p.start + lo).ok().zip(usize::try_from(p.start + hi).ok());
+                out.extend_from_slice(range.and_then(|(a, b)| map.get(a..b)).ok_or(unpack::Corrupt)?);
+            } else if lo < hi {
                 let file = src.files.get(p.volume).ok_or(unpack::Corrupt)?;
                 let start = out.len();
                 out.resize(start + (hi - lo) as usize, 0);
@@ -317,7 +379,7 @@ impl Parser<'_> {
     /// continued from the previous volume, 0x10 = continues in the next).
     fn file(&mut self, h: &Header, volume: usize) -> Option<()> {
         let (split_before, split_after) = (h.flags & 0x8 != 0, h.flags & 0x10 != 0);
-        let (part, has_crc) = self.file_entry(h, volume)?;
+        let (part, has_check) = self.file_entry(h, volume)?;
         let mut e = match self.open.take() {
             Some(mut e) if split_before => {
                 if e.name != part.name {
@@ -330,7 +392,7 @@ impl Parser<'_> {
                     return None;
                 }
                 e.supported &= part.supported;
-                // The file's CRC is in its last piece's header.
+                // The file's checksum is in its last piece's header.
                 e.check = part.check;
                 e
             }
@@ -344,13 +406,13 @@ impl Parser<'_> {
         if split_after {
             self.open = Some(e);
         } else {
-            e.supported &= has_crc;
+            e.supported &= has_check;
             self.entries.push(e);
         }
         Some(())
     }
 
-    /// The entry for one file header (one piece, if split), and whether it has a CRC.
+    /// The entry for one file header (one piece, if split), and whether it has a checksum.
     fn file_entry(&mut self, h: &Header, volume: usize) -> Option<(Entry, bool)> {
         let (body, mut q, extra) = (&h.body[..], h.fields, h.extra());
         let file_flags = vint(body, &mut q)?;
@@ -378,7 +440,8 @@ impl Parser<'_> {
         let is_dir = file_flags & 0x1 != 0;
         let size_unknown = file_flags & 0x8 != 0;
 
-        let mut special = false; // BLAKE2 hash, links, encryption B-Rar can't open: unRAR's job
+        let mut special = false; // links, encryption B-Rar can't open: unRAR's job
+        let mut blake2 = None;
         let mut crypt = None;
         let mut mac = None;
         let mut r = 0usize;
@@ -406,7 +469,14 @@ impl Parser<'_> {
                         _ => special = true,
                     }
                 }
-                0x02 | 0x05 => special = true, // file hash, redirection
+                0x02 => {
+                    // File hash: type 0 = BLAKE2sp, 32 bytes.
+                    match vint(rec, &mut s)? {
+                        0 => blake2 = Some(<[u8; 32]>::try_from(rec.get(s..s + 32)?).ok()?),
+                        _ => special = true,
+                    }
+                }
+                0x05 => special = true, // redirection (links)
                 0x03 => {
                     if let Some(t) = high_precision_mtime(rec, s) {
                         modified = Some(t);
@@ -436,14 +506,22 @@ impl Parser<'_> {
             }],
             packed: h.data_size,
             crypt,
-            check: Check { crc: crc.unwrap_or(0), mac },
+            // CRC32 when there is one: cheaper to compute.
+            check: Check {
+                sum: match (crc, blake2) {
+                    (Some(c), _) => Sum::Crc(c),
+                    (None, Some(d)) => Sum::Blake2(d),
+                    (None, None) => Sum::Crc(0),
+                },
+                mac,
+            },
             method,
             extra_dist: version == 1,
             dict,
             modified,
             supported,
         };
-        Some((entry, crc.is_some()))
+        Some((entry, crc.is_some() || blake2.is_some()))
     }
 }
 
@@ -562,7 +640,7 @@ mod tests {
                     c_min = c_min.min(cycles() - c0);
                     s_min = s_min.min(t.elapsed().as_secs_f64());
                 }
-                assert!(e.check.ok(crc32fast::hash(&out[..n])), "{}", e.name);
+                assert!(e.check.matches(&out[..n]), "{}", e.name);
                 (packed, size, best_s, best_c) = (packed + e.packed, size + e.size, best_s + s_min, best_c + c_min);
             }
             let name = Path::new(path).file_name().unwrap().to_string_lossy();

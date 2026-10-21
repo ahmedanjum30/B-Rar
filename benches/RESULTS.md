@@ -18,6 +18,44 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21 (late): phase B (the engine's serial step) made cheaper
+
+Measured while a game was running on the same PC, so absolute times are ~10-25% slower
+than the rest of this file; every comparison below ran back to back under the same load.
+Test mode (`t`), so no disk writes.
+
+**Prefetching copy sources.** On big archives 44% of copies reach more than 1 MB back and 13%
+more than 16 MB (past the L3 cache), and phase B handles them one after another, waiting on
+memory each time. It now follows the ops 16 ahead (with the same repeat-distance
+bookkeeping) and prefetches each copy's source.
+
+| Archive | no prefetch | prefetch 8 | prefetch 16 | prefetch 32 |
+|---|---|---|---|---|
+| one 545 MB file | 0.97 s (phase B 4.8 cyc/B) | 0.73 s | **0.71 s (3.4)** | 0.73 s |
+| solid 1 GB game | 1.73 s (3.7) | 1.39 s | **1.38 s (2.8)** | 1.42 s |
+| 545 MB file, 512 MB dictionary | 1.17 s (5.7) | | **0.76 s (3.6)** | |
+
+**Window slides scale with the dictionary.** The window slid every 32 MB of output, moving
+the whole dictionary each time: at a 256 MB dictionary, 8 bytes moved per byte produced.
+The free room now grows with the dictionary (up to 1 GB).
+
+| Archive | before | after | UnRAR |
+|---|---|---|---|
+| solid 1 GB game, `-md256m` | 2.08 s (phase B 4.5) | **1.46 s (2.9)** | 3.90 s |
+
+Earlier the same day (idle PC): a drain thread now does the CRCs and the writing (phase B
+4.2 -> 3.5 cycles/B when extracting), phase A uses half the logical CPUs (it needs only a few
+to keep ahead, and more share cores with phase B), and block headers are read from a memory
+map (scan 0.08 -> 0.04 s): one 545 MB file 0.81 -> 0.77 s, solid 1 GB game 1.64 -> 1.51 s.
+
+Looked at and not done:
+- *Parallel phase B.* 17-20% of the output bytes of the big archives (90% for the 48k source
+  files) depend on earlier chunks, but 75-79% of the copies do, so most of the serial work
+  would stay serial.
+- *Faster small-file creation.* Just creating and closing 48k empty files takes 3.1 s on
+  this PC (5.0 s with their data and times, 16 threads), against 6.3 s for B-Rar's whole
+  extraction. Giving each thread whole folders was 5% faster but serializes an archive whose
+  files are all in one folder; batches of up to 32 files from one folder gained nothing.
 ## 2026-10-21 (22:42): encrypted and multi-volume RAR5 through B-Rar's own decoder
 
 RAR5 archives with encrypted data (AES-256), encrypted headers, or several volumes now use

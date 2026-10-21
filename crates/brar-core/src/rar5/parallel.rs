@@ -18,6 +18,7 @@ use std::{
     sync::{
         Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{Receiver, Sender, SyncSender, channel, sync_channel},
     },
 };
 
@@ -65,8 +66,12 @@ fn thread_cycles() -> u64 {
 
 /// Compressed bytes per chunk (phase A's unit of work).
 const CHUNK_PACKED: usize = 1 << 20;
-/// Window space beyond what must be kept, so it slides (a memmove) only every so often.
+/// Window space beyond what must be kept, so it slides (a memmove of everything kept) only
+/// every so often: at least this much, and as much as the dictionary up to [`MAX_ROOM`], so a
+/// big dictionary doesn't mean moving it all every few MB (256 MB per 32 MB of output, at a
+/// 256 MB dictionary, measured +1.7 cycles per byte).
 const SLIDE_ROOM: usize = 32 << 20;
+const MAX_ROOM: usize = 1 << 30;
 
 /// One block of the stream, found by the header scan.
 #[derive(Clone, Copy)]
@@ -118,11 +123,16 @@ const FILE_END: u32 = 8;
 
 /// Decodes `files` (in stream order: one file, or every data file of a solid archive) from
 /// the archive's volumes, sending the output to `out`. `window` is the dictionary size.
-pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usize, out: &mut dyn Output) -> Result<(), Failure> {
+pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usize, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
+    let t0 = std::time::Instant::now();
     let spans = scan(src, files)?;
+    let scanned = t0.elapsed();
     let chunks = group(&spans)?;
     let total: usize = files.iter().map(|e| e.size as usize).sum();
-    let workers = threads.max(1);
+    // Phase A needs only a few cores to keep ahead of phase B (the serial step), and more
+    // workers share physical cores with phase B and the drain thread, slowing them down:
+    // measured best at about half the logical CPUs.
+    let workers = if threads >= 8 { threads / 2 } else { threads.max(1) };
     // Chunks decoded ahead of phase B, which bounds the tokens held in memory.
     let ahead = 2 * workers + 2;
 
@@ -144,7 +154,7 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
     let stats = std::env::var_os("BRAR_STATS").is_some();
     let phase_b_start = thread_cycles();
 
-    let (result, phase_b) = std::thread::scope(|scope| {
+    let (result, phase_b, drain_cycles) = std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 let mut tables = Tables::new();
@@ -169,10 +179,25 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
             });
         }
 
+        let (tx, rx) = sync_channel(BATCHES);
+        let (spare_tx, spare_rx) = channel();
+        let abort = &abort;
+        let drained = scope.spawn(move || {
+            let r = drain(rx, spare_tx, abort, out);
+            (r, thread_cycles())
+        });
+        let mut out = Drain {
+            tx: Some(tx),
+            spare: spare_rx,
+            batch: Vec::with_capacity(BATCH),
+            file: 0,
+        };
+        let out = &mut out;
         let mut w = Window::new(window.min(total), total);
         let result = (|| -> Result<(), Failure> {
             let mut current = FileState::new(files, 0, 0);
-            out.start(0).map_err(Failure::Stop)?;
+            out.start(0, &files[0].check)?;
+            let mut waited = std::time::Duration::ZERO;
             for (i, chunk) in chunks.iter().enumerate() {
                 let tokens = {
                     let mut q = queue.lock().unwrap();
@@ -181,7 +206,9 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
                             q.consumed = i + 1;
                             break t;
                         }
+                        let t = std::time::Instant::now();
                         q = ready.wait(q).unwrap();
+                        waited += t.elapsed();
                     }
                 };
                 space.notify_all();
@@ -195,10 +222,18 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
                 spare.lock().unwrap().push(tokens);
             }
             w.finish_file(&mut current, out)?;
+            if stats {
+                eprintln!(
+                    "engine: scan {:.3} s, phase B done at {:.3} s, waited {:.3} s for phase A",
+                    scanned.as_secs_f64(),
+                    t0.elapsed().as_secs_f64(),
+                    waited.as_secs_f64()
+                );
+            }
             // Empty files after the last one with data.
             for index in current.index + 1..files.len() {
                 let mut f = FileState::new(files, index, w.pos);
-                out.start(index).map_err(Failure::Stop)?;
+                out.start(index, &files[index].check)?;
                 w.finish_file(&mut f, out)?;
             }
             Ok(())
@@ -207,15 +242,21 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
             abort.store(true, Ordering::Relaxed);
             space.notify_all();
         }
-        (result, thread_cycles() - phase_b_start)
+        let phase_b = thread_cycles() - phase_b_start;
+        // Hang up, so the drain thread finishes; its failure is the real one.
+        out.tx = None;
+        let (drained, drain_cycles) = drained.join().expect("drain thread panicked");
+        (drained.and(result), phase_b, drain_cycles)
     });
     if stats {
         eprintln!(
-            "engine: {} chunks, {} blocks, phase A {:.2} cycles/B, phase B {:.2} cycles/B",
+            "engine: window {} MB, {} chunks, {} blocks, phase A {:.2} cycles/B, phase B {:.2} cycles/B, drain {:.2} cycles/B",
+            window.min(total) >> 20,
             chunks.len(),
             spans.len(),
             phase_a.load(Ordering::Relaxed) as f64 / total.max(1) as f64,
-            phase_b as f64 / total.max(1) as f64
+            phase_b as f64 / total.max(1) as f64,
+            drain_cycles as f64 / total.max(1) as f64
         );
     }
     result
@@ -455,8 +496,6 @@ struct FileState {
     /// Its bytes are stream positions start..end.
     start: usize,
     end: usize,
-    check: super::Check,
-    hasher: crc32fast::Hasher,
 }
 
 impl FileState {
@@ -465,10 +504,99 @@ impl FileState {
             index,
             start,
             end: start + files[index].size as usize,
-            check: files[index].check.clone(),
-            hasher: crc32fast::Hasher::new(),
         }
     }
+}
+
+/// Bytes handed from phase B to the drain thread at a time.
+const BATCH: usize = 1 << 20;
+/// Batches in flight between them.
+const BATCHES: usize = 8;
+
+enum Msg {
+    /// A file starts; its data must have this checksum.
+    Start(usize, super::Check),
+    Data(usize, Vec<u8>),
+    Finish(usize),
+}
+
+/// Phase B's end of the drain: finished bytes go out in batches to the drain thread, which
+/// computes the CRCs and writes the files, so phase B (the one serial step) only decodes.
+struct Drain {
+    tx: Option<SyncSender<Msg>>,
+    /// Batches the drain thread is done with.
+    spare: Receiver<Vec<u8>>,
+    batch: Vec<u8>,
+    file: usize,
+}
+
+impl Drain {
+    fn send(&self, m: Msg) -> Result<(), Failure> {
+        // The drain thread only hangs up after a failure, which it returns itself.
+        self.tx.as_ref().ok_or(Failure::Corrupt)?.send(m).map_err(|_| Failure::Corrupt)
+    }
+
+    fn flush(&mut self) -> Result<(), Failure> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        let next = self.spare.try_recv().unwrap_or_else(|_| Vec::with_capacity(BATCH));
+        let full = std::mem::replace(&mut self.batch, next);
+        self.send(Msg::Data(self.file, full))
+    }
+
+    fn start(&mut self, file: usize, check: &super::Check) -> Result<(), Failure> {
+        self.flush()?;
+        self.file = file;
+        self.send(Msg::Start(file, check.clone()))
+    }
+
+    fn write(&mut self, mut data: &[u8]) -> Result<(), Failure> {
+        while !data.is_empty() {
+            let n = data.len().min(BATCH - self.batch.len());
+            self.batch.extend_from_slice(&data[..n]);
+            data = &data[n..];
+            if self.batch.len() == BATCH {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, file: usize) -> Result<(), Failure> {
+        self.flush()?;
+        self.send(Msg::Finish(file))
+    }
+}
+
+/// The drain thread: CRCs and output, in order.
+fn drain(rx: Receiver<Msg>, spare: Sender<Vec<u8>>, abort: &AtomicBool, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
+    let mut hasher = None;
+    for m in rx {
+        if abort.load(Ordering::Relaxed) {
+            break;
+        }
+        match m {
+            Msg::Start(file, check) => {
+                hasher = Some((check.hasher(), check));
+                out.start(file).map_err(Failure::Stop)?;
+            }
+            Msg::Data(file, mut data) => {
+                hasher.as_mut().ok_or(Failure::Corrupt)?.0.update(&data);
+                out.write(file, &data).map_err(Failure::Stop)?;
+                data.clear();
+                let _ = spare.send(data);
+            }
+            Msg::Finish(file) => {
+                let (h, check) = hasher.take().ok_or(Failure::Corrupt)?;
+                if !check.ok(h) {
+                    return Err(Failure::Corrupt);
+                }
+                out.finish(file).map_err(Failure::Stop)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Phase B's sliding window: `buf[0]` is stream position `base`; output so far ends at `pos`;
@@ -485,11 +613,85 @@ struct Window {
     filters: VecDeque<Filter>,
     filtered: Vec<u8>,
     scratch: Vec<u8>,
+    /// Free space after a slide.
+    slide: usize,
+}
+
+/// Copies looked at ahead of phase B, so their (often far back, so uncached) source bytes are
+/// on their way from memory by the time they're copied.
+const PREFETCH: usize = 16;
+
+/// Phase B's look-ahead: follows the ops with the same distance bookkeeping, without copying,
+/// and prefetches each copy's source.
+struct Ahead {
+    i: usize,
+    pos: usize,
+    r: Recent,
+}
+
+impl Ahead {
+    #[inline(always)]
+    fn run(&mut self, ops: &[Op], until: usize, buf: &[u8], base: usize) {
+        while self.i < until.min(ops.len()) {
+            let op = ops[self.i];
+            self.i += 1;
+            self.pos += op.lits as usize;
+            let len = (op.len & ((1 << KIND_SHIFT) - 1)) as usize;
+            let r = &mut self.r;
+            let dist = match op.len >> KIND_SHIFT {
+                MATCH => {
+                    *r = Recent {
+                        d0: op.dist as usize,
+                        d1: r.d0,
+                        d2: r.d1,
+                        d3: r.d2,
+                        len,
+                    };
+                    r.d0
+                }
+                LAST => r.d0,
+                n @ REPEAT..LAST => {
+                    let d = match n - REPEAT {
+                        0 => r.d0,
+                        1 => {
+                            let d = r.d1;
+                            r.d1 = r.d0;
+                            d
+                        }
+                        2 => {
+                            let d = r.d2;
+                            (r.d2, r.d1) = (r.d1, r.d0);
+                            d
+                        }
+                        _ => {
+                            let d = r.d3;
+                            (r.d3, r.d2, r.d1) = (r.d2, r.d1, r.d0);
+                            d
+                        }
+                    };
+                    (r.d0, r.len) = (d, len);
+                    d
+                }
+                _ => continue,
+            };
+            let len = if op.len >> KIND_SHIFT == LAST { r.len } else { len };
+            // An estimate (files ending mid-chunk, a slide in between): a wrong guess only
+            // costs a useless prefetch.
+            if let Some(at) = self.pos.checked_sub(dist).and_then(|s| s.checked_sub(base))
+                && at < buf.len()
+            {
+                // SAFETY: a prefetch of an address inside `buf`; it can't fault.
+                unsafe { std::arch::x86_64::_mm_prefetch(buf.as_ptr().add(at).cast(), std::arch::x86_64::_MM_HINT_T0) };
+            }
+            self.pos += len;
+        }
+    }
 }
 
 impl Window {
     fn new(keep: usize, total: usize) -> Self {
-        let size = (keep + SLIDE_ROOM).min(total + MAX_MATCH * 2) + MAX_MATCH * 2;
+        let slide = keep.clamp(SLIDE_ROOM, MAX_ROOM);
+        let size = (keep + slide).min(total + MAX_MATCH * 2) + MAX_MATCH * 2;
         Self {
             buf: vec![0; size],
             base: 0,
@@ -500,12 +702,13 @@ impl Window {
             filters: VecDeque::new(),
             filtered: Vec::new(),
             scratch: Vec::new(),
+            slide,
         }
     }
 
     /// Makes room for `need` more bytes: sends what's finished, then drops what no match can
     /// reach any more.
-    fn room(&mut self, need: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn room(&mut self, need: usize, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         if self.pos - self.base + need <= self.buf.len() {
             return Ok(());
         }
@@ -515,19 +718,25 @@ impl Window {
         self.buf.copy_within(shift..self.pos - self.base, 0);
         self.base = keep_from;
         if self.pos - self.base + need > self.buf.len() {
-            self.buf.resize(self.pos - self.base + need + SLIDE_ROOM, 0);
+            self.buf.resize(self.pos - self.base + need + self.slide, 0);
         }
         Ok(())
     }
 
     /// Phase B for one chunk's tokens.
-    fn apply(&mut self, k: &Tokens, f: &mut FileState, files: &[&Entry], out: &mut dyn Output) -> Result<(), Failure> {
+    fn apply(&mut self, k: &Tokens, f: &mut FileState, files: &[&Entry], out: &mut Drain) -> Result<(), Failure> {
         let mut lp = 0;
-        for op in &k.ops {
+        let mut ahead = Ahead {
+            i: 0,
+            pos: self.pos,
+            r: self.recent,
+        };
+        for (oi, op) in k.ops.iter().enumerate() {
+            ahead.run(&k.ops, oi + PREFETCH, &self.buf, self.base);
             // Literals, in pieces that fit the window, up to the end of the file.
             let mut run = op.lits as usize;
             while run > 0 && self.pos < f.end {
-                let n = run.min(SLIDE_ROOM / 2).min(f.end - self.pos);
+                let n = run.min(self.slide / 2).min(f.end - self.pos);
                 self.room(n + MAX_MATCH, f, out)?;
                 let at = self.pos - self.base;
                 self.buf[at..at + n].copy_from_slice(&k.lits[lp..lp + n]);
@@ -611,20 +820,20 @@ impl Window {
     }
 
     /// Ends the current file and moves on to file `next` (files in between are empty).
-    fn switch(&mut self, f: &mut FileState, next: usize, files: &[&Entry], out: &mut dyn Output) -> Result<(), Failure> {
+    fn switch(&mut self, f: &mut FileState, next: usize, files: &[&Entry], out: &mut Drain) -> Result<(), Failure> {
         if next <= f.index || next >= files.len() {
             return Err(Failure::Corrupt);
         }
         self.finish_file(f, out)?;
         for index in f.index + 1..next {
             let mut empty = FileState::new(files, index, self.pos);
-            out.start(index).map_err(Failure::Stop)?;
+            out.start(index, &files[index].check)?;
             self.finish_file(&mut empty, out)?;
         }
         *f = FileState::new(files, next, self.pos);
-        out.start(next).map_err(Failure::Stop)
+        out.start(next, &files[next].check)
     }
-    fn copy(&mut self, dist: usize, len: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn copy(&mut self, dist: usize, len: usize, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         self.room(len + 32, f, out)?;
         let at = self.pos - self.base;
         if dist > self.pos || dist == 0 {
@@ -644,7 +853,7 @@ impl Window {
 
     /// Sends every finished byte of the current file: up to the output position, except
     /// filtered blocks that aren't complete yet.
-    fn emit(&mut self, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn emit(&mut self, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         let ready = self.pos.min(f.end);
         while let Some(flt) = self.filters.front() {
             if flt.start >= ready {
@@ -659,33 +868,31 @@ impl Window {
             }
             if self.pos < end {
                 // Not complete yet: send what's before it.
-                self.send(self.emitted, start, f, out)?;
+                self.send(self.emitted, start, out)?;
                 return Ok(());
             }
-            self.send(self.emitted, start, f, out)?;
+            self.send(self.emitted, start, out)?;
             self.filters.pop_front();
             self.filtered.clear();
             self.filtered.extend_from_slice(&self.buf[start - self.base..end - self.base]);
             filter_block(&mut self.filtered, (start - f.start) as u32, kind, channels, &mut self.scratch)?;
-            f.hasher.update(&self.filtered);
-            out.write(f.index, &self.filtered).map_err(Failure::Stop)?;
+            out.write(&self.filtered)?;
             self.emitted = end;
         }
-        self.send(self.emitted, ready, f, out)
+        self.send(self.emitted, ready, out)
     }
 
-    fn send(&mut self, from: usize, to: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn send(&mut self, from: usize, to: usize, out: &mut Drain) -> Result<(), Failure> {
         if to > from {
             let bytes = &self.buf[from - self.base..to - self.base];
-            f.hasher.update(bytes);
-            out.write(f.index, bytes).map_err(Failure::Stop)?;
+            out.write(bytes)?;
             self.emitted = to;
         }
         Ok(())
     }
 
     /// Ends the current file: everything sent, CRC checked.
-    fn finish_file(&mut self, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn finish_file(&mut self, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         if self.pos < f.end {
             return Err(Failure::Corrupt); // the data ended early
         }
@@ -695,10 +902,7 @@ impl Window {
         if self.emitted != f.end || !self.filters.is_empty() {
             return Err(Failure::Corrupt);
         }
-        let hasher = std::mem::take(&mut f.hasher);
-        if !f.check.ok(hasher.finalize()) {
-            return Err(Failure::Corrupt);
-        }
-        out.finish(f.index).map_err(Failure::Stop)
+        // The drain thread checks the checksum.
+        out.finish(f.index)
     }
 }
