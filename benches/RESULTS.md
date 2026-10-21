@@ -18,6 +18,40 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21 (22:11): RAR5 engine (big files, solid archives) and a 28.6 GB real archive
+
+After the decoder rewrite and the two-phase engine (`rar5/parallel.rs`). All cores, one run
+each (28.6 GB) or best of 2 (the rest), 5 s apart, competitors first. "prev" is the build
+before the engine (big files and solid archives went to unRAR).
+
+| Archive | B-Rar new | B-Rar prev | UnRAR | WinRAR | 7-Zip |
+|---|---|---|---|---|---|
+| TheOrder1886, 28.6 GB RAR5, 16,736 files, 33.3 GB out | **45.4 s** | 50.4 s | 104.5 s | 100.7 s | |
+| one 545 MB file | **0.87 s** | 1.46 s | 1.53 s | 2.01 s | 3.14 s |
+| 1.1 GB, 2 big + 77 files | **1.64 s** | 1.69 s | 3.36 s | 4.03 s | 7.55 s |
+| SOLID 1 GB game data | **1.80 s** | 3.13 s | 3.36 s | 4.04 s | 7.23 s |
+| SOLID 48k source files | 7.35 s | **7.26 s** | 27.55 s | 29.24 s | 24.68 s |
+
+The 28.6 GB output was compared byte for byte with UnRAR's: identical. On it, every file went
+through B-Rar's decoder (none is big enough for the engine: 33 GB over 16 threads), so the 10%
+gain over "prev" is the decoder rewrite.
+
+Total CPU cycles per output byte (all threads; inflated by SMT on this 8-core / 16-thread
+Ryzen 7 5800H for every multithreaded tool):
+
+| Archive | B-Rar new | B-Rar prev | UnRAR | 7-Zip (1 thread) |
+|---|---|---|---|---|
+| one 545 MB file | 18.2 | 26.2 | 30.7 | 17.9 |
+| 1.1 GB, 2 big + 77 | 19.6 | 28.9 | 31.0 | 18.4 |
+| SOLID 1 GB game | 18.1 | 26.1 | 29.5 | 17.7 |
+| SOLID 48k files | 98.6 | 76.4 | 86.1 | 74.2 |
+
+Engine phases (BRAR_STATS) before -> after chunking across files and reusing token buffers:
+solid 48k files 48,023 -> 67 chunks, phase A 21.0 -> 2.6 and phase B 9.7 -> 3.9 cycles/byte;
+one 545 MB file phase A 16.6 -> 10.9, phase B 6.0 -> 3.9.
+
+---
+
 ## 2026-10-21 (19:59): CPU work per byte, every tool and format
 
 Total CPU cycles of the whole extraction (all threads, `QueryProcessCycleTime`) divided by

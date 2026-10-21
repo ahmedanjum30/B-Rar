@@ -17,7 +17,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Condvar, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -48,6 +48,19 @@ impl From<Corrupt> for Failure {
     fn from(_: Corrupt) -> Self {
         Failure::Corrupt
     }
+}
+
+/// CPU cycles this thread has used (for BRAR_STATS).
+fn thread_cycles() -> u64 {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> isize;
+        fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+    }
+    let mut c = 0;
+    // SAFETY: the current thread's pseudo-handle and a valid out pointer.
+    unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+    c
 }
 
 /// Compressed bytes per chunk (phase A's unit of work).
@@ -99,6 +112,9 @@ const LAST: u32 = 5;
 const FILTER: u32 = 6;
 /// Only the literals before it (the end of a chunk).
 const TAIL: u32 = 7;
+/// The current file's data ends after the literals before it; `dist` is the next file with
+/// data (chunks span files).
+const FILE_END: u32 = 8;
 
 /// Decodes `files` (in stream order: one file, or every data file of a solid archive) from
 /// the archive bytes `map`, sending the output to `out`. `window` is the dictionary size.
@@ -118,38 +134,43 @@ pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize
         slots: (0..chunks.len()).map(|_| None).collect(),
         consumed: 0,
     });
-    let changed = Condvar::new();
+    // Phase B waits on `ready` for the next chunk; workers wait on `space` when too far ahead.
+    let (ready, space) = (Condvar::new(), Condvar::new());
+    // Token buffers phase B is done with, reused by the workers (fresh ones cost page faults).
+    let spare: Mutex<Vec<Tokens>> = Mutex::new(Vec::new());
     let next = AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
+    let phase_a = AtomicU64::new(0);
+    let stats = std::env::var_os("BRAR_STATS").is_some();
+    let phase_b_start = thread_cycles();
 
-    std::thread::scope(|scope| {
+    let (result, phase_b) = std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 let mut tables = Tables::new();
+                let mut input = Vec::new();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= chunks.len() {
-                        return;
-                    }
-                    {
+                    if i < chunks.len() {
                         let mut q = queue.lock().unwrap();
                         while i >= q.consumed + ahead && !abort.load(Ordering::Relaxed) {
-                            q = changed.wait(q).unwrap();
+                            q = space.wait(q).unwrap();
                         }
                     }
-                    if abort.load(Ordering::Relaxed) {
+                    if i >= chunks.len() || abort.load(Ordering::Relaxed) {
+                        phase_a.fetch_add(thread_cycles(), Ordering::Relaxed);
                         return;
                     }
-                    let tokens = decode_chunk(map, &spans, &chunks[i], files, &mut tables);
+                    let k = spare.lock().unwrap().pop().unwrap_or_default();
+                    let tokens = decode_chunk(map, &spans, &chunks[i], files, &mut tables, &mut input, k);
                     queue.lock().unwrap().slots[i] = Some(tokens);
-                    changed.notify_all();
+                    ready.notify_one();
                 }
             });
         }
 
         let mut w = Window::new(window.min(total), total);
         let result = (|| -> Result<(), Failure> {
-            let mut file = 0;
             let mut current = FileState::new(files, 0, 0);
             out.start(0).map_err(Failure::Stop)?;
             for (i, chunk) in chunks.iter().enumerate() {
@@ -160,38 +181,45 @@ pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize
                             q.consumed = i + 1;
                             break t;
                         }
-                        q = changed.wait(q).unwrap();
+                        q = ready.wait(q).unwrap();
                     }
                 };
-                changed.notify_all();
+                space.notify_all();
                 let tokens = tokens?;
-                // Files without chunks of their own (empty) and files that are done.
-                while spans[chunk.first].file > file {
-                    w.finish_file(&mut current, out)?;
-                    file += 1;
-                    current = FileState::new(files, file, w.pos);
-                    out.start(file).map_err(Failure::Stop)?;
+                // A chunk starting with a later file's data: the files before it are done.
+                let first_file = spans[chunk.first].file;
+                if first_file > current.index {
+                    w.switch(&mut current, first_file, files, out)?;
                 }
-                w.apply(&tokens, &mut current, out)?;
+                w.apply(&tokens, &mut current, files, out)?;
+                spare.lock().unwrap().push(tokens);
             }
-            loop {
-                w.finish_file(&mut current, out)?;
-                file += 1;
-                if file == files.len() {
-                    return Ok(());
-                }
-                current = FileState::new(files, file, w.pos);
-                out.start(file).map_err(Failure::Stop)?;
+            w.finish_file(&mut current, out)?;
+            // Empty files after the last one with data.
+            for index in current.index + 1..files.len() {
+                let mut f = FileState::new(files, index, w.pos);
+                out.start(index).map_err(Failure::Stop)?;
+                w.finish_file(&mut f, out)?;
             }
+            Ok(())
         })();
         if result.is_err() {
             abort.store(true, Ordering::Relaxed);
-            changed.notify_all();
+            space.notify_all();
         }
-        result
-    })
+        (result, thread_cycles() - phase_b_start)
+    });
+    if stats {
+        eprintln!(
+            "engine: {} chunks, {} blocks, phase A {:.2} cycles/B, phase B {:.2} cycles/B",
+            chunks.len(),
+            spans.len(),
+            phase_a.load(Ordering::Relaxed) as f64 / total.max(1) as f64,
+            phase_b as f64 / total.max(1) as f64
+        );
+    }
+    result
 }
-
 /// Reads the block headers of every file's packed data (each header gives its block's size,
 /// so nothing is decoded here).
 fn scan(map: &[u8], files: &[&Entry]) -> Res<Vec<Span>> {
@@ -231,8 +259,8 @@ fn scan(map: &[u8], files: &[&Entry]) -> Res<Vec<Span>> {
     Ok(spans)
 }
 
-/// Groups blocks into chunks of about [`CHUNK_PACKED`], each within one file and starting at a
-/// block with tables where possible.
+/// Groups blocks into chunks of about [`CHUNK_PACKED`], starting at a block with tables where
+/// possible. Chunks span files: a solid archive of many small files still gets few chunks.
 fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
     let mut chunks = Vec::new();
     let mut tables_at = None;
@@ -245,7 +273,7 @@ fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
         let tables_from = tables_at.ok_or(Corrupt)?;
         let mut bytes = spans[i].end - spans[i].start;
         let mut j = i + 1;
-        while j < spans.len() && spans[j].file == spans[i].file && !(spans[j].has_tables && bytes >= CHUNK_PACKED) {
+        while j < spans.len() && !(spans[j].has_tables && bytes >= CHUNK_PACKED) {
             if spans[j].has_tables {
                 tables_at = Some(j);
             }
@@ -262,50 +290,66 @@ fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
     Ok(chunks)
 }
 
-/// The bytes `map[from..to]`, followed by the zero padding the bit reader needs.
-fn padded(map: &[u8], from: usize, to: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(to - from + INPUT_PADDING);
-    v.extend_from_slice(&map[from..to]);
-    v.resize(to - from + INPUT_PADDING, 0);
-    v
+/// `input` = the bytes `map[from..to]`, followed by the zero padding the bit reader needs.
+fn fill(input: &mut Vec<u8>, map: &[u8], from: usize, to: usize) {
+    input.clear();
+    input.extend_from_slice(&map[from..to]);
+    input.resize(to - from + INPUT_PADDING, 0);
 }
 
 fn dist_codes(e: &Entry) -> usize {
     if e.extra_dist { DCX } else { DCB }
 }
 
-/// Phase A for one chunk.
-fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables) -> Res<Tokens> {
+/// Phase A for one chunk, into `k` (a recycled buffer). `input` is the worker's scratch.
+fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
+    k.lits.clear();
+    k.ops.clear();
     if c.tables_from != c.first {
         // This chunk continues with an earlier block's tables: read them from that block.
         let s = spans[c.tables_from];
-        let input = padded(map, s.start, s.end);
-        let mut bits = Bits::new(&input, s.end - s.start);
+        fill(input, map, s.start, s.end);
+        let mut bits = Bits::new(input, s.end - s.start);
         let limit = (s.end - s.start + 16) * 8;
         if !read_block_header(&mut bits, limit)?.has_tables {
             return Err(Corrupt);
         }
         read_tables(&mut bits, t, dist_codes(files[s.file]), limit)?;
     }
-    let (from, to) = (spans[c.first].start, spans[c.last - 1].end);
-    let codes = dist_codes(files[spans[c.first].file]);
-    let input = padded(map, from, to);
-    let mut bits = Bits::new(&input, to - from);
-    let limit = (to - from + 16) * 8;
-    let mut k = Tokens {
-        lits: Vec::with_capacity((to - from) * 2),
-        ops: Vec::with_capacity((to - from) / 16),
-    };
     let mut mark = 0;
-    for _ in c.first..c.last {
-        let block = read_block_header(&mut bits, limit)?;
-        if block.has_tables {
-            read_tables(&mut bits, t, codes, limit)?;
+    let mut b = c.first;
+    while b < c.last {
+        // The chunk's blocks of one file are contiguous in the archive; the next file's start
+        // after its headers.
+        let file = spans[b].file;
+        if b > c.first {
+            k.ops.push(Op {
+                lits: (k.lits.len() - mark) as u32,
+                len: FILE_END << KIND_SHIFT,
+                dist: file as u64,
+            });
+            mark = k.lits.len();
         }
-        bits = tokenize(t, bits, block.end.min(limit), &mut k, &mut mark);
-        if bits.pos() < block.end {
-            return Err(Corrupt); // stopped at the input limit, not the block end
+        let mut e = b + 1;
+        while e < c.last && spans[e].file == file {
+            e += 1;
         }
+        let (from, to) = (spans[b].start, spans[e - 1].end);
+        fill(input, map, from, to);
+        let mut bits = Bits::new(input, to - from);
+        let limit = (to - from + 16) * 8;
+        let codes = dist_codes(files[file]);
+        for _ in b..e {
+            let block = read_block_header(&mut bits, limit)?;
+            if block.has_tables {
+                read_tables(&mut bits, t, codes, limit)?;
+            }
+            bits = tokenize(t, bits, block.end.min(limit), &mut k, &mut mark);
+            if bits.pos() < block.end {
+                return Err(Corrupt); // stopped at the input limit, not the block end
+            }
+        }
+        b = e;
     }
     // Literals after the last op travel as an op with no payload.
     if k.lits.len() > mark {
@@ -317,7 +361,6 @@ fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut
     }
     Ok(k)
 }
-
 /// Decodes one block's symbols into tokens. Like the single-threaded decoder's hot loop, it
 /// takes the reader by value, so it stays in registers.
 #[inline(never)]
@@ -476,25 +519,27 @@ impl Window {
     }
 
     /// Phase B for one chunk's tokens.
-    fn apply(&mut self, k: &Tokens, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+    fn apply(&mut self, k: &Tokens, f: &mut FileState, files: &[&Entry], out: &mut dyn Output) -> Result<(), Failure> {
         let mut lp = 0;
         for op in &k.ops {
-            if self.pos >= f.end {
-                return Ok(()); // the file is complete; the rest is discarded
-            }
-            // Literals, in pieces that fit the window.
+            // Literals, in pieces that fit the window, up to the end of the file.
             let mut run = op.lits as usize;
-            while run > 0 {
+            while run > 0 && self.pos < f.end {
                 let n = run.min(SLIDE_ROOM / 2).min(f.end - self.pos);
                 self.room(n + MAX_MATCH, f, out)?;
                 let at = self.pos - self.base;
                 self.buf[at..at + n].copy_from_slice(&k.lits[lp..lp + n]);
                 (self.pos, lp, run) = (self.pos + n, lp + n, run - n);
-                if self.pos >= f.end {
-                    return Ok(());
-                }
             }
+            lp += run; // past the end of the file: discarded
             let kind = op.len >> KIND_SHIFT;
+            if kind == FILE_END {
+                self.switch(f, op.dist as usize, files, out)?;
+                continue;
+            }
+            if self.pos >= f.end {
+                continue; // the file is complete; the rest of its data is discarded
+            }
             let len = (op.len & ((1 << KIND_SHIFT) - 1)) as usize;
             let r = &mut self.recent;
             let dist = match kind {
@@ -563,6 +608,20 @@ impl Window {
         Ok(())
     }
 
+    /// Ends the current file and moves on to file `next` (files in between are empty).
+    fn switch(&mut self, f: &mut FileState, next: usize, files: &[&Entry], out: &mut dyn Output) -> Result<(), Failure> {
+        if next <= f.index || next >= files.len() {
+            return Err(Failure::Corrupt);
+        }
+        self.finish_file(f, out)?;
+        for index in f.index + 1..next {
+            let mut empty = FileState::new(files, index, self.pos);
+            out.start(index).map_err(Failure::Stop)?;
+            self.finish_file(&mut empty, out)?;
+        }
+        *f = FileState::new(files, next, self.pos);
+        out.start(next).map_err(Failure::Stop)
+    }
     fn copy(&mut self, dist: usize, len: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
         self.room(len + 32, f, out)?;
         let at = self.pos - self.base;

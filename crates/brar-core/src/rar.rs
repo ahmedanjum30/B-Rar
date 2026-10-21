@@ -125,18 +125,39 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     let failed = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
     let big_result = std::thread::scope(|scope| -> Result<Result<Vec<usize>>> {
-        // The engine runs on its own thread (it uses its own workers), one big file at a time.
+        // The engine runs on its own threads (it has its own workers). Several big files at
+        // once, sharing the cores: each file's in-order phase is one thread, so one file at a
+        // time would leave the others' decoding waiting on it.
         let big_job = (!big.is_empty()).then(|| {
             scope.spawn(|| {
-                let mut retry = Vec::new();
-                for e in &big {
-                    match run_engine(path, &[*e], sink, opts) {
-                        Ok(()) => {}
-                        Err(Fail::Retry) => retry.push(e.index),
-                        Err(Fail::Stop(err)) => return Err(err),
+                let at_once = big.len().min(4).min((threads as usize / 2).max(1));
+                let per_file = (threads as usize / at_once).max(1);
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                let retry = Mutex::new(Vec::new());
+                let stop = Mutex::new(None);
+                std::thread::scope(|s| {
+                    for _ in 0..at_once {
+                        s.spawn(|| {
+                            loop {
+                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if i >= big.len() || stop.lock().unwrap().is_some() {
+                                    return;
+                                }
+                                match run_engine(path, &[big[i]], sink, per_file) {
+                                    Ok(()) => {}
+                                    Err(Fail::Retry) => retry.lock().unwrap().push(big[i].index),
+                                    Err(Fail::Stop(err)) => {
+                                        stop.lock().unwrap().get_or_insert(err);
+                                    }
+                                }
+                            }
+                        });
                     }
+                });
+                match stop.into_inner().unwrap() {
+                    Some(err) => Err(err),
+                    None => Ok(retry.into_inner().unwrap()),
                 }
-                Ok(retry)
             })
         });
         opts.pool()?.scope_fifo(|s| {
@@ -193,7 +214,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
     for e in archive.entries.iter().filter(|e| e.is_dir) {
         sink.dir(&e.name)?;
     }
-    let result = run_engine(path, &files, sink, opts);
+    let result = run_engine(path, &files, sink, opts.thread_count());
     if std::env::var_os("BRAR_STATS").is_some() {
         let how = if result.is_ok() { "the engine" } else { "unRAR" };
         eprintln!("rar5: solid archive, {} files by {how}", files.len());
@@ -205,8 +226,9 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
     }
 }
 
-/// The two-phase engine over `files` (one big file, or a solid archive's files in order).
-fn run_engine(path: &Path, files: &[&rar5::Entry], sink: &Sink, opts: &Options) -> std::result::Result<(), Fail> {
+/// The two-phase engine over `files` (one big file, or a solid archive's files in order),
+/// with `threads` workers.
+fn run_engine(path: &Path, files: &[&rar5::Entry], sink: &Sink, threads: usize) -> std::result::Result<(), Fail> {
     let total: u64 = files.iter().map(|e| e.size).sum();
     let window = files.iter().map(|e| e.dict).max().unwrap_or(0).min(total);
     if window > MAX_WINDOW {
@@ -219,7 +241,7 @@ fn run_engine(path: &Path, files: &[&rar5::Entry], sink: &Sink, opts: &Options) 
         open: None,
         written: Vec::new(),
     };
-    match rar5::parallel::decode(&map, files, window as usize, opts.thread_count(), &mut out) {
+    match rar5::parallel::decode(&map, files, window as usize, threads, &mut out) {
         Ok(()) => Ok(()),
         Err(rar5::parallel::Failure::Corrupt) => {
             out.discard();
