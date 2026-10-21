@@ -414,7 +414,7 @@ mod tests {
         }
         done.store(true, Ordering::Relaxed);
         let mut hits: Vec<_> = sampler.join().unwrap().into_iter().collect();
-        hits.sort_by(|a, b| b.1.cmp(&a.1));
+        hits.sort_by_key(|h| std::cmp::Reverse(h.1));
         let total: u64 = hits.iter().map(|h| h.1).sum();
         let text: String = hits.iter().map(|(a, c)| format!("{a:x} {c}\n")).collect();
         std::fs::write(&out_path, text).unwrap();
