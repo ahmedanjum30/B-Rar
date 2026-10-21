@@ -321,6 +321,105 @@ mod tests {
             );
         }
     }
+    /// Where B-Rar's RAR5 decoder spends its time: a sampling profiler. A second thread pauses
+    /// the decoding thread about 2,000 times a second and records its instruction pointer,
+    /// while every supported entry of $BRAR_PROFILE_RAR is decoded for $BRAR_PROFILE_SECS
+    /// seconds (default 8). Writes "address count" lines (module-relative, hottest first) to
+    /// $BRAR_PROFILE_OUT; map them to source lines with addr2line on the test binary, built
+    /// with line tables (CARGO_PROFILE_RELEASE_DEBUG=line-tables-only, ..._STRIP=none).
+    #[test]
+    #[ignore]
+    fn rar5_profile() {
+        use std::{
+            collections::HashMap,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::{Duration, Instant},
+        };
+        #[repr(C, align(16))]
+        struct Context([u8; 1232]);
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+            fn OpenThread(access: u32, inherit: i32, id: u32) -> isize;
+            fn SuspendThread(thread: isize) -> u32;
+            fn ResumeThread(thread: isize) -> u32;
+            fn GetThreadContext(thread: isize, context: *mut Context) -> i32;
+            fn GetModuleHandleW(name: *const u16) -> isize;
+        }
+        const CONTEXT_CONTROL: u32 = 0x0010_0001;
+        const THREAD_ALL: u32 = 0x001F_FFFF;
+        let path = std::env::var("BRAR_PROFILE_RAR").expect("set BRAR_PROFILE_RAR");
+        let out_path = std::env::var("BRAR_PROFILE_OUT").expect("set BRAR_PROFILE_OUT");
+        let secs: u64 = std::env::var("BRAR_PROFILE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+
+        let arc = parse(Path::new(&path)).unwrap().expect("not a supported RAR5 archive");
+        let file = std::fs::File::open(&path).unwrap();
+        let jobs: Vec<_> = arc
+            .entries
+            .iter()
+            .filter(|e| e.supported && e.method != 0)
+            .map(|e| {
+                let mut input = vec![0u8; e.packed as usize + unpack::INPUT_PADDING];
+                crate::whole::read_at(&file, e.data_start, &mut input[..e.packed as usize]).unwrap();
+                (e, input)
+            })
+            .collect();
+
+        // SAFETY: plain Win32 calls; the handle refers to this (live) thread.
+        let me = unsafe { OpenThread(THREAD_ALL, 0, GetCurrentThreadId()) };
+        let base = unsafe { GetModuleHandleW(std::ptr::null()) } as u64;
+        let done = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut hits: HashMap<u64, u64> = HashMap::new();
+                let mut ctx = Box::new(Context([0; 1232]));
+                while !done.load(Ordering::Relaxed) {
+                    let t = Instant::now();
+                    while t.elapsed() < Duration::from_micros(500) {
+                        std::hint::spin_loop();
+                    }
+                    // ContextFlags at offset 0x30, Rip at 0xF8 (x64 CONTEXT).
+                    ctx.0[0x30..0x34].copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
+                    // SAFETY: the thread is suspended while its context is read; ctx is a
+                    // correctly aligned, correctly sized CONTEXT.
+                    let rip = unsafe {
+                        SuspendThread(me);
+                        let ok = GetThreadContext(me, &mut *ctx);
+                        ResumeThread(me);
+                        if ok == 0 {
+                            continue;
+                        } else {
+                            u64::from_le_bytes(ctx.0[0xF8..0x100].try_into().unwrap())
+                        }
+                    };
+                    *hits.entry(rip.wrapping_sub(base)).or_default() += 1;
+                }
+                hits
+            })
+        };
+        let mut u = unpack::Unpacker::default();
+        let start = Instant::now();
+        let mut rounds = 0;
+        while start.elapsed() < Duration::from_secs(secs) {
+            for (e, input) in &jobs {
+                let n = e.size as usize;
+                let mut out = vec![0u8; n + unpack::OUTPUT_SLACK];
+                u.unpack(input, e.packed as usize, &mut out, n, e.extra_dist).unwrap();
+            }
+            rounds += 1;
+        }
+        done.store(true, Ordering::Relaxed);
+        let mut hits: Vec<_> = sampler.join().unwrap().into_iter().collect();
+        hits.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: u64 = hits.iter().map(|h| h.1).sum();
+        let text: String = hits.iter().map(|(a, c)| format!("{a:x} {c}\n")).collect();
+        std::fs::write(&out_path, text).unwrap();
+        println!("{rounds} rounds, {total} samples, {} distinct addresses -> {out_path}", hits.len());
+    }
     #[test]
     fn rejects_non_rar5() {
         assert!(parse_bytes(b"Rar!\x1a\x07\x00rest-of-a-rar4").is_none());

@@ -110,6 +110,16 @@ impl<'a> Bits<'a> {
         v
     }
 
+    /// The next `n` (0..=32) bits, consumed; 0 reads nothing.
+    #[inline(always)]
+    fn take_upto(&mut self, n: u32) -> u32 {
+        // (buf >> 1) >> (63 - n) is buf >> (64 - n) without the undefined shift by 64.
+        let v = ((self.buf >> 1) >> (63 - n)) as u32;
+        self.buf = self.buf.wrapping_shl(n);
+        self.cnt -= n;
+        v
+    }
+
     /// Bit position in the input.
     #[inline(always)]
     fn pos(&self) -> usize {
@@ -138,7 +148,10 @@ struct Huffman {
     /// `symbol << 6 | code length` for every `quick_bits`-bit prefix; 0 (length 0) for the
     /// prefixes of longer codes, which [`Huffman::decode`] hands to the slow path. The length
     /// sits in the low 6 bits so the entry itself can be the shift count (see `consume_entry`).
+    /// Unused by the main table, which fills `main` instead.
     quick: Box<[u16]>,
+    /// The main table's entries ([`main_entry`]); empty for the other tables.
+    main: Box<[u32]>,
 }
 
 impl Huffman {
@@ -152,7 +165,16 @@ impl Huffman {
             quick_bits,
             quick_limit: 0,
             quick: vec![0; 1 << quick_bits].into_boxed_slice(),
+            main: Box::new([]),
         }
+    }
+
+    /// The main table: 32-bit entries carrying what the hot loop needs ([`main_entry`]).
+    fn new_main() -> Self {
+        let mut h = Self::new(MAIN_QUICK);
+        h.quick = Box::new([]);
+        h.main = vec![0; 1 << MAIN_QUICK].into_boxed_slice();
+        h
     }
 
     fn build(&mut self, lengths: &[u8]) {
@@ -197,14 +219,26 @@ impl Huffman {
             for (len, &n) in count.iter().enumerate().take(q as usize + 1).skip(1) {
                 let span = 1usize << (q as usize - len);
                 let first = self.first[len] as usize;
-                for k in 0..n as usize {
-                    let entry = (self.symbols[first + k] << 6) | len as u16;
-                    self.quick[at..at + span].fill(entry);
-                    at += span;
+                if self.main.is_empty() {
+                    for k in 0..n as usize {
+                        let entry = (self.symbols[first + k] << 6) | len as u16;
+                        self.quick[at..at + span].fill(entry);
+                        at += span;
+                    }
+                } else {
+                    for k in 0..n as usize {
+                        let entry = main_entry(usize::from(self.symbols[first + k]), len as u32);
+                        self.main[at..at + span].fill(entry);
+                        at += span;
+                    }
                 }
             }
             // Prefixes of codes longer than quick_bits.
-            self.quick[at..].fill(0);
+            if self.main.is_empty() {
+                self.quick[at..].fill(0);
+            } else {
+                self.main[at..].fill(0);
+            }
         } else {
             self.build_quick_slow();
         }
@@ -228,8 +262,30 @@ impl Huffman {
                 0
             };
             // At or past quick_limit the reference decoder takes its slow path: mark it.
-            self.quick[code as usize] = if field < self.quick_limit { (symbol << 6) | len as u16 } else { 0 };
+            let hit = field < self.quick_limit;
+            if self.main.is_empty() {
+                self.quick[code as usize] = if hit { (symbol << 6) | len as u16 } else { 0 };
+            } else {
+                self.main[code as usize] = if hit { main_entry(usize::from(symbol), len as u32) } else { 0 };
+            }
         }
+    }
+
+    /// The main table's next symbol as an entry ([`main_entry`]), bits consumed. Needs at
+    /// least 15 valid bits.
+    #[inline(always)]
+    fn decode_main(&self, table: *const u32, bits: &mut Bits) -> u32 {
+        // SAFETY: `table` is this table's `main` array, 2^MAIN_QUICK entries; the index is
+        // below that.
+        let e = unsafe { *table.add((bits.buf >> (64 - MAIN_QUICK)) as usize) };
+        if e & 0xff != 0 {
+            bits.buf = bits.buf.wrapping_shl(e); // the shift masks the count to the low 6 bits
+            bits.cnt -= e & 0xff;
+            return e;
+        }
+        let (len, symbol) = self.decode_long(bits.peek(16) & 0xfffe);
+        bits.consume(len);
+        main_entry(symbol, len)
     }
 
     /// Needs at least 15 valid bits.
@@ -237,17 +293,6 @@ impl Huffman {
     fn decode(&self, bits: &mut Bits) -> usize {
         // SAFETY: the index is < 2^quick_bits, the table's length.
         let e = unsafe { *self.quick.get_unchecked((bits.buf >> (64 - self.quick_bits)) as usize) };
-        self.finish(bits, e)
-    }
-
-    /// [`Huffman::decode`] for the main table, with its quick table's address loaded once
-    /// per block (`quick`) and a constant lookup shift.
-    #[inline(always)]
-    fn decode_main(&self, quick: *const u16, bits: &mut Bits) -> usize {
-        debug_assert_eq!(self.quick_bits, MAIN_QUICK);
-        // SAFETY: `quick` is this table's quick array, 2^MAIN_QUICK entries; the index is
-        // below that.
-        let e = unsafe { *quick.add((bits.buf >> (64 - MAIN_QUICK)) as usize) };
         self.finish(bits, e)
     }
 
@@ -278,6 +323,57 @@ impl Huffman {
         let p = self.first[len].wrapping_add(dist) as usize;
         (len as u32, usize::from(self.symbols[if p < self.size { p } else { 0 }]))
     }
+}
+
+/// Main-table entry flags: bits 0..8 hold the code length (0: a code longer than the quick
+/// table, decoded by the slow path), bits 16.. the payload.
+const E_LITERAL: u32 = 1 << 8;
+const E_MATCH: u32 = 1 << 9;
+
+/// What the hot loop needs about a main-alphabet symbol, in one word: a literal's byte, a
+/// length slot's base length and extra-bit count, or the symbol (256..=261) itself.
+fn main_entry(symbol: usize, code_len: u32) -> u32 {
+    match symbol {
+        0..=255 => code_len | E_LITERAL | (symbol as u32) << 16,
+        262.. => {
+            let slot = (symbol - 262) as u32;
+            let (base, extra) = if slot < 8 {
+                (2 + slot, 0)
+            } else {
+                (2 + ((4 | (slot & 3)) << (slot / 4 - 1)), slot / 4 - 1)
+            };
+            code_len | E_MATCH | extra << 10 | base << 16
+        }
+        _ => code_len | (symbol as u32) << 16,
+    }
+}
+
+/// Distance slot -> (base distance, extra bits). Slots 0..=3 are the distances 1..=4.
+const fn dist_slots() -> ([u64; DCX], [u8; DCX]) {
+    let (mut base, mut extra) = ([0u64; DCX], [0u8; DCX]);
+    let mut slot = 0;
+    while slot < DCX {
+        if slot < 4 {
+            base[slot] = 1 + slot as u64;
+        } else {
+            let bits = (slot / 2 - 1) as u32;
+            base[slot] = 1 + ((2 | (slot as u64 & 1)) << bits);
+            extra[slot] = bits as u8;
+        }
+        slot += 1;
+    }
+    (base, extra)
+}
+const DIST_SLOTS: ([u64; DCX], [u8; DCX]) = dist_slots();
+
+/// What the hot loop carries from block to block: the last four distances and the last length.
+#[derive(Clone, Copy, Default)]
+struct Recent {
+    d0: usize,
+    d1: usize,
+    d2: usize,
+    d3: usize,
+    len: usize,
 }
 
 struct Tables {
@@ -314,7 +410,7 @@ impl Default for Unpacker {
     fn default() -> Self {
         Self {
             t: Tables {
-                main: Huffman::new(MAIN_QUICK),
+                main: Huffman::new_main(),
                 dist: Huffman::new(10),
                 low: Huffman::new(7),
                 rep: Huffman::new(9),
@@ -347,115 +443,14 @@ impl Unpacker {
 
         let base = out.as_mut_ptr();
         let mut pos = 0usize;
-        let mut old = [0usize; 4];
-        let mut last_len = 0usize;
+        let mut recent = Recent::default();
 
-        'blocks: loop {
-            {
-                // A shared borrow for the whole block, so the tables stay in registers.
-                let t = &self.t;
-                let filters = &mut self.filters;
-                // One bound per step: the block end, or the input limit if a corrupt block
-                // claims to run past the data.
-                let end = block.end.min(limit);
-                // The fast loop: 32+ bits cover two literals (15 bits each at most), so away
-                // from the block end and the file end it decodes two per round with one refill
-                // check (only when below 32, keeping the load off most literals' dependency
-                // chain). Near either end, one symbol at a time.
-                let fast_end = end.saturating_sub(32);
-                let fast_size = size.saturating_sub(2);
-                let main_quick = t.main.quick.as_ptr();
-                loop {
-                    let slot;
-                    if bits.pos() < fast_end && pos < fast_size {
-                        if bits.cnt < 32 {
-                            bits.refill();
-                        }
-                        let s1 = t.main.decode_main(main_quick, &mut bits);
-                        if s1 < 256 {
-                            // SAFETY: pos + 2 <= size <= out.len() for both stores.
-                            unsafe { *base.add(pos) = s1 as u8 };
-                            let s2 = t.main.decode_main(main_quick, &mut bits);
-                            if s2 < 256 {
-                                unsafe { *base.add(pos + 1) = s2 as u8 };
-                                pos += 2;
-                                continue;
-                            }
-                            pos += 1;
-                            slot = s2;
-                        } else {
-                            slot = s1;
-                        }
-                    } else {
-                        if bits.pos() >= end {
-                            break;
-                        }
-                        if pos >= size {
-                            break 'blocks; // anything past the file size is discarded anyway
-                        }
-                        // Literals need at most 15 bits, so refill only when below 32: that
-                        // keeps the input load off most literals' dependency chain.
-                        if bits.cnt < 32 {
-                            bits.refill();
-                        }
-                        let s = t.main.decode_main(main_quick, &mut bits);
-                        if s < 256 {
-                            // SAFETY: pos < size <= out.len().
-                            unsafe { *base.add(pos) = s as u8 };
-                            pos += 1;
-                            continue;
-                        }
-                        slot = s;
-                    }
-                    // Everything else reads more fields; 56+ bits covers a length and the
-                    // distance slot (read_distance refills for the long distance bits).
-                    bits.refill();
-                    if slot >= 262 {
-                        let mut len = slot_to_length(&mut bits, slot - 262);
-                        let dist = read_distance(&mut bits, t);
-                        if dist > 0x100 {
-                            len += 1;
-                            if dist > 0x2000 {
-                                len += 1;
-                                if dist > 0x40000 {
-                                    len += 1;
-                                }
-                            }
-                        }
-                        old = [dist, old[0], old[1], old[2]];
-                        last_len = len;
-                        // SAFETY: pos < size and len <= MAX_MATCH, so the copy stays inside
-                        // OUTPUT_SLACK.
-                        unsafe { copy_match(base, pos, dist, len) };
-                        pos += len;
-                        continue;
-                    }
-                    if slot == 256 {
-                        filters.push(read_filter(&mut bits, pos));
-                        continue;
-                    }
-                    if slot == 257 {
-                        if last_len != 0 {
-                            // SAFETY: as above; last_len came from slot_to_length.
-                            unsafe { copy_match(base, pos, old[0], last_len) };
-                            pos += last_len;
-                        }
-                        continue;
-                    }
-                    // 258..=261: reuse one of the last four distances.
-                    let n = slot - 258;
-                    let dist = old[n];
-                    for i in (1..=n).rev() {
-                        old[i] = old[i - 1];
-                    }
-                    old[0] = dist;
-                    let len_slot = t.rep.decode(&mut bits);
-                    let len = slot_to_length(&mut bits, len_slot);
-                    last_len = len;
-                    // SAFETY: as above.
-                    unsafe { copy_match(base, pos, dist, len) };
-                    pos += len;
-                }
+        loop {
+            let end = block.end.min(limit);
+            let done;
+            (bits, pos, recent, done) = decode_block(&self.t, &mut self.filters, bits, base, pos, size, end, recent);
+            if done {
+                break; // reached the file size: anything after it is discarded anyway
             }
             if bits.pos() < block.end {
                 return Err(Corrupt); // stopped at the input limit, not the block end
@@ -476,6 +471,166 @@ impl Unpacker {
         self.filters = filters;
         result
     }
+}
+
+/// Decodes one block's symbols, from bit position `bits.pos()` up to `end`, into
+/// `out[pos..]`. Everything it works on comes in and goes out by value, so the compiler keeps
+/// it in registers (a reader passed by `&mut` to out-of-line code would live in memory).
+/// Returns `done` once the output reached `size`.
+///
+/// Away from the block end and the file end (the "fast" region) it decodes two literals per
+/// refill check: 32+ valid bits cover two 15-bit codes.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn decode_block<'a>(
+    t: &Tables,
+    filters: &mut Vec<Filter>,
+    mut bits: Bits<'a>,
+    out: *mut u8,
+    mut pos: usize,
+    size: usize,
+    end: usize,
+    mut r: Recent,
+) -> (Bits<'a>, usize, Recent, bool) {
+    let main = t.main.main.as_ptr();
+    let fast_end = end.saturating_sub(32);
+    let fast_size = size.saturating_sub(2);
+    loop {
+        let e;
+        if bits.pos() < fast_end && pos < fast_size {
+            if bits.cnt < 32 {
+                bits.refill();
+            }
+            let e1 = t.main.decode_main(main, &mut bits);
+            if e1 & E_LITERAL != 0 {
+                // SAFETY: pos + 2 <= size <= out.len() for both stores.
+                unsafe { *out.add(pos) = (e1 >> 16) as u8 };
+                let e2 = t.main.decode_main(main, &mut bits);
+                if e2 & E_LITERAL != 0 {
+                    unsafe { *out.add(pos + 1) = (e2 >> 16) as u8 };
+                    pos += 2;
+                    continue;
+                }
+                pos += 1;
+                e = e2;
+            } else {
+                e = e1;
+            }
+        } else {
+            if bits.pos() >= end {
+                return (bits, pos, r, false);
+            }
+            if pos >= size {
+                return (bits, pos, r, true);
+            }
+            if bits.cnt < 32 {
+                bits.refill();
+            }
+            let e1 = t.main.decode_main(main, &mut bits);
+            if e1 & E_LITERAL != 0 {
+                // SAFETY: pos < size <= out.len().
+                unsafe { *out.add(pos) = (e1 >> 16) as u8 };
+                pos += 1;
+                continue;
+            }
+            e = e1;
+        }
+        // Not a literal. 56+ bits after this refill cover a length's extra bits (9) and the
+        // distance code (15); read_dist refills for the rest.
+        bits.refill();
+        if e & E_MATCH != 0 {
+            let mut len = (e >> 16) as usize + bits.take_upto((e >> 10) & 15) as usize;
+            // 56+ bits again: the whole distance of any RAR5 file fits (code 15 + 26 raw
+            // bits + low code 15), so read_dist only refills for RAR7's longer distances.
+            bits.refill();
+            let dist = read_dist(&mut bits, t);
+            // Longer distances add to the length.
+            len += usize::from(dist > 0x100) + usize::from(dist > 0x2000) + usize::from(dist > 0x40000);
+            r = Recent {
+                d0: dist,
+                d1: r.d0,
+                d2: r.d1,
+                d3: r.d2,
+                len,
+            };
+            // SAFETY: pos < size and len <= MAX_MATCH, so the copy stays inside OUTPUT_SLACK.
+            unsafe { copy_match(out, pos, dist, len) };
+            pos += len;
+            continue;
+        }
+        match e >> 16 {
+            256 => {
+                // Through a copy: passing `bits` itself by `&mut` would keep it in memory.
+                let mut b = bits;
+                filters.push(read_filter(&mut b, pos));
+                bits = b;
+            }
+            257 => {
+                if r.len != 0 {
+                    // SAFETY: as above; r.len came from a decoded length.
+                    unsafe { copy_match(out, pos, r.d0, r.len) };
+                    pos += r.len;
+                }
+            }
+            n => {
+                // 258..=261: reuse one of the last four distances, moving it to the front.
+                let dist = match n {
+                    258 => r.d0,
+                    259 => {
+                        let d = r.d1;
+                        r.d1 = r.d0;
+                        d
+                    }
+                    260 => {
+                        let d = r.d2;
+                        (r.d2, r.d1) = (r.d1, r.d0);
+                        d
+                    }
+                    _ => {
+                        let d = r.d3;
+                        (r.d3, r.d2, r.d1) = (r.d2, r.d1, r.d0);
+                        d
+                    }
+                };
+                r.d0 = dist;
+                let len_slot = t.rep.decode(&mut bits);
+                let len = slot_to_length(&mut bits, len_slot);
+                r.len = len;
+                // SAFETY: as above.
+                unsafe { copy_match(out, pos, dist, len) };
+                pos += len;
+            }
+        }
+    }
+}
+
+/// A distance: its slot from the distance table, then extra bits (the high ones raw, the low
+/// four from their own table). Needs 56 valid bits; refills only past 26 raw bits (RAR7).
+#[inline(always)]
+fn read_dist(bits: &mut Bits, t: &Tables) -> usize {
+    let slot = t.dist.decode(bits);
+    let (base, extra) = (DIST_SLOTS.0[slot], u32::from(DIST_SLOTS.1[slot]));
+    if extra < 4 {
+        return (base + u64::from(bits.take_upto(extra))) as usize;
+    }
+    let high_bits = extra - 4;
+    let high = if high_bits <= 26 {
+        u64::from(bits.take_upto(high_bits))
+    } else {
+        // RAR7 only: up to 36 raw bits.
+        bits.refill();
+        if high_bits > 32 {
+            let hi = u64::from(bits.take(high_bits - 32));
+            bits.refill();
+            (hi << 32) | u64::from(bits.take(32))
+        } else {
+            u64::from(bits.take(high_bits))
+        }
+    };
+    if high_bits > 26 {
+        bits.refill();
+    }
+    (base + (high << 4) + t.low.decode(bits) as u64) as usize
 }
 
 fn read_block_header(bits: &mut Bits, limit: usize) -> Res<Block> {
@@ -577,38 +732,6 @@ fn slot_to_length(bits: &mut Bits, slot: usize) -> usize {
     let lbits = (slot / 4 - 1) as u32;
     let len = 2 + ((4 | (slot & 3)) << lbits);
     len + bits.take(lbits) as usize
-}
-
-/// Refills as needed: up to 15 + 34 + 15 bits.
-#[inline(always)]
-fn read_distance(bits: &mut Bits, t: &Tables) -> usize {
-    bits.refill();
-    let slot = t.dist.decode(bits);
-    if slot < 4 {
-        return 1 + slot;
-    }
-    let dbits = (slot / 2 - 1) as u32;
-    let mut dist = 1 + ((2 | (slot & 1)) << dbits);
-    if dbits >= 4 {
-        if dbits > 4 {
-            // The high (dbits - 4) bits come raw, the low 4 from their own Huffman table.
-            bits.refill();
-            let high_bits = dbits - 4;
-            let high = if high_bits > 32 {
-                let hi = bits.take(high_bits - 32) as u64;
-                bits.refill();
-                (hi << 32) | u64::from(bits.take(32))
-            } else {
-                u64::from(bits.take(high_bits))
-            };
-            dist += (high as usize) << 4;
-            bits.refill();
-        }
-        dist += t.low.decode(bits);
-    } else {
-        dist += bits.take(dbits) as usize;
-    }
-    dist
 }
 
 /// Copies `len` bytes from `dist` bytes back. Distances reaching before the file start fill
