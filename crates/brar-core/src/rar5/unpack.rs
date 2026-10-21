@@ -31,6 +31,9 @@ pub(crate) const OUTPUT_SLACK: usize = MAX_MATCH + 32;
 /// data a step may read a little past the end before the bounds check stops it.
 pub(crate) const INPUT_PADDING: usize = 64;
 const MAX_FILTER_BLOCK: usize = 0x40_0000;
+/// Lookup bits of the main table (12 measured best: bigger tables cost more to rebuild every
+/// ~20 KB than the longer codes they catch).
+const MAIN_QUICK: u32 = 12;
 
 #[derive(Debug)]
 pub(crate) struct Corrupt;
@@ -38,6 +41,10 @@ pub(crate) struct Corrupt;
 type Res<T> = std::result::Result<T, Corrupt>;
 
 /// MSB-first bit reader. The next bits sit left-aligned in `buf`; `cnt` of them are valid.
+/// `Copy`, so the hot loop can work on a local copy the compiler keeps in registers: a reader
+/// passed by `&mut` to any out-of-line function would be kept in memory instead, putting a
+/// store and a reload on every symbol's dependency chain.
+#[derive(Clone, Copy)]
 struct Bits<'a> {
     data: &'a [u8],
     /// Next byte to load into `buf`.
@@ -87,6 +94,15 @@ impl<'a> Bits<'a> {
         self.cnt -= n;
     }
 
+    /// Consumes the code length held in the low 6 bits of a table entry. The shift uses the
+    /// whole entry as its count: x86 masks shift counts to 6 bits, so no masking instruction
+    /// lands on the decode's dependency chain.
+    #[inline(always)]
+    fn consume_entry(&mut self, e: u16) {
+        self.buf = self.buf.wrapping_shl(u32::from(e));
+        self.cnt -= u32::from(e & 63);
+    }
+
     #[inline(always)]
     fn take(&mut self, n: u32) -> u32 {
         let v = self.peek(n);
@@ -119,7 +135,9 @@ struct Huffman {
     size: usize,
     quick_bits: u32,
     quick_limit: u32,
-    /// `symbol << 5 | code length` for every `quick_bits`-bit prefix below `quick_limit`.
+    /// `symbol << 6 | code length` for every `quick_bits`-bit prefix; 0 (length 0) for the
+    /// prefixes of longer codes, which [`Huffman::decode`] hands to the slow path. The length
+    /// sits in the low 6 bits so the entry itself can be the shift count (see `consume_entry`).
     quick: Box<[u16]>,
 }
 
@@ -180,11 +198,13 @@ impl Huffman {
                 let span = 1usize << (q as usize - len);
                 let first = self.first[len] as usize;
                 for k in 0..n as usize {
-                    let entry = (self.symbols[first + k] << 5) | len as u16;
+                    let entry = (self.symbols[first + k] << 6) | len as u16;
                     self.quick[at..at + span].fill(entry);
                     at += span;
                 }
             }
+            // Prefixes of codes longer than quick_bits.
+            self.quick[at..].fill(0);
         } else {
             self.build_quick_slow();
         }
@@ -207,25 +227,46 @@ impl Huffman {
             } else {
                 0
             };
-            self.quick[code as usize] = (symbol << 5) | len as u16;
+            // At or past quick_limit the reference decoder takes its slow path: mark it.
+            self.quick[code as usize] = if field < self.quick_limit { (symbol << 6) | len as u16 } else { 0 };
         }
     }
 
     /// Needs at least 15 valid bits.
     #[inline(always)]
     fn decode(&self, bits: &mut Bits) -> usize {
-        let field = bits.peek(16) & 0xfffe;
-        if field < self.quick_limit {
-            // SAFETY: `field` < 2^16, so the index is < 2^quick_bits, the table's length.
-            let e = unsafe { *self.quick.get_unchecked((field >> (16 - self.quick_bits)) as usize) };
-            bits.consume(u32::from(e & 31));
-            return usize::from(e >> 5);
-        }
-        self.decode_long(bits, field)
+        // SAFETY: the index is < 2^quick_bits, the table's length.
+        let e = unsafe { *self.quick.get_unchecked((bits.buf >> (64 - self.quick_bits)) as usize) };
+        self.finish(bits, e)
     }
 
+    /// [`Huffman::decode`] for the main table, with its quick table's address loaded once
+    /// per block (`quick`) and a constant lookup shift.
+    #[inline(always)]
+    fn decode_main(&self, quick: *const u16, bits: &mut Bits) -> usize {
+        debug_assert_eq!(self.quick_bits, MAIN_QUICK);
+        // SAFETY: `quick` is this table's quick array, 2^MAIN_QUICK entries; the index is
+        // below that.
+        let e = unsafe { *quick.add((bits.buf >> (64 - MAIN_QUICK)) as usize) };
+        self.finish(bits, e)
+    }
+
+    /// Consumes a quick-table hit, or decodes a longer code (length 0 marks one).
+    #[inline(always)]
+    fn finish(&self, bits: &mut Bits, e: u16) -> usize {
+        if e & 63 != 0 {
+            bits.consume_entry(e);
+            return usize::from(e >> 6);
+        }
+        let (len, symbol) = self.decode_long(bits.peek(16) & 0xfffe);
+        bits.consume(len);
+        symbol
+    }
+
+    /// A code longer than the quick table: its length and symbol, from the next 16 bits.
+    /// Takes the bits by value (not the reader), so the reader isn't forced into memory.
     #[cold]
-    fn decode_long(&self, bits: &mut Bits, field: u32) -> usize {
+    fn decode_long(&self, field: u32) -> (u32, usize) {
         let mut len = 15;
         for i in self.quick_bits as usize + 1..15 {
             if field < self.limit[i] {
@@ -233,10 +274,9 @@ impl Huffman {
                 break;
             }
         }
-        bits.consume(len as u32);
         let dist = field.wrapping_sub(self.limit[len - 1]) >> (16 - len as u32);
         let p = self.first[len].wrapping_add(dist) as usize;
-        usize::from(self.symbols[if p < self.size { p } else { 0 }])
+        (len as u32, usize::from(self.symbols[if p < self.size { p } else { 0 }]))
     }
 }
 
@@ -274,7 +314,7 @@ impl Default for Unpacker {
     fn default() -> Self {
         Self {
             t: Tables {
-                main: Huffman::new(12),
+                main: Huffman::new(MAIN_QUICK),
                 dist: Huffman::new(10),
                 low: Huffman::new(7),
                 rep: Huffman::new(9),
@@ -318,21 +358,54 @@ impl Unpacker {
                 // One bound per step: the block end, or the input limit if a corrupt block
                 // claims to run past the data.
                 let end = block.end.min(limit);
-                while bits.pos() < end {
-                    if pos >= size {
-                        break 'blocks; // anything past the file size is discarded anyway
-                    }
-                    // Literals (most symbols) need at most 15 bits, so refill only when below
-                    // 32: that keeps the input load off most literals' dependency chain.
-                    if bits.cnt < 32 {
-                        bits.refill();
-                    }
-                    let slot = t.main.decode(&mut bits);
-                    if slot < 256 {
-                        // SAFETY: pos < size <= out.len().
-                        unsafe { *base.add(pos) = slot as u8 };
-                        pos += 1;
-                        continue;
+                // The fast loop: 32+ bits cover two literals (15 bits each at most), so away
+                // from the block end and the file end it decodes two per round with one refill
+                // check (only when below 32, keeping the load off most literals' dependency
+                // chain). Near either end, one symbol at a time.
+                let fast_end = end.saturating_sub(32);
+                let fast_size = size.saturating_sub(2);
+                let main_quick = t.main.quick.as_ptr();
+                loop {
+                    let slot;
+                    if bits.pos() < fast_end && pos < fast_size {
+                        if bits.cnt < 32 {
+                            bits.refill();
+                        }
+                        let s1 = t.main.decode_main(main_quick, &mut bits);
+                        if s1 < 256 {
+                            // SAFETY: pos + 2 <= size <= out.len() for both stores.
+                            unsafe { *base.add(pos) = s1 as u8 };
+                            let s2 = t.main.decode_main(main_quick, &mut bits);
+                            if s2 < 256 {
+                                unsafe { *base.add(pos + 1) = s2 as u8 };
+                                pos += 2;
+                                continue;
+                            }
+                            pos += 1;
+                            slot = s2;
+                        } else {
+                            slot = s1;
+                        }
+                    } else {
+                        if bits.pos() >= end {
+                            break;
+                        }
+                        if pos >= size {
+                            break 'blocks; // anything past the file size is discarded anyway
+                        }
+                        // Literals need at most 15 bits, so refill only when below 32: that
+                        // keeps the input load off most literals' dependency chain.
+                        if bits.cnt < 32 {
+                            bits.refill();
+                        }
+                        let s = t.main.decode_main(main_quick, &mut bits);
+                        if s < 256 {
+                            // SAFETY: pos < size <= out.len().
+                            unsafe { *base.add(pos) = s as u8 };
+                            pos += 1;
+                            continue;
+                        }
+                        slot = s;
                     }
                     // Everything else reads more fields; 56+ bits covers a length and the
                     // distance slot (read_distance refills for the long distance bits).

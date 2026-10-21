@@ -224,3 +224,65 @@ fn mtime<R: std::io::Read>(f: &ZipFile<'_, R>) -> Option<SystemTime> {
     let dt = f.last_modified()?;
     time::local(dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second())
 }
+
+#[cfg(test)]
+mod tests {
+    /// libdeflate's decode-only cost on the largest Deflate entry of $BRAR_BENCH_ZIP, in CPU
+    /// cycles per output byte (the thread's own cycle count), best of 3 rounds: the yardstick
+    /// for B-Rar's RAR5 decoder (`rar5_bench`). Run with
+    /// `cargo test --release -p brar-core --lib zip_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn zip_bench() {
+        use std::time::Instant;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let cycles = || {
+            let mut c = 0u64;
+            // SAFETY: the pseudo-handle of the current thread and a valid out pointer.
+            unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+            c
+        };
+        let path = std::env::var("BRAR_BENCH_ZIP").expect("set BRAR_BENCH_ZIP");
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = ::zip::ZipArchive::new(&file).unwrap();
+        let (mut best, mut start, mut packed, mut size, mut crc) = (String::new(), 0u64, 0u64, 0u64, 0u32);
+        for i in 0..archive.len() {
+            let f = archive.by_index_raw(i).unwrap();
+            if f.compression() == ::zip::CompressionMethod::Deflated && f.size() > size {
+                (best, start, packed, size, crc) = (
+                    f.name().unwrap().into_owned(),
+                    f.data_start().unwrap(),
+                    f.compressed_size(),
+                    f.size(),
+                    f.crc32(),
+                );
+            }
+        }
+        let mut input = vec![0u8; packed as usize];
+        crate::whole::read_at(&file, start, &mut input).unwrap();
+        let mut out = vec![1u8; size as usize];
+        let mut d = libdeflater::Decompressor::new();
+        let (mut s_min, mut c_min) = (f64::MAX, u64::MAX);
+        for _ in 0..3 {
+            let (t, c0) = (Instant::now(), cycles());
+            let n = d.deflate_decompress(&input, &mut out).unwrap();
+            c_min = c_min.min(cycles() - c0);
+            s_min = s_min.min(t.elapsed().as_secs_f64());
+            assert_eq!(n as u64, size);
+        }
+        assert_eq!(crc32fast::hash(&out), crc);
+        println!(
+            "libdeflate {best}: {:.0} MB packed -> {:.0} MB, {:.0} MB/s, {:.2} cycles/out B, {:.2} cycles/packed B, {:.2} GHz",
+            packed as f64 / 1048576.0,
+            size as f64 / 1048576.0,
+            size as f64 / 1048576.0 / s_min,
+            c_min as f64 / size as f64,
+            c_min as f64 / packed as f64,
+            c_min as f64 / s_min / 1e9
+        );
+    }
+}

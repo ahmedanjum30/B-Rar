@@ -259,37 +259,68 @@ mod tests {
         assert_eq!(vint(&[0x80], &mut p), None);
     }
 
-    /// Decoder timing breakdown on the largest entry of $BRAR_BENCH_RAR (run with
-    /// `cargo test --release -p brar-core rar5_bench -- --ignored --nocapture`).
+    /// Decode-only cost of B-Rar's RAR5 decoder: every supported entry of each archive in
+    /// $BRAR_BENCH_RAR (separated by `;`), best of 3 rounds, in CPU cycles per byte (the
+    /// thread's own cycle count, so clock speed and turbo don't matter). Run with
+    /// `cargo test --release -p brar-core --lib rar5_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn rar5_bench() {
         use std::time::Instant;
-        let path = std::env::var("BRAR_BENCH_RAR").expect("set BRAR_BENCH_RAR");
-        let arc = parse(Path::new(&path)).unwrap().expect("not a supported RAR5 archive");
-        let e = arc.entries.iter().filter(|e| e.supported).max_by_key(|e| e.size).unwrap();
-        let file = std::fs::File::open(&path).unwrap();
-        let mut input = vec![0u8; e.packed as usize + unpack::INPUT_PADDING];
-        crate::whole::read_at(&file, e.data_start, &mut input[..e.packed as usize]).unwrap();
-        println!("{}: {} MB packed -> {} MB", e.name, e.packed >> 20, e.size >> 20);
-
-        let size = e.size as usize;
-        let t = Instant::now();
-        let mut out = vec![0u8; size + unpack::OUTPUT_SLACK];
-        out[..].fill(1);
-        println!("allocate + touch output      {:.3} s", t.elapsed().as_secs_f64());
-        let mut u = unpack::Unpacker::default();
-        for round in 1..=3 {
-            let t = Instant::now();
-            u.unpack(&input, e.packed as usize, &mut out, size, e.extra_dist).unwrap();
-            let s = t.elapsed().as_secs_f64();
-            println!("round {round}: decode only           {s:.3} s  {:.0} MB/s", e.size as f64 / 1048576.0 / s);
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
         }
-        let t = Instant::now();
-        assert_eq!(crc32fast::hash(&out[..size]), e.crc);
-        println!("crc32                        {:.3} s", t.elapsed().as_secs_f64());
+        let cycles = || {
+            let mut c = 0u64;
+            // SAFETY: the pseudo-handle of the current thread and a valid out pointer.
+            unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+            c
+        };
+        let paths = std::env::var("BRAR_BENCH_RAR").expect("set BRAR_BENCH_RAR");
+        println!(
+            "{:<34} {:>9} {:>9} {:>7} {:>9} {:>9} {:>6}",
+            "archive", "packed MB", "out MB", "MB/s", "cyc/out B", "cyc/in B", "GHz"
+        );
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let arc = parse(Path::new(path)).unwrap().expect("not a supported RAR5 archive");
+            let file = std::fs::File::open(path).unwrap();
+            let entries: Vec<_> = arc.entries.iter().filter(|e| e.supported).collect();
+            let mut u = unpack::Unpacker::default();
+            let (mut packed, mut size, mut best_s, mut best_c) = (0u64, 0u64, 0f64, 0u64);
+            for e in &entries {
+                let (p, n) = (e.packed as usize, e.size as usize);
+                let mut input = vec![0u8; p + unpack::INPUT_PADDING];
+                crate::whole::read_at(&file, e.data_start, &mut input[..p]).unwrap();
+                let mut out = vec![1u8; n + unpack::OUTPUT_SLACK];
+                let (mut s_min, mut c_min) = (f64::MAX, u64::MAX);
+                for _ in 0..7 {
+                    let (t, c0) = (Instant::now(), cycles());
+                    if e.method == 0 {
+                        out[..n].copy_from_slice(&input[..n]);
+                    } else {
+                        u.unpack(&input, p, &mut out, n, e.extra_dist).unwrap();
+                    }
+                    c_min = c_min.min(cycles() - c0);
+                    s_min = s_min.min(t.elapsed().as_secs_f64());
+                }
+                assert_eq!(crc32fast::hash(&out[..n]), e.crc, "{}", e.name);
+                (packed, size, best_s, best_c) = (packed + e.packed, size + e.size, best_s + s_min, best_c + c_min);
+            }
+            let name = Path::new(path).file_name().unwrap().to_string_lossy();
+            println!(
+                "{:<34} {:>9.0} {:>9.0} {:>7.0} {:>9.2} {:>9.2} {:>6.2}",
+                format!("{name} ({} files)", entries.len()),
+                packed as f64 / 1048576.0,
+                size as f64 / 1048576.0,
+                size as f64 / 1048576.0 / best_s,
+                best_c as f64 / size as f64,
+                best_c as f64 / packed as f64,
+                best_c as f64 / best_s / 1e9
+            );
+        }
     }
-
     #[test]
     fn rejects_non_rar5() {
         assert!(parse_bytes(b"Rar!\x1a\x07\x00rest-of-a-rar4").is_none());

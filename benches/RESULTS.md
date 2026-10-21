@@ -18,6 +18,55 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21 (19:59): CPU work per byte, every tool and format
+
+Total CPU cycles of the whole extraction (all threads, `QueryProcessCycleTime`) divided by
+the bytes written: how much work each tool does, independent of how many cores it uses. All
+cores, one run each, 3 s apart. "B-Rar (own)" is a test build that sends every RAR5 file to
+B-Rar's decoder (not committed); "B-Rar" on RAR is the released per-file choice (big files to
+unRAR). `italian.zip` was rebuilt with 7-Zip `-mx5` from the same files (the original ZIP was
+deleted). Machine at about 3.2 GHz.
+
+| Archive | B-Rar | B-Rar (own) | WinRAR | UnRAR | 7-Zip | Windows tar |
+|---|---|---|---|---|---|---|
+| ZIP 1.2 GB | 8.51 (1.77 s) | | 15.20 (6.39 s) | | 14.31 (5.94 s) | **8.14** (3.37 s) |
+| ZIP 47k files | **59.32** (6.30 s) | | 81.64 (27.72 s) | | 80.86 (26.65 s) | 50.40 ✗ (16.55 s) |
+| RAR5 1.1 GB | 26.73 (1.72 s) | **16.47** (2.97 s) | 29.80 (3.71 s) | 29.46 (3.45 s) | 18.32 (7.57 s) | |
+| RAR5 one 545 MB file | 24.65 (1.53 s) | **15.57** (2.80 s) | 29.49 (1.78 s) | 28.48 (1.58 s) | 17.64 (3.18 s) | |
+| RAR5 48k files | **65.43** (6.77 s) | 67.95 (7.11 s) | 85.28 (27.76 s) | 83.33 (26.94 s) | 72.43 (23.97 s) | |
+| 7z 1.0 GB | 85.98 (5.92 s) | | 62.28 (5.52 s) | | **58.69** (4.10 s) | 106.77 (44.09 s) |
+| tar.gz 47k files | 58.13 (5.40 s) | | 72.17 (23.75 s) | | | **50.87** (16.71 s) |
+| tar.xz 47k files | 74.61 (5.52 s) | | 85.50 (28.11 s) | | | **67.21** (22.01 s) |
+| tar.bz2 47k files | 123.87 (16.39 s) | | 124.39 (40.61 s) | | | **100.75** (32.85 s) |
+
+Cycles per output byte (lower is less work), wall time in brackets. ✗ = tar stopped at a
+file with a non-ASCII name.
+
+Decode only (B-Rar's RAR5 decoder, `rar5_bench`, best of 3, one thread):
+
+| Archive | MB/s | cycles/output byte | cycles/packed byte |
+|---|---|---|---|
+| one 545 MB file (81% ratio) | 249 | 12.20 | 15.05 |
+| italian-repack.rar (79 files) | 247 | 12.32 | 13.99 |
+| source-m5.rar (48k text files) | 606 | 4.95 | 35.57 |
+| mixed.rar | 489 | 6.21 | |
+
+For comparison, libdeflate decodes the same 545 MB file (as Deflate) at 441 MB/s, about 7.3
+cycles/byte: roughly 1.7x faster per byte than B-Rar's RAR5 decoder.
+
+What it shows:
+- B-Rar's RAR5 decoder does the least work of any tool: 45% less than UnRAR, 10-12% less than
+  7-Zip. The released build is fastest on the clock only because unRAR spends ~60% more cycles
+  to use many cores on big files.
+- Many small files cost about 1.3-1.4 million cycles per file, almost all of it Windows
+  creating, writing and closing files; decoding is a few cycles per byte of that.
+- B-Rar does 4-14% more work than single-threaded Windows tar on ZIP and tar formats: the cost
+  of parallel file creation (directory locks, waiting) and buffering.
+- 7z: B-Rar does 47% more work than 7-Zip (the lzma-rust2 decoder). bzip2: 23% more than tar
+  (B-Rar's bzip2 crate is slower than tar's libbz2).
+
+---
+
 ## 2026-10-21 (04:16): full matrix, every format, all cores vs one core
 
 After the RAR per-file fix (commit 9768fa7). One run per cell, 5 s apart, competitors first and

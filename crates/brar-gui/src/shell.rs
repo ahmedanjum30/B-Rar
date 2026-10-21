@@ -12,8 +12,9 @@ use windows::{
         System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree},
         UI::{
             Shell::{
-                Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, IsUserAnAdmin,
-                SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
+                Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
+                IFileOpenDialog, IShellItem, IsUserAnAdmin, SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH,
+                ShellExecuteExW, ShellExecuteW,
             },
             WindowsAndMessaging::{AllowSetForegroundWindow, GetForegroundWindow, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL},
         },
@@ -166,8 +167,14 @@ pub fn pick_archive(owner: isize) -> Result<Option<PathBuf>, String> {
     let fail = |e: windows::core::Error| format!("file picker failed: {e}");
     let archives = w!("*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.xz;*.txz;*.zst;*.tzst;*.bz2;*.tbz;*.tbz2;*.001;*.r00");
     let types = [
-        COMDLG_FILTERSPEC { pszName: w!("Archives"), pszSpec: archives },
-        COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+        COMDLG_FILTERSPEC {
+            pszName: w!("Archives"),
+            pszSpec: archives,
+        },
+        COMDLG_FILTERSPEC {
+            pszName: w!("All files"),
+            pszSpec: w!("*.*"),
+        },
     ];
     // SAFETY: plain COM calls on an STA thread; the filter strings are static, and the
     // returned path buffer is freed with CoTaskMemFree.

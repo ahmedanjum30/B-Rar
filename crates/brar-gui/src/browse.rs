@@ -28,7 +28,9 @@ use crate::{
 
 /// Opens the browser on `archive`, or on the home page (opened from the Start menu).
 pub fn run(archive: Option<PathBuf>, password: Option<String>) -> ExitCode {
-    let title = archive.as_deref().map_or_else(|| "B-Rar".to_owned(), |a| format!("{} - B-Rar", file_name(a)));
+    let title = archive
+        .as_deref()
+        .map_or_else(|| "B-Rar".to_owned(), |a| format!("{} - B-Rar", file_name(a)));
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(title)
         .with_inner_size(vec2(920.0, 600.0))
@@ -204,7 +206,10 @@ enum Page {
     Home,
     Loading,
     Ready,
-    Password { wrong: bool, retry: Retry },
+    Password {
+        wrong: bool,
+        retry: Retry,
+    },
     Failed(String),
 }
 
@@ -716,7 +721,11 @@ impl Browser {
             }
             ui.add_space(14.0);
             ui.label(RichText::new("Or drop an archive on this window.").small().color(pal.weak));
-            ui.label(RichText::new("In File Explorer, right-click any archive for B-Rar's menu.").small().color(pal.weak));
+            ui.label(
+                RichText::new("In File Explorer, right-click any archive for B-Rar's menu.")
+                    .small()
+                    .color(pal.weak),
+            );
             if let Some((message, _)) = &self.status {
                 ui.add_space(10.0);
                 ui.label(RichText::new(message).color(pal.error));
