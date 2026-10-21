@@ -1,9 +1,10 @@
 //! RAR: B-Rar's own RAR5 decoder first, the official unRAR library for everything else.
 //!
 //! Fast path ([`crate::rar5`]): files in non-solid, single-volume, unencrypted RAR5 archives
-//! decode in parallel, one whole file per job, each checked against its CRC32. Any file the
-//! fast path can't handle or that fails its check goes to unRAR, so a decoder bug costs speed,
-//! never correctness.
+//! decode in parallel, one whole file per job, each checked against its CRC32. Big files, and
+//! solid archives, go through the two-phase engine ([`rar5::parallel`]), which spreads one
+//! stream over all cores. Any file B-Rar's decoder can't handle or that fails its check goes to
+//! unRAR, so a decoder bug costs speed, never correctness.
 //!
 //! unRAR path: several unRAR handles each decode their own share of a non-solid archive in
 //! parallel (WinRAR decodes one file at a time). Solid and multi-volume archives get one
@@ -21,7 +22,7 @@ use crate::{
         self,
         unpack::{INPUT_PADDING, OUTPUT_SLACK, Unpacker},
     },
-    sink::{SMALL_FILE, Sink},
+    sink::{FileOut, SMALL_FILE, Sink},
     time,
     whole::{BUDGET, Budget, read_at},
 };
@@ -65,7 +66,11 @@ pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
     if std::env::var_os("BRAR_NO_RAR5").is_none()
         && let Some(archive) = rar5::parse(path)?
     {
-        return extract_rar5(path, archive, sink, opts);
+        return if archive.solid {
+            extract_solid(path, archive, sink, opts)
+        } else {
+            extract_rar5(path, archive, sink, opts)
+        };
     }
     extract_unrar(path, sink, opts, None)
 }
@@ -79,33 +84,39 @@ enum Fail {
     Stop(Error),
 }
 
-/// Files at least this big may go to unRAR's multithreaded decoder (see [`extract_rar5`]).
+/// Files at least this big may go to the two-phase engine, which spreads one file over all
+/// cores (see [`extract_rar5`]).
 const BIG_FILE: u64 = 64 << 20;
+/// The engine's window holds min(dictionary, output) bytes; past this, unRAR (memory).
+const MAX_WINDOW: u64 = 4 << 30;
 
 fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
     let picked: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| sink.selected(&e.name)).collect();
     sink.set_total(picked.iter().filter(|e| !e.is_dir).map(|e| e.size).sum());
     let mut candidates = Vec::new();
     let mut retry = Vec::new();
+    let mut big = Vec::new();
     for e in picked {
         if e.is_dir {
             sink.dir(&e.name)?;
-        } else if e.supported && e.packed.saturating_add(e.size) <= BUDGET {
-            candidates.push(e);
-        } else {
+        } else if !e.supported {
             retry.push(e.index);
+        } else if e.packed.saturating_add(e.size) > BUDGET {
+            // Too big to decode in memory: the engine streams it (stored data is unRAR's).
+            if e.method == 0 { retry.push(e.index) } else { big.push(e) }
+        } else {
+            candidates.push(e);
         }
     }
 
-    // Per file, the faster decoder: B-Rar's own decodes one file per thread and beats unRAR per
-    // core; unRAR splits a single file across threads. So a file that alone outweighs its fair
-    // share of the work (and is big) goes to unRAR, everything else to B-Rar's decoder, both at
-    // once. On one core B-Rar's decoder takes everything.
+    // A file that alone outweighs its fair share of the work (and is big) goes to the engine,
+    // which spreads it over all cores; everything else is decoded one whole file per thread,
+    // both at once. On one core everything takes the one-file-per-thread path.
     let threads = opts.thread_count() as u64;
     let work: u64 = candidates.iter().map(|e| e.size).sum();
     let cut = if threads > 1 { (work / threads).max(BIG_FILE) } else { u64::MAX };
-    let (big, mut fast): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|e| e.size >= cut);
-    let big: HashSet<usize> = big.iter().map(|e| e.index).collect();
+    let (more_big, mut fast): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|e| e.size >= cut && e.method != 0);
+    big.extend(more_big);
     // Biggest first, one FIFO job each (see zip.rs for why not a parallel iterator).
     fast.sort_unstable_by_key(|e| Reverse(e.packed));
 
@@ -113,8 +124,21 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     let budget = Budget::new(BUDGET);
     let failed = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
-    let big_result = std::thread::scope(|scope| -> Result<Result<()>> {
-        let big_job = (!big.is_empty()).then(|| scope.spawn(|| extract_unrar(path, sink, opts, Some(&big))));
+    let big_result = std::thread::scope(|scope| -> Result<Result<Vec<usize>>> {
+        // The engine runs on its own thread (it uses its own workers), one big file at a time.
+        let big_job = (!big.is_empty()).then(|| {
+            scope.spawn(|| {
+                let mut retry = Vec::new();
+                for e in &big {
+                    match run_engine(path, &[*e], sink, opts) {
+                        Ok(()) => {}
+                        Err(Fail::Retry) => retry.push(e.index),
+                        Err(Fail::Stop(err)) => return Err(err),
+                    }
+                }
+                Ok(retry)
+            })
+        });
         opts.pool()?.scope_fifo(|s| {
             for e in &fast {
                 let (file, budget, failed, stop) = (&file, &budget, &failed, &stop);
@@ -132,29 +156,154 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                 });
             }
         });
-        Ok(big_job.map_or(Ok(()), |job| job.join().expect("unRAR thread panicked")))
+        Ok(big_job.map_or(Ok(Vec::new()), |job| job.join().expect("engine thread panicked")))
     })?;
     if let Some(err) = stop.into_inner().unwrap() {
         return Err(err);
     }
-    big_result?;
+    let big_failed = big_result?;
     let failed = failed.into_inner().unwrap();
     // BRAR_STATS=1: how many files each decoder handled (to catch silent fallbacks in tests).
     if std::env::var_os("BRAR_STATS").is_some() {
         eprintln!(
-            "rar5: {} files by B-Rar's decoder, {} big files by unRAR (multithreaded), {} failed the check, {} not supported -> unRAR",
+            "rar5: {} files by B-Rar's decoder, {} big files by the engine (multithreaded), {} failed the check, {} not supported -> unRAR",
             fast.len() - failed.len(),
-            big.len(),
-            failed.len(),
+            big.len() - big_failed.len(),
+            failed.len() + big_failed.len(),
             retry.len()
         );
     }
     retry.extend(failed);
+    retry.extend(big_failed);
     if retry.is_empty() {
         return Ok(());
     }
     let only: HashSet<usize> = retry.into_iter().collect();
     extract_unrar(path, sink, opts, Some(&only))
+}
+
+/// A solid archive: one stream across all files, decoded by the engine in parallel. Anything
+/// it can't do (encryption, stored files, damage) sends the whole archive to unRAR.
+fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
+    let files: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| !e.is_dir).collect();
+    if files.iter().any(|e| !e.supported || e.method == 0) {
+        return extract_unrar(path, sink, opts, None);
+    }
+    sink.set_total(files.iter().filter(|e| sink.selected(&e.name)).map(|e| e.size).sum());
+    for e in archive.entries.iter().filter(|e| e.is_dir) {
+        sink.dir(&e.name)?;
+    }
+    let result = run_engine(path, &files, sink, opts);
+    if std::env::var_os("BRAR_STATS").is_some() {
+        let how = if result.is_ok() { "the engine" } else { "unRAR" };
+        eprintln!("rar5: solid archive, {} files by {how}", files.len());
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(Fail::Stop(err)) => Err(err),
+        Err(Fail::Retry) => extract_unrar(path, sink, opts, None),
+    }
+}
+
+/// The two-phase engine over `files` (one big file, or a solid archive's files in order).
+fn run_engine(path: &Path, files: &[&rar5::Entry], sink: &Sink, opts: &Options) -> std::result::Result<(), Fail> {
+    let total: u64 = files.iter().map(|e| e.size).sum();
+    let window = files.iter().map(|e| e.dict).max().unwrap_or(0).min(total);
+    if window > MAX_WINDOW {
+        return Err(Fail::Retry);
+    }
+    let map = crate::mmap(path).map_err(Fail::Stop)?;
+    let mut out = EngineOutput {
+        sink,
+        files,
+        open: None,
+        written: Vec::new(),
+    };
+    match rar5::parallel::decode(&map, files, window as usize, opts.thread_count(), &mut out) {
+        Ok(()) => Ok(()),
+        Err(rar5::parallel::Failure::Corrupt) => {
+            out.discard();
+            Err(Fail::Retry)
+        }
+        Err(rar5::parallel::Failure::Stop(err)) => {
+            if let Some(Open::Stream(f)) = out.open.take() {
+                f.discard();
+            }
+            Err(Fail::Stop(err))
+        }
+    }
+}
+
+/// The engine's output, into the sink, file by file. Small files are collected and written
+/// on the sink's writer pool once their CRC matched (creating files costs more than decoding
+/// them, so a solid archive of many small files would otherwise be bound by one thread's file
+/// creation); big ones stream straight to disk.
+struct EngineOutput<'a> {
+    sink: &'a Sink,
+    files: &'a [&'a rar5::Entry],
+    open: Option<Open>,
+    /// Files written completely, removed again if a later file fails (unRAR redoes them all).
+    written: Vec<std::path::PathBuf>,
+}
+
+enum Open {
+    Stream(FileOut),
+    Buffer(Vec<u8>),
+}
+
+impl EngineOutput<'_> {
+    fn discard(&mut self) {
+        if let Some(Open::Stream(f)) = self.open.take() {
+            f.discard();
+        }
+        self.sink.flush();
+        for p in self.written.drain(..) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+impl rar5::parallel::Output for EngineOutput<'_> {
+    fn start(&mut self, file: usize) -> Result<()> {
+        let e = self.files[file];
+        self.open = Some(if e.size <= SMALL_FILE {
+            Open::Buffer(Vec::with_capacity(e.size as usize))
+        } else {
+            Open::Stream(self.sink.begin_file(&e.name, Some(e.size), e.modified)?)
+        });
+        Ok(())
+    }
+
+    fn write(&mut self, _file: usize, data: &[u8]) -> Result<()> {
+        match self.open.as_mut().expect("a file is open") {
+            Open::Stream(f) => f.write(data),
+            Open::Buffer(v) => {
+                v.extend_from_slice(data);
+                Ok(())
+            }
+        }
+    }
+
+    fn finish(&mut self, file: usize) -> Result<()> {
+        match self.open.take().expect("a file is open") {
+            Open::Stream(f) => {
+                if let Some(p) = f.path() {
+                    self.written.push(p.to_path_buf());
+                }
+                f.finish();
+            }
+            Open::Buffer(data) => {
+                let e = self.files[file];
+                if self.sink.selected(&e.name)
+                    && let Some(p) = self.sink.target(&e.name)?
+                {
+                    self.written.push(p);
+                }
+                self.sink.file_owned(&e.name, e.modified, data)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn extract_fast(file: &File, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> std::result::Result<(), Fail> {

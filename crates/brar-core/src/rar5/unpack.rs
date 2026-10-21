@@ -13,9 +13,9 @@ use std::ptr;
 
 /// Alphabet sizes: main (literals, filter, repeats, lengths), distances (RAR5 / RAR7),
 /// low distance bits, repeat lengths, and the bit-length code.
-const NC: usize = 306;
-const DCB: usize = 64;
-const DCX: usize = 80;
+pub(super) const NC: usize = 306;
+pub(super) const DCB: usize = 64;
+pub(super) const DCX: usize = 80;
 const LDC: usize = 16;
 const RC: usize = 44;
 const BC: usize = 20;
@@ -23,7 +23,7 @@ const MAX_TABLE: usize = NC + DCX + LDC + RC;
 
 /// Longest single match: length slot 43 with 9 extra bits (4097), plus up to 3 for long
 /// distances.
-const MAX_MATCH: usize = 4100;
+pub(super) const MAX_MATCH: usize = 4100;
 /// Extra bytes the output buffer needs past the file size: one maximal match started at the
 /// last position, plus the overshoot of 16-byte chunked copies.
 pub(crate) const OUTPUT_SLACK: usize = MAX_MATCH + 32;
@@ -38,14 +38,14 @@ const MAIN_QUICK: u32 = 12;
 #[derive(Debug)]
 pub(crate) struct Corrupt;
 
-type Res<T> = std::result::Result<T, Corrupt>;
+pub(super) type Res<T> = std::result::Result<T, Corrupt>;
 
 /// MSB-first bit reader. The next bits sit left-aligned in `buf`; `cnt` of them are valid.
 /// `Copy`, so the hot loop can work on a local copy the compiler keeps in registers: a reader
 /// passed by `&mut` to any out-of-line function would be kept in memory instead, putting a
 /// store and a reload on every symbol's dependency chain.
 #[derive(Clone, Copy)]
-struct Bits<'a> {
+pub(super) struct Bits<'a> {
     data: &'a [u8],
     /// Next byte to load into `buf`.
     next: usize,
@@ -56,7 +56,7 @@ struct Bits<'a> {
 }
 
 impl<'a> Bits<'a> {
-    fn new(data: &'a [u8], packed_len: usize) -> Self {
+    pub(super) fn new(data: &'a [u8], packed_len: usize) -> Self {
         let mut b = Self {
             data,
             next: 0,
@@ -72,7 +72,7 @@ impl<'a> Bits<'a> {
     /// libdeflate technique). Bits below `cnt` that were already there are the same bytes
     /// loaded again, so OR-ing them in is harmless.
     #[inline(always)]
-    fn refill(&mut self) {
+    pub(super) fn refill(&mut self) {
         let next = self.next.min(self.max_next);
         // SAFETY: next <= max_next = packed_len + 32, and the input has packed_len +
         // INPUT_PADDING (64) bytes, so next + 8 is in bounds.
@@ -110,9 +110,17 @@ impl<'a> Bits<'a> {
         v
     }
 
+    /// Refills when fewer than `n` bits are left.
+    #[inline(always)]
+    pub(super) fn refill_below(&mut self, n: u32) {
+        if self.cnt < n {
+            self.refill();
+        }
+    }
+
     /// The next `n` (0..=32) bits, consumed; 0 reads nothing.
     #[inline(always)]
-    fn take_upto(&mut self, n: u32) -> u32 {
+    pub(super) fn take_upto(&mut self, n: u32) -> u32 {
         // (buf >> 1) >> (63 - n) is buf >> (64 - n) without the undefined shift by 64.
         let v = ((self.buf >> 1) >> (63 - n)) as u32;
         self.buf = self.buf.wrapping_shl(n);
@@ -122,7 +130,7 @@ impl<'a> Bits<'a> {
 
     /// Bit position in the input.
     #[inline(always)]
-    fn pos(&self) -> usize {
+    pub(super) fn pos(&self) -> usize {
         self.next * 8 - self.cnt as usize
     }
 
@@ -327,8 +335,8 @@ impl Huffman {
 
 /// Main-table entry flags: bits 0..8 hold the code length (0: a code longer than the quick
 /// table, decoded by the slow path), bits 16.. the payload.
-const E_LITERAL: u32 = 1 << 8;
-const E_MATCH: u32 = 1 << 9;
+pub(super) const E_LITERAL: u32 = 1 << 8;
+pub(super) const E_MATCH: u32 = 1 << 9;
 
 /// What the hot loop needs about a main-alphabet symbol, in one word: a literal's byte, a
 /// length slot's base length and extra-bit count, or the symbol (256..=261) itself.
@@ -368,15 +376,15 @@ const DIST_SLOTS: ([u64; DCX], [u8; DCX]) = dist_slots();
 
 /// What the hot loop carries from block to block: the last four distances and the last length.
 #[derive(Clone, Copy, Default)]
-struct Recent {
-    d0: usize,
-    d1: usize,
-    d2: usize,
-    d3: usize,
-    len: usize,
+pub(super) struct Recent {
+    pub(super) d0: usize,
+    pub(super) d1: usize,
+    pub(super) d2: usize,
+    pub(super) d3: usize,
+    pub(super) len: usize,
 }
 
-struct Tables {
+pub(super) struct Tables {
     main: Huffman,
     dist: Huffman,
     low: Huffman,
@@ -385,18 +393,43 @@ struct Tables {
     lengths: [u8; MAX_TABLE],
 }
 
-struct Block {
+pub(super) struct Block {
     /// Bit position just past the block's last bit.
-    end: usize,
-    last: bool,
-    has_tables: bool,
+    pub(super) end: usize,
+    pub(super) last: bool,
+    pub(super) has_tables: bool,
 }
 
-struct Filter {
-    start: usize,
-    len: usize,
-    kind: u32,
-    channels: usize,
+pub(super) struct Filter {
+    pub(super) start: usize,
+    pub(super) len: usize,
+    pub(super) kind: u32,
+    pub(super) channels: usize,
+}
+
+impl Tables {
+    pub(super) fn new() -> Self {
+        Tables {
+            main: Huffman::new_main(),
+            dist: Huffman::new(10),
+            low: Huffman::new(7),
+            rep: Huffman::new(9),
+            bit_lengths: Huffman::new(7),
+            lengths: [0; MAX_TABLE],
+        }
+    }
+
+    /// The main table's next symbol as an entry (literal byte, or length base and extra bits).
+    #[inline(always)]
+    pub(super) fn main_symbol(&self, bits: &mut Bits) -> u32 {
+        self.main.decode_main(self.main.main.as_ptr(), bits)
+    }
+
+    /// A repeat's length slot.
+    #[inline(always)]
+    pub(super) fn rep_slot(&self, bits: &mut Bits) -> usize {
+        self.rep.decode(bits)
+    }
 }
 
 /// Reusable decoder (its tables are a few KB, so keep one per thread).
@@ -409,14 +442,7 @@ pub(crate) struct Unpacker {
 impl Default for Unpacker {
     fn default() -> Self {
         Self {
-            t: Tables {
-                main: Huffman::new_main(),
-                dist: Huffman::new(10),
-                low: Huffman::new(7),
-                rep: Huffman::new(9),
-                bit_lengths: Huffman::new(7),
-                lengths: [0; MAX_TABLE],
-            },
+            t: Tables::new(),
             filters: Vec::new(),
             scratch: Vec::new(),
         }
@@ -607,7 +633,7 @@ fn decode_block<'a>(
 /// A distance: its slot from the distance table, then extra bits (the high ones raw, the low
 /// four from their own table). Needs 56 valid bits; refills only past 26 raw bits (RAR7).
 #[inline(always)]
-fn read_dist(bits: &mut Bits, t: &Tables) -> usize {
+pub(super) fn read_dist(bits: &mut Bits, t: &Tables) -> usize {
     let slot = t.dist.decode(bits);
     let (base, extra) = (DIST_SLOTS.0[slot], u32::from(DIST_SLOTS.1[slot]));
     if extra < 4 {
@@ -633,7 +659,7 @@ fn read_dist(bits: &mut Bits, t: &Tables) -> usize {
     (base + (high << 4) + t.low.decode(bits) as u64) as usize
 }
 
-fn read_block_header(bits: &mut Bits, limit: usize) -> Res<Block> {
+pub(super) fn read_block_header(bits: &mut Bits, limit: usize) -> Res<Block> {
     bits.align_to_byte();
     bits.refill();
     if bits.pos() > limit {
@@ -664,7 +690,7 @@ fn read_block_header(bits: &mut Bits, limit: usize) -> Res<Block> {
     })
 }
 
-fn read_tables(bits: &mut Bits, t: &mut Tables, dist_codes: usize, limit: usize) -> Res<()> {
+pub(super) fn read_tables(bits: &mut Bits, t: &mut Tables, dist_codes: usize, limit: usize) -> Res<()> {
     // Bit lengths of the bit-length code: 4 bits each, 15 escapes a run of zeros.
     let mut bl = [0u8; BC];
     let mut i = 0;
@@ -725,7 +751,7 @@ fn read_tables(bits: &mut Bits, t: &mut Tables, dist_codes: usize, limit: usize)
 
 /// Needs up to 9 valid bits.
 #[inline(always)]
-fn slot_to_length(bits: &mut Bits, slot: usize) -> usize {
+pub(super) fn slot_to_length(bits: &mut Bits, slot: usize) -> usize {
     if slot < 8 {
         return 2 + slot;
     }
@@ -740,7 +766,7 @@ fn slot_to_length(bits: &mut Bits, slot: usize) -> usize {
 /// # Safety
 /// `base` must be valid for `pos + len + 16` bytes.
 #[inline(always)]
-unsafe fn copy_match(base: *mut u8, pos: usize, dist: usize, len: usize) {
+pub(super) unsafe fn copy_match(base: *mut u8, pos: usize, dist: usize, len: usize) {
     unsafe {
         let dst = base.add(pos);
         if dist > pos || dist == 0 {
@@ -772,7 +798,7 @@ unsafe fn copy_match(base: *mut u8, pos: usize, dist: usize, len: usize) {
     }
 }
 
-fn read_filter(bits: &mut Bits, pos: usize) -> Filter {
+pub(super) fn read_filter(bits: &mut Bits, pos: usize) -> Filter {
     let start = read_filter_number(bits) as usize;
     let mut len = read_filter_number(bits) as usize;
     if len > MAX_FILTER_BLOCK {
@@ -814,12 +840,16 @@ fn apply_filter(out: &mut [u8], f: &Filter, scratch: &mut Vec<u8>) -> Res<()> {
     }
     let end = f.start.checked_add(f.len).ok_or(Corrupt)?;
     let data = out.get_mut(f.start..end).ok_or(Corrupt)?;
-    // The x86/ARM filters see the block's offset in the file, truncated to 32 bits.
-    let file_offset = f.start as u32;
-    match f.kind {
+    filter_block(data, f.start as u32, f.kind, f.channels, scratch)
+}
+
+/// Undoes one filter on `data`, the filtered block, which starts `file_offset` bytes into its
+/// file (the x86/ARM filters see that offset, truncated to 32 bits).
+pub(super) fn filter_block(data: &mut [u8], file_offset: u32, kind: u32, channels: usize, scratch: &mut Vec<u8>) -> Res<()> {
+    match kind {
         FILTER_E8 | FILTER_E8E9 => {
             const FILE_SIZE: u32 = 0x100_0000;
-            let second = if f.kind == FILTER_E8E9 { 0xe9 } else { 0xe8 };
+            let second = if kind == FILTER_E8E9 { 0xe9 } else { 0xe8 };
             let mut cur = 0usize;
             while cur + 4 < data.len() {
                 let b = data[cur];
@@ -854,7 +884,7 @@ fn apply_filter(out: &mut [u8], f: &Filter, scratch: &mut Vec<u8>) -> Res<()> {
         FILTER_DELTA => {
             // Bytes of each channel are stored together; interleave them back while undoing
             // the byte-wise differences.
-            let channels = f.channels.max(1);
+            let channels = channels.max(1);
             scratch.clear();
             scratch.resize(data.len(), 0);
             let mut src = 0;

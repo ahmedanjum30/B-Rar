@@ -1,9 +1,10 @@
 //! B-Rar's own RAR5 reader: the container (headers) here, the decompressor in [`unpack`].
 //!
-//! It handles the common case, files in a single-volume, non-solid RAR5 archive without
+//! It handles single-volume RAR5 archives without
 //! encryption, and marks everything else for the unRAR fallback. The container layout follows
 //! RARLAB's published "RAR 5.0 archive format" description.
 
+pub(crate) mod parallel;
 pub(crate) mod unpack;
 
 use std::{path::Path, time::SystemTime};
@@ -33,6 +34,8 @@ pub(crate) struct Entry {
     pub method: u8,
     /// RAR 7 ("v70") stream: larger distance alphabet.
     pub extra_dist: bool,
+    /// Dictionary size: how far back matches may reach.
+    pub dict: u64,
     pub modified: Option<SystemTime>,
     /// Can B-Rar's own decoder handle this entry?
     pub supported: bool,
@@ -40,10 +43,13 @@ pub(crate) struct Entry {
 
 pub(crate) struct Archive {
     pub entries: Vec<Entry>,
+    /// One compressed stream across all files.
+    pub solid: bool,
 }
 
 /// Parses a RAR5 archive's headers. `None` means "leave the whole archive to unRAR": not RAR5,
-/// multi-volume, encrypted headers, or anything that doesn't parse cleanly.
+/// multi-volume, encrypted headers, or anything that doesn't parse cleanly. Solid archives
+/// parse; their entries' `supported` says whether the stream engine can decode them.
 pub(crate) fn parse(path: &Path) -> Result<Option<Archive>> {
     let map = mmap(path)?;
     Ok(parse_bytes(&map))
@@ -98,15 +104,17 @@ fn parse_bytes(b: &[u8]) -> Option<Archive> {
     }
     let mut pos = 8usize;
     let mut entries = Vec::new();
+    let mut solid = false;
     loop {
         let h = header_at(b, pos)?;
         match h.kind {
             HEAD_MAIN => {
                 let archive_flags = vint(h.body, &mut h.fields.clone())?;
-                // Volumes (0x1) and solid archives (0x4) go to unRAR as a whole.
-                if archive_flags & (0x1 | 0x4) != 0 {
+                // Volumes (0x1) go to unRAR as a whole.
+                if archive_flags & 0x1 != 0 {
                     return None;
                 }
+                solid = archive_flags & 0x4 != 0;
             }
             HEAD_FILE => {
                 // Split across volumes (0x8 / 0x10): not in a single-volume archive.
@@ -125,7 +133,7 @@ fn parse_bytes(b: &[u8]) -> Option<Archive> {
             break;
         }
     }
-    Some(Archive { entries })
+    Some(Archive { entries, solid })
 }
 
 /// For one RAR5 volume: does its end-of-archive record say another volume follows?
@@ -168,7 +176,6 @@ fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start:
     let name = String::from_utf8_lossy(body.get(q..q.checked_add(name_len)?)?).into_owned();
 
     let version = comp & 0x3f;
-    let solid = comp & 0x40 != 0;
     let method = ((comp >> 7) & 7) as u8;
     let is_dir = file_flags & 0x1 != 0;
     let size_unknown = file_flags & 0x8 != 0;
@@ -192,7 +199,13 @@ fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start:
         r = rec_end;
     }
 
-    let supported = !is_dir && !special && !solid && !size_unknown && crc.is_some() && version <= 1 && method <= 5;
+    // 128 KB << n; RAR7 allows n up to 31 and adds a fraction in 32nds.
+    let n = (comp >> 10) & if version == 0 { 0x0f } else { 0x1f };
+    let mut dict = 0x20000u64.checked_shl(n as u32).unwrap_or(u64::MAX);
+    if version == 1 {
+        dict = dict.saturating_add(dict / 32 * ((comp >> 15) & 0x1f));
+    }
+    let supported = !is_dir && !special && !size_unknown && crc.is_some() && version <= 1 && method <= 5;
     Some(Entry {
         index,
         name,
@@ -203,6 +216,7 @@ fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start:
         crc: crc.unwrap_or(0),
         method,
         extra_dist: version == 1,
+        dict,
         modified,
         supported,
     })

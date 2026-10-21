@@ -342,6 +342,57 @@ impl Sink {
         Ok(())
     }
 
+    /// Starts a file whose bytes arrive in pieces ([`FileOut::write`]), from a decoder that
+    /// streams its output. Unselected entries and test mode get a writer that drops the bytes
+    /// (test mode still counts the file); so does an existing file the user chose to keep.
+    pub(crate) fn begin_file(&self, name: &str, size: Option<u64>, mtime: Option<SystemTime>) -> Result<FileOut> {
+        self.check()?;
+        let shared = Arc::clone(&self.shared);
+        if !self.selected(name) {
+            return Ok(FileOut {
+                shared,
+                file: None,
+                path: None,
+                mtime,
+                len: 0,
+                report: false,
+                record: false,
+            });
+        }
+        self.start(name);
+        let Some(path) = self.target(name)? else {
+            return Ok(FileOut {
+                shared,
+                file: None,
+                path: None,
+                mtime,
+                len: 0,
+                report: true,
+                record: true,
+            });
+        };
+        match self.shared.open(&path, size, mtime)? {
+            Some(file) => Ok(FileOut {
+                shared,
+                file: Some(file),
+                path: Some(path),
+                mtime,
+                len: 0,
+                report: true,
+                record: true,
+            }),
+            None => Ok(FileOut {
+                shared,
+                file: None,
+                path: None,
+                mtime,
+                len: 0,
+                report: true,
+                record: false,
+            }),
+        }
+    }
+
     /// Like [`Sink::file`], but small files are read into memory here and written on the
     /// writer pool, so a sequential decoder never waits on file creation.
     pub(crate) fn file_buffered(&self, name: &str, size: u64, mtime: Option<SystemTime>, reader: &mut dyn Read) -> Result<()> {
@@ -423,6 +474,14 @@ impl Sink {
         }
     }
 
+    /// Waits until every background write so far is done.
+    pub(crate) fn flush(&self) {
+        let mut guard = self.shared.in_flight.lock().unwrap();
+        while guard.0 > 0 {
+            guard = self.shared.drained.wait(guard).unwrap();
+        }
+    }
+
     /// Waits for background writes and returns totals.
     pub(crate) fn finish(&self) -> Result<Summary> {
         let mut guard = self.shared.in_flight.lock().unwrap();
@@ -477,6 +536,59 @@ fn make_writable(path: &Path) {
             #[allow(clippy::permissions_set_readonly_false)]
             perms.set_readonly(false);
             let _ = fs::set_permissions(path, perms);
+        }
+    }
+}
+
+/// A file being written piece by piece ([`Sink::begin_file`]). Call [`FileOut::finish`] once
+/// the data is complete and verified, or [`FileOut::discard`] to remove what was written.
+pub(crate) struct FileOut {
+    shared: Arc<Shared>,
+    file: Option<File>,
+    /// Where `file` is, so a failed file can be removed.
+    path: Option<PathBuf>,
+    mtime: Option<SystemTime>,
+    len: u64,
+    /// Count the bytes toward progress / the file toward the summary.
+    report: bool,
+    record: bool,
+}
+
+impl FileOut {
+    /// The file being written, if one is (not in test mode, or for a skipped entry).
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub(crate) fn write(&mut self, data: &[u8]) -> Result<()> {
+        for chunk in data.chunks(COPY_BUF) {
+            if let (Some(file), Some(path)) = (&mut self.file, &self.path) {
+                file.write_all(chunk).at(path)?;
+            }
+            if self.report {
+                self.shared.advance(chunk.len() as u64);
+            }
+            self.shared.check_running()?;
+        }
+        self.len += data.len() as u64;
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) {
+        if let Some(file) = &self.file {
+            set_mtime(file, self.mtime);
+        }
+        if self.record {
+            self.shared.record_file(self.len);
+        }
+    }
+
+    /// Removes the partly written file (the data turned out to be bad; another decoder will
+    /// try again).
+    pub(crate) fn discard(self) {
+        drop(self.file);
+        if let Some(path) = self.path {
+            let _ = fs::remove_file(path);
         }
     }
 }

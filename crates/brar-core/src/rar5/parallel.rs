@@ -1,0 +1,643 @@
+//! Two-phase RAR5 decoding, for files too big for one core and for solid archives.
+//!
+//! Phase A, in parallel: the compressed stream's blocks, grouped into chunks that each start
+//! at a block carrying its own Huffman tables, are decoded into tokens: literal bytes, and
+//! match / repeat / filter instructions with the repeated distances still symbolic. Chunks
+//! don't depend on each other, so any number of threads can work on them.
+//!
+//! Phase B, in order, on the calling thread: the tokens are applied into a sliding window
+//! (the last `window` bytes of output, as far back as a match can reach), which resolves the
+//! repeated distances, and finished bytes are streamed out. Filters are applied to a copy at
+//! that point: later matches still read the unfiltered window.
+//!
+//! The stream runs over one file (a big file of a normal archive) or over every file of a
+//! solid archive in order, with tables, recent distances and window carried across files.
+
+use std::{
+    collections::VecDeque,
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
+use super::{
+    Entry,
+    unpack::{
+        self, Bits, Corrupt, DCB, DCX, E_LITERAL, E_MATCH, Filter, INPUT_PADDING, MAX_MATCH, Recent, Res, Tables, filter_block, read_block_header,
+        read_dist, read_filter, read_tables, slot_to_length,
+    },
+};
+
+/// Where phase B sends finished bytes, file by file (indices into the stream's files).
+pub(crate) trait Output {
+    fn start(&mut self, file: usize) -> crate::Result<()>;
+    fn write(&mut self, file: usize, data: &[u8]) -> crate::Result<()>;
+    /// The file is complete and its CRC matched.
+    fn finish(&mut self, file: usize) -> crate::Result<()>;
+}
+
+pub(crate) enum Failure {
+    /// The data didn't decode, or a CRC didn't match: another decoder should try.
+    Corrupt,
+    /// Writing failed or the user cancelled: stop.
+    Stop(crate::Error),
+}
+
+impl From<Corrupt> for Failure {
+    fn from(_: Corrupt) -> Self {
+        Failure::Corrupt
+    }
+}
+
+/// Compressed bytes per chunk (phase A's unit of work).
+const CHUNK_PACKED: usize = 1 << 20;
+/// Window space beyond what must be kept, so it slides (a memmove) only every so often.
+const SLIDE_ROOM: usize = 32 << 20;
+
+/// One block of the stream, found by the header scan.
+#[derive(Clone, Copy)]
+struct Span {
+    file: usize,
+    /// Offsets in the archive of its header and of the next block's header.
+    start: usize,
+    end: usize,
+    has_tables: bool,
+}
+
+/// Consecutive blocks decoded by one worker. `tables_from` is the block whose tables apply
+/// at `first` (itself, or an earlier one).
+struct Chunk {
+    first: usize,
+    last: usize,
+    tables_from: usize,
+}
+
+/// Phase A's output for one chunk.
+#[derive(Default)]
+struct Tokens {
+    lits: Vec<u8>,
+    ops: Vec<Op>,
+}
+
+/// One non-literal symbol, after `lits` literals. `len`'s top 4 bits hold the kind.
+#[derive(Clone, Copy)]
+struct Op {
+    lits: u32,
+    len: u32,
+    dist: u64,
+}
+
+const KIND_SHIFT: u32 = 28;
+const MATCH: u32 = 0;
+/// REPEAT + n: reuse recent distance n (0..=3).
+const REPEAT: u32 = 1;
+/// Repeat the last match exactly (symbol 257).
+const LAST: u32 = 5;
+/// `dist` = start (relative to the output position) | length << 32; `len` low bits =
+/// channels, bits 8..: filter type.
+const FILTER: u32 = 6;
+/// Only the literals before it (the end of a chunk).
+const TAIL: u32 = 7;
+
+/// Decodes `files` (in stream order: one file, or every data file of a solid archive) from
+/// the archive bytes `map`, sending the output to `out`. `window` is the dictionary size.
+pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize, out: &mut dyn Output) -> Result<(), Failure> {
+    let spans = scan(map, files)?;
+    let chunks = group(&spans)?;
+    let total: usize = files.iter().map(|e| e.size as usize).sum();
+    let workers = threads.max(1);
+    // Chunks decoded ahead of phase B, which bounds the tokens held in memory.
+    let ahead = 2 * workers + 2;
+
+    struct Queue {
+        slots: Vec<Option<Res<Tokens>>>,
+        consumed: usize,
+    }
+    let queue = Mutex::new(Queue {
+        slots: (0..chunks.len()).map(|_| None).collect(),
+        consumed: 0,
+    });
+    let changed = Condvar::new();
+    let next = AtomicUsize::new(0);
+    let abort = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut tables = Tables::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= chunks.len() {
+                        return;
+                    }
+                    {
+                        let mut q = queue.lock().unwrap();
+                        while i >= q.consumed + ahead && !abort.load(Ordering::Relaxed) {
+                            q = changed.wait(q).unwrap();
+                        }
+                    }
+                    if abort.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let tokens = decode_chunk(map, &spans, &chunks[i], files, &mut tables);
+                    queue.lock().unwrap().slots[i] = Some(tokens);
+                    changed.notify_all();
+                }
+            });
+        }
+
+        let mut w = Window::new(window.min(total), total);
+        let result = (|| -> Result<(), Failure> {
+            let mut file = 0;
+            let mut current = FileState::new(files, 0, 0);
+            out.start(0).map_err(Failure::Stop)?;
+            for (i, chunk) in chunks.iter().enumerate() {
+                let tokens = {
+                    let mut q = queue.lock().unwrap();
+                    loop {
+                        if let Some(t) = q.slots[i].take() {
+                            q.consumed = i + 1;
+                            break t;
+                        }
+                        q = changed.wait(q).unwrap();
+                    }
+                };
+                changed.notify_all();
+                let tokens = tokens?;
+                // Files without chunks of their own (empty) and files that are done.
+                while spans[chunk.first].file > file {
+                    w.finish_file(&mut current, out)?;
+                    file += 1;
+                    current = FileState::new(files, file, w.pos);
+                    out.start(file).map_err(Failure::Stop)?;
+                }
+                w.apply(&tokens, &mut current, out)?;
+            }
+            loop {
+                w.finish_file(&mut current, out)?;
+                file += 1;
+                if file == files.len() {
+                    return Ok(());
+                }
+                current = FileState::new(files, file, w.pos);
+                out.start(file).map_err(Failure::Stop)?;
+            }
+        })();
+        if result.is_err() {
+            abort.store(true, Ordering::Relaxed);
+            changed.notify_all();
+        }
+        result
+    })
+}
+
+/// Reads the block headers of every file's packed data (each header gives its block's size,
+/// so nothing is decoded here).
+fn scan(map: &[u8], files: &[&Entry]) -> Res<Vec<Span>> {
+    let mut spans = Vec::new();
+    for (file, e) in files.iter().enumerate() {
+        if e.packed == 0 {
+            continue;
+        }
+        let (mut at, stop) = (e.data_start as usize, (e.data_start + e.packed) as usize);
+        if stop > map.len() {
+            return Err(Corrupt);
+        }
+        loop {
+            let flags = *map.get(at).ok_or(Corrupt)?;
+            let bytes = usize::from((flags >> 3) & 3) + 1;
+            if bytes == 4 || at + 2 + bytes > stop {
+                return Err(Corrupt);
+            }
+            let size = (0..bytes).fold(0u32, |v, i| v | u32::from(map[at + 2 + i]) << (8 * i));
+            let check = (0x5A ^ u32::from(flags) ^ size ^ (size >> 8) ^ (size >> 16)) & 0xff;
+            let end = at + 2 + bytes + size as usize;
+            if check != u32::from(map[at + 1]) || end > stop {
+                return Err(Corrupt);
+            }
+            spans.push(Span {
+                file,
+                start: at,
+                end,
+                has_tables: flags & 0x80 != 0,
+            });
+            if flags & 0x40 != 0 {
+                break; // the file's last block
+            }
+            at = end;
+        }
+    }
+    Ok(spans)
+}
+
+/// Groups blocks into chunks of about [`CHUNK_PACKED`], each within one file and starting at a
+/// block with tables where possible.
+fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
+    let mut chunks = Vec::new();
+    let mut tables_at = None;
+    let mut i = 0;
+    while i < spans.len() {
+        if spans[i].has_tables {
+            tables_at = Some(i);
+        }
+        // The first block of the stream must carry tables.
+        let tables_from = tables_at.ok_or(Corrupt)?;
+        let mut bytes = spans[i].end - spans[i].start;
+        let mut j = i + 1;
+        while j < spans.len() && spans[j].file == spans[i].file && !(spans[j].has_tables && bytes >= CHUNK_PACKED) {
+            if spans[j].has_tables {
+                tables_at = Some(j);
+            }
+            bytes += spans[j].end - spans[j].start;
+            j += 1;
+        }
+        chunks.push(Chunk {
+            first: i,
+            last: j,
+            tables_from,
+        });
+        i = j;
+    }
+    Ok(chunks)
+}
+
+/// The bytes `map[from..to]`, followed by the zero padding the bit reader needs.
+fn padded(map: &[u8], from: usize, to: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(to - from + INPUT_PADDING);
+    v.extend_from_slice(&map[from..to]);
+    v.resize(to - from + INPUT_PADDING, 0);
+    v
+}
+
+fn dist_codes(e: &Entry) -> usize {
+    if e.extra_dist { DCX } else { DCB }
+}
+
+/// Phase A for one chunk.
+fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables) -> Res<Tokens> {
+    if c.tables_from != c.first {
+        // This chunk continues with an earlier block's tables: read them from that block.
+        let s = spans[c.tables_from];
+        let input = padded(map, s.start, s.end);
+        let mut bits = Bits::new(&input, s.end - s.start);
+        let limit = (s.end - s.start + 16) * 8;
+        if !read_block_header(&mut bits, limit)?.has_tables {
+            return Err(Corrupt);
+        }
+        read_tables(&mut bits, t, dist_codes(files[s.file]), limit)?;
+    }
+    let (from, to) = (spans[c.first].start, spans[c.last - 1].end);
+    let codes = dist_codes(files[spans[c.first].file]);
+    let input = padded(map, from, to);
+    let mut bits = Bits::new(&input, to - from);
+    let limit = (to - from + 16) * 8;
+    let mut k = Tokens {
+        lits: Vec::with_capacity((to - from) * 2),
+        ops: Vec::with_capacity((to - from) / 16),
+    };
+    let mut mark = 0;
+    for _ in c.first..c.last {
+        let block = read_block_header(&mut bits, limit)?;
+        if block.has_tables {
+            read_tables(&mut bits, t, codes, limit)?;
+        }
+        bits = tokenize(t, bits, block.end.min(limit), &mut k, &mut mark);
+        if bits.pos() < block.end {
+            return Err(Corrupt); // stopped at the input limit, not the block end
+        }
+    }
+    // Literals after the last op travel as an op with no payload.
+    if k.lits.len() > mark {
+        k.ops.push(Op {
+            lits: (k.lits.len() - mark) as u32,
+            len: TAIL << KIND_SHIFT,
+            dist: 0,
+        });
+    }
+    Ok(k)
+}
+
+/// Decodes one block's symbols into tokens. Like the single-threaded decoder's hot loop, it
+/// takes the reader by value, so it stays in registers.
+#[inline(never)]
+fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark: &mut usize) -> Bits<'a> {
+    let fast_end = end.saturating_sub(32);
+    loop {
+        if k.lits.capacity() - k.lits.len() < 2 {
+            k.lits.reserve(1 << 16);
+        }
+        let e;
+        if bits.pos() < fast_end {
+            bits.refill_below(32);
+            let e1 = t.main_symbol(&mut bits);
+            if e1 & E_LITERAL != 0 {
+                push(&mut k.lits, (e1 >> 16) as u8);
+                let e2 = t.main_symbol(&mut bits);
+                if e2 & E_LITERAL != 0 {
+                    push(&mut k.lits, (e2 >> 16) as u8);
+                    continue;
+                }
+                e = e2;
+            } else {
+                e = e1;
+            }
+        } else {
+            if bits.pos() >= end {
+                return bits;
+            }
+            bits.refill_below(32);
+            let e1 = t.main_symbol(&mut bits);
+            if e1 & E_LITERAL != 0 {
+                push(&mut k.lits, (e1 >> 16) as u8);
+                continue;
+            }
+            e = e1;
+        }
+        bits.refill();
+        let lits = (k.lits.len() - *mark) as u32;
+        *mark = k.lits.len();
+        let op = if e & E_MATCH != 0 {
+            let mut len = (e >> 16) + bits.take_upto((e >> 10) & 15);
+            bits.refill();
+            let dist = read_dist(&mut bits, t) as u64;
+            len += u32::from(dist > 0x100) + u32::from(dist > 0x2000) + u32::from(dist > 0x40000);
+            Op { lits, len, dist }
+        } else {
+            match e >> 16 {
+                256 => {
+                    let mut b = bits;
+                    let f = read_filter(&mut b, 0);
+                    bits = b;
+                    Op {
+                        lits,
+                        len: FILTER << KIND_SHIFT | f.kind << 8 | f.channels as u32,
+                        dist: f.start as u64 | (f.len as u64) << 32,
+                    }
+                }
+                257 => Op {
+                    lits,
+                    len: LAST << KIND_SHIFT,
+                    dist: 0,
+                },
+                n => {
+                    let slot = t.rep_slot(&mut bits);
+                    let len = slot_to_length(&mut bits, slot) as u32;
+                    Op {
+                        lits,
+                        len: (REPEAT + n - 258) << KIND_SHIFT | len,
+                        dist: 0,
+                    }
+                }
+            }
+        };
+        k.ops.push(op);
+    }
+}
+
+#[inline(always)]
+fn push(v: &mut Vec<u8>, b: u8) {
+    // SAFETY: the caller reserved room for two bytes per loop round.
+    unsafe {
+        v.as_mut_ptr().add(v.len()).write(b);
+        v.set_len(v.len() + 1);
+    }
+}
+
+/// The file phase B is producing.
+struct FileState {
+    index: usize,
+    /// Its bytes are stream positions start..end.
+    start: usize,
+    end: usize,
+    crc: u32,
+    hasher: crc32fast::Hasher,
+}
+
+impl FileState {
+    fn new(files: &[&Entry], index: usize, start: usize) -> Self {
+        Self {
+            index,
+            start,
+            end: start + files[index].size as usize,
+            crc: files[index].crc,
+            hasher: crc32fast::Hasher::new(),
+        }
+    }
+}
+
+/// Phase B's sliding window: `buf[0]` is stream position `base`; output so far ends at `pos`;
+/// bytes before `emitted` have been sent.
+struct Window {
+    buf: Vec<u8>,
+    base: usize,
+    pos: usize,
+    emitted: usize,
+    /// How far back matches may reach (the dictionary size).
+    keep: usize,
+    recent: Recent,
+    /// Filters waiting for their block to be complete, in stream order.
+    filters: VecDeque<Filter>,
+    filtered: Vec<u8>,
+    scratch: Vec<u8>,
+}
+
+impl Window {
+    fn new(keep: usize, total: usize) -> Self {
+        let size = (keep + SLIDE_ROOM).min(total + MAX_MATCH * 2) + MAX_MATCH * 2;
+        Self {
+            buf: vec![0; size],
+            base: 0,
+            pos: 0,
+            emitted: 0,
+            keep,
+            recent: Recent::default(),
+            filters: VecDeque::new(),
+            filtered: Vec::new(),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Makes room for `need` more bytes: sends what's finished, then drops what no match can
+    /// reach any more.
+    fn room(&mut self, need: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        if self.pos - self.base + need <= self.buf.len() {
+            return Ok(());
+        }
+        self.emit(f, out)?;
+        let keep_from = self.emitted.min(self.pos.saturating_sub(self.keep)).max(self.base);
+        let shift = keep_from - self.base;
+        self.buf.copy_within(shift..self.pos - self.base, 0);
+        self.base = keep_from;
+        if self.pos - self.base + need > self.buf.len() {
+            self.buf.resize(self.pos - self.base + need + SLIDE_ROOM, 0);
+        }
+        Ok(())
+    }
+
+    /// Phase B for one chunk's tokens.
+    fn apply(&mut self, k: &Tokens, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        let mut lp = 0;
+        for op in &k.ops {
+            if self.pos >= f.end {
+                return Ok(()); // the file is complete; the rest is discarded
+            }
+            // Literals, in pieces that fit the window.
+            let mut run = op.lits as usize;
+            while run > 0 {
+                let n = run.min(SLIDE_ROOM / 2).min(f.end - self.pos);
+                self.room(n + MAX_MATCH, f, out)?;
+                let at = self.pos - self.base;
+                self.buf[at..at + n].copy_from_slice(&k.lits[lp..lp + n]);
+                (self.pos, lp, run) = (self.pos + n, lp + n, run - n);
+                if self.pos >= f.end {
+                    return Ok(());
+                }
+            }
+            let kind = op.len >> KIND_SHIFT;
+            let len = (op.len & ((1 << KIND_SHIFT) - 1)) as usize;
+            let r = &mut self.recent;
+            let dist = match kind {
+                MATCH => {
+                    let dist = op.dist as usize;
+                    *r = Recent {
+                        d0: dist,
+                        d1: r.d0,
+                        d2: r.d1,
+                        d3: r.d2,
+                        len,
+                    };
+                    dist
+                }
+                TAIL => continue,
+                LAST => {
+                    if r.len != 0 {
+                        let (d, l) = (r.d0, r.len);
+                        self.copy(d, l, f, out)?;
+                    }
+                    continue;
+                }
+                FILTER => {
+                    let start = self.pos + (op.dist as u32) as usize;
+                    let flen = (op.dist >> 32) as usize;
+                    if flen == 0 {
+                        continue; // an empty (or oversized) filter does nothing
+                    }
+                    if self.filters.back().is_some_and(|b| b.start > start) {
+                        return Err(Failure::Corrupt); // filters out of order
+                    }
+                    self.filters.push_back(Filter {
+                        start,
+                        len: flen,
+                        kind: (op.len >> 8) & 0xff,
+                        channels: (op.len & 0xff) as usize,
+                    });
+                    continue;
+                }
+                n => {
+                    let dist = match n - REPEAT {
+                        0 => r.d0,
+                        1 => {
+                            let d = r.d1;
+                            r.d1 = r.d0;
+                            d
+                        }
+                        2 => {
+                            let d = r.d2;
+                            (r.d2, r.d1) = (r.d1, r.d0);
+                            d
+                        }
+                        _ => {
+                            let d = r.d3;
+                            (r.d3, r.d2, r.d1) = (r.d2, r.d1, r.d0);
+                            d
+                        }
+                    };
+                    r.d0 = dist;
+                    r.len = len;
+                    dist
+                }
+            };
+            self.copy(dist, len, f, out)?;
+        }
+        Ok(())
+    }
+
+    fn copy(&mut self, dist: usize, len: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        self.room(len + 32, f, out)?;
+        let at = self.pos - self.base;
+        if dist > self.pos || dist == 0 {
+            // Before the start of the stream: zeros (the reference decoder's rule).
+            if dist != 0 {
+                self.buf[at..at + len].fill(0);
+            }
+        } else if dist > at {
+            return Err(Failure::Corrupt); // further back than the dictionary
+        } else {
+            // SAFETY: dist <= at, and room() left len + 32 bytes past `at`.
+            unsafe { unpack::copy_match(self.buf.as_mut_ptr(), at, dist, len) };
+        }
+        self.pos += len;
+        Ok(())
+    }
+
+    /// Sends every finished byte of the current file: up to the output position, except
+    /// filtered blocks that aren't complete yet.
+    fn emit(&mut self, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        let ready = self.pos.min(f.end);
+        while let Some(flt) = self.filters.front() {
+            if flt.start >= ready {
+                break;
+            }
+            if flt.start < self.emitted {
+                return Err(Failure::Corrupt); // overlapping filters
+            }
+            let (start, end, kind, channels) = (flt.start, flt.start + flt.len, flt.kind, flt.channels);
+            if end > f.end {
+                return Err(Failure::Corrupt);
+            }
+            if self.pos < end {
+                // Not complete yet: send what's before it.
+                self.send(self.emitted, start, f, out)?;
+                return Ok(());
+            }
+            self.send(self.emitted, start, f, out)?;
+            self.filters.pop_front();
+            self.filtered.clear();
+            self.filtered.extend_from_slice(&self.buf[start - self.base..end - self.base]);
+            filter_block(&mut self.filtered, (start - f.start) as u32, kind, channels, &mut self.scratch)?;
+            f.hasher.update(&self.filtered);
+            out.write(f.index, &self.filtered).map_err(Failure::Stop)?;
+            self.emitted = end;
+        }
+        self.send(self.emitted, ready, f, out)
+    }
+
+    fn send(&mut self, from: usize, to: usize, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        if to > from {
+            let bytes = &self.buf[from - self.base..to - self.base];
+            f.hasher.update(bytes);
+            out.write(f.index, bytes).map_err(Failure::Stop)?;
+            self.emitted = to;
+        }
+        Ok(())
+    }
+
+    /// Ends the current file: everything sent, CRC checked.
+    fn finish_file(&mut self, f: &mut FileState, out: &mut dyn Output) -> Result<(), Failure> {
+        if self.pos < f.end {
+            return Err(Failure::Corrupt); // the data ended early
+        }
+        // A match may have run past the end: those bytes belong to no file.
+        self.pos = f.end;
+        self.emit(f, out)?;
+        if self.emitted != f.end || !self.filters.is_empty() {
+            return Err(Failure::Corrupt);
+        }
+        let hasher = std::mem::take(&mut f.hasher);
+        if hasher.finalize() != f.crc {
+            return Err(Failure::Corrupt);
+        }
+        out.finish(f.index).map_err(Failure::Stop)
+    }
+}
