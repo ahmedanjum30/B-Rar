@@ -9,7 +9,7 @@
 
 Free for personal and other non-commercial use. See [License](#license).
 
-**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11.
+**[ahmedanjum30.github.io/B-Rar](https://ahmedanjum30.github.io/B-Rar/)** · for Windows 10 and 11, from the Microsoft Store or `winget install B-Rar`.
 
 ## Features
 

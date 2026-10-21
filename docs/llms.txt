@@ -1,0 +1,24 @@
+﻿# B-Rar
+
+> B-Rar is a free (for personal and non-commercial use) archive extractor for Windows 10 and 11, written in Rust. It extracts ZIP, RAR, 7z and tar archives in parallel on all CPU cores, faster than WinRAR and 7-Zip, and adds a Windows 11 right-click menu (Open in B-Rar, Extract files, Extract to folder, Extract here, Test archive).
+
+- Install: Microsoft Store (search "B-Rar"), or `winget install B-Rar`
+- Source code and documentation: https://github.com/ahmedanjum30/B-Rar
+- Benchmarks: https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md
+- License: PolyForm Noncommercial 1.0.0 (free for personal, non-commercial, educational and public use; commercial use not permitted)
+- Author: Ahmad Anjum (https://github.com/ahmedanjum30)
+
+## Features
+
+- Formats: ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES, ZipCrypto), RAR 4 and 5 (solid, encrypted, multi-volume), 7z, tar, tar.gz, tar.xz, tar.zst, tar.bz2, single .gz/.xz/.zst/.bz2 files.
+- Speed (1.1 GB RAR5 archive, all cores): B-Rar 2.0 s, WinRAR 4.0 s, 7-Zip 8.1 s, Windows tar 15.1 s. Archives with ~48,000 small files: B-Rar 7.1 s, 7-Zip 24.2 s, WinRAR 28.2 s. 7z (LZMA2) archives are still faster with 7-Zip.
+- Archive browser: look inside an archive, search it, open single files, extract only selected files and folders.
+- Archives in parts: RAR volumes (.part1.rar, .r00) and split archives (.001); extraction can start from any part.
+- Passwords, including encrypted file names. Asks before replacing files. Extracting into admin-only folders shows the Windows UAC prompt.
+- Command line: `B-Rar x archive.rar`, `B-Rar l`, `B-Rar t`.
+- Extracts only; B-Rar doesn't create archives.
+- Alternative to: WinRAR, 7-Zip, PeaZip, Bandizip, the Windows built-in ZIP and tar support.
+
+## Privacy
+
+B-Rar doesn't connect to the internet and collects no data: https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md
