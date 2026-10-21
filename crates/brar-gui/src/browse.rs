@@ -26,9 +26,11 @@ use crate::{
     style::{self, Icon, palette, semibold},
 };
 
-pub fn run(archive: PathBuf, password: Option<String>) -> ExitCode {
+/// Opens the browser on `archive`, or on the home page (opened from the Start menu).
+pub fn run(archive: Option<PathBuf>, password: Option<String>) -> ExitCode {
+    let title = archive.as_deref().map_or_else(|| "B-Rar".to_owned(), |a| format!("{} - B-Rar", file_name(a)));
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(format!("{} - B-Rar", file_name(&archive)))
+        .with_title(title)
         .with_inner_size(vec2(920.0, 600.0))
         .with_min_inner_size(vec2(560.0, 320.0));
     if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
@@ -198,6 +200,8 @@ enum Retry {
 }
 
 enum Page {
+    /// No archive yet: "Open archive...", or drop one on the window.
+    Home,
     Loading,
     Ready,
     Password { wrong: bool, retry: Retry },
@@ -251,17 +255,17 @@ struct Browser {
 }
 
 impl Browser {
-    fn new(ctx: &egui::Context, archive: PathBuf, password: Option<String>) -> Self {
+    fn new(ctx: &egui::Context, archive: Option<PathBuf>, password: Option<String>) -> Self {
         let logo = eframe::icon_data::from_png_bytes(LOGO_PNG)
             .map(|i| egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba))
             .unwrap_or_default();
         let mut b = Self {
-            name: file_name(&archive),
-            archive,
+            name: String::new(),
+            archive: PathBuf::new(),
             logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
             password,
             inbox: Arc::default(),
-            page: Page::Loading,
+            page: Page::Home,
             tree: Tree::build(Vec::new()),
             cwd: 0,
             rows: Vec::new(),
@@ -282,8 +286,37 @@ impl Browser {
             temp: std::env::temp_dir().join("B-Rar").join(std::process::id().to_string()),
             jobs: 0,
         };
-        b.list(ctx);
+        if let Some(archive) = archive {
+            b.open_archive(ctx, archive);
+        }
         b
+    }
+
+    /// Shows `archive` in this window (from the home page, a drop, or Ctrl+O).
+    fn open_archive(&mut self, ctx: &egui::Context, archive: PathBuf) {
+        self.name = file_name(&archive);
+        self.archive = archive;
+        if !self.name.is_empty() {
+            ctx.send_viewport_cmd(ViewportCommand::Title(format!("{} - B-Rar", self.name)));
+        }
+        self.password = None;
+        self.tree = Tree::build(Vec::new());
+        self.cwd = 0;
+        self.rows.clear();
+        self.selected.clear();
+        (self.anchor, self.cursor) = (None, None);
+        self.search.clear();
+        self.status = None;
+        self.list(ctx);
+    }
+
+    /// The Windows file picker; opens what was picked.
+    fn pick_archive(&mut self, ctx: &egui::Context) {
+        match shell::pick_archive(self.hwnd) {
+            Ok(Some(path)) => self.open_archive(ctx, path),
+            Ok(None) => {}
+            Err(e) => self.say(e),
+        }
     }
 
     fn options(&self) -> Options {
@@ -555,7 +588,14 @@ fn natural(a: &str, b: &str) -> Cmp {
 const ROW: f32 = 26.0;
 
 impl eframe::App for Browser {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // An archive dropped on the window opens in it; Ctrl+O picks one.
+        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
+            self.open_archive(ctx, path);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::O)) {
+            self.pick_archive(ctx);
+        }
         let (listing, opened) = {
             let mut inbox = self.inbox.lock().unwrap();
             (inbox.listing.take(), std::mem::take(&mut inbox.opened))
@@ -605,6 +645,7 @@ impl eframe::App for Browser {
         }
         let pal = palette(ui);
         match &self.page {
+            Page::Home => centered(ui, pal.bg, |ui| self.home_page(ui)),
             Page::Ready => self.browser_page(ui),
             Page::Loading => centered(ui, pal.bg, |ui| {
                 ui.horizontal(|ui| {
@@ -630,9 +671,14 @@ impl eframe::App for Browser {
                     ui.add_space(10.0);
                     ui.add(egui::Label::new(RichText::new(message).color(pal.text)).wrap());
                     ui.add_space(14.0);
-                    if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                    }
+                    ui.horizontal(|ui| {
+                        if style::primary_button(ui, "Open another...", true).clicked() {
+                            self.pick_archive(ui.ctx());
+                        }
+                        if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                        }
+                    });
                 });
             }
         }
@@ -657,6 +703,27 @@ fn centered(ui: &mut Ui, bg: Color32, add: impl FnOnce(&mut Ui)) {
 }
 
 impl Browser {
+    fn home_page(&mut self, ui: &mut Ui) {
+        let pal = palette(ui);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Image::new(egui::load::SizedTexture::new(self.logo.id(), Vec2::splat(96.0))));
+            ui.add_space(10.0);
+            ui.label(RichText::new("B-Rar").heading().size(26.0).color(pal.text));
+            ui.label(RichText::new("Open an archive to look inside and extract it.").color(pal.weak));
+            ui.add_space(18.0);
+            if style::primary_button(ui, "Open archive...", true).on_hover_text("Ctrl+O").clicked() {
+                self.pick_archive(ui.ctx());
+            }
+            ui.add_space(14.0);
+            ui.label(RichText::new("Or drop an archive on this window.").small().color(pal.weak));
+            ui.label(RichText::new("In File Explorer, right-click any archive for B-Rar's menu.").small().color(pal.weak));
+            if let Some((message, _)) = &self.status {
+                ui.add_space(10.0);
+                ui.label(RichText::new(message).color(pal.error));
+            }
+        });
+    }
+
     fn password_page(&mut self, ui: &mut Ui, wrong: bool, retry: Retry) {
         let pal = palette(ui);
         ui.horizontal(|ui| {

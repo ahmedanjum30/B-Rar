@@ -1,4 +1,4 @@
-//! Thin wrappers over the Windows shell: folder picker, message box, opening Explorer.
+//! Thin wrappers over the Windows shell: file and folder pickers, message box, opening Explorer.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -12,7 +12,7 @@ use windows::{
         System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree},
         UI::{
             Shell::{
-                FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, IsUserAnAdmin,
+                Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, IsUserAnAdmin,
                 SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
             },
             WindowsAndMessaging::{AllowSetForegroundWindow, GetForegroundWindow, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL},
@@ -146,6 +146,37 @@ pub fn pick_folder(archive: &Path, owner: isize) -> Result<Option<PathBuf>, Stri
                 let _ = dialog.SetFolder(&item);
             }
         }
+        let owner = if owner != 0 { HWND(owner as *mut _) } else { GetForegroundWindow() };
+        match dialog.Show(Some(owner)) {
+            Ok(()) => {}
+            Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => return Ok(None),
+            Err(e) => return Err(fail(e)),
+        }
+        let item = dialog.GetResult().map_err(fail)?;
+        let raw = item.GetDisplayName(SIGDN_FILESYSPATH).map_err(fail)?;
+        let path = raw.to_string();
+        CoTaskMemFree(Some(raw.0 as *const _));
+        Ok(Some(PathBuf::from(path.map_err(|e| e.to_string())?)))
+    }
+}
+
+/// The standard Windows file picker for opening an archive, over window `owner`. `None` if
+/// cancelled.
+pub fn pick_archive(owner: isize) -> Result<Option<PathBuf>, String> {
+    let fail = |e: windows::core::Error| format!("file picker failed: {e}");
+    let archives = w!("*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.xz;*.txz;*.zst;*.tzst;*.bz2;*.tbz;*.tbz2;*.001;*.r00");
+    let types = [
+        COMDLG_FILTERSPEC { pszName: w!("Archives"), pszSpec: archives },
+        COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+    ];
+    // SAFETY: plain COM calls on an STA thread; the filter strings are static, and the
+    // returned path buffer is freed with CoTaskMemFree.
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).map_err(fail)?;
+        let options = dialog.GetOptions().map_err(fail)?;
+        dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST).map_err(fail)?;
+        dialog.SetFileTypes(&types).map_err(fail)?;
+        dialog.SetTitle(w!("Open an archive")).map_err(fail)?;
         let owner = if owner != 0 { HWND(owner as *mut _) } else { GetForegroundWindow() };
         match dialog.Show(Some(owner)) {
             Ok(()) => {}

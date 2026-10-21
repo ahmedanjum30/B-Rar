@@ -30,11 +30,10 @@
   </Resources>
 
   <Applications>
-    <!-- B-Rar-GUI is opened from Explorer's menu, so it has no Start menu entry. -->
+    <!-- B-Rar-GUI: from the Start menu it shows "Open archive..."; Explorer's menu opens it on an archive. -->
     <Application Id="BRar" Executable="B-Rar-GUI.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="B-Rar" Description="Fast archive extractor" BackgroundColor="#2563EB"
-                          Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png"
-                          AppListEntry="none" />
+      <uap:VisualElements DisplayName="B-Rar" Description="Fast archive extractor" BackgroundColor="#021021"
+                          Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
         <!-- `B-Rar` on the command line, from any terminal. -->
         <uap3:Extension Category="windows.appExecutionAlias" Executable="B-Rar.exe" EntryPoint="Windows.FullTrustApplication">

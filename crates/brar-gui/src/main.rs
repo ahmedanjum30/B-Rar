@@ -2,6 +2,7 @@
 //! no console).
 //!
 //! ```text
+//! B-Rar-GUI                         the home page ("Open archive...")
 //! B-Rar-GUI <archive>               browse the archive
 //! B-Rar-GUI x <archive>             extract to a folder named after the archive
 //! B-Rar-GUI x <archive> --here      extract next to the archive
@@ -57,14 +58,17 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
         "usage:\n  B-Rar-GUI <archive>\n  B-Rar-GUI x <archive> [--here | --ask | -o <dir>] [--items <file> [--base <folder>]]\n  B-Rar-GUI t <archive>"
             .to_owned()
     };
-    let command = args.next().ok_or_else(usage)?;
+    // From the Start menu: the browser's home page.
+    let Some(command) = args.next() else {
+        return Ok(browse::run(None, password));
+    };
     let absolute = |p: OsString| {
         let p = PathBuf::from(p);
         std::path::absolute(&p).map_err(|e| format!("{}: {e}", p.display()))
     };
     if !matches!(command.to_str(), Some("x" | "t")) {
         // "Open with" passes just the archive.
-        return Ok(browse::run(absolute(command)?, password));
+        return Ok(browse::run(Some(absolute(command)?), password));
     }
     let archive = absolute(args.next().ok_or_else(usage)?)?;
     let mut rest = args.map(|a| a.to_string_lossy().into_owned());
