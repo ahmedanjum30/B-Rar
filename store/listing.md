@@ -73,26 +73,67 @@ No ads, no tracking, no internet connection
 rar, zip, 7z, unzip, unrar, extract, archive
 ```
 
+## What's new in this version
+
+```
+B-Rar 1.0 is here: fast extraction of ZIP, RAR, 7z and tar archives, right from File Explorer.
+
+• Extract here, extract to a folder, or pick where, from the Windows 11 right-click menu
+• Browse an archive before extracting, and take out just the files you need
+• RAR archives extract twice as fast as with WinRAR; archives full of small files three to four times as fast
+• Passwords, multi-part archives and protected folders are all handled for you
+```
+
 ## Restricted capabilities (Submission options)
 
-Partner Center asks why the package declares these. Paste:
+Partner Center asks why the package declares these. As submitted for 1.0:
 
-| Capability | Justification |
-|---|---|
-| `runFullTrust` | B-Rar is a desktop app (Win32) packaged as MSIX. Full trust lets it read the archives the user opens anywhere on disk and write the extracted files to the folder the user picks, and it hosts B-Rar's File Explorer context-menu handler (a COM surrogate, `windows.fileExplorerContextMenus`), which shows "Extract here", "Extract to folder" and "Open in B-Rar" when the user right-clicks an archive. |
-| `allowElevation` | Only when the user chooses to extract into a folder that only administrators can write to (for example C:\Program Files), B-Rar restarts that one extraction elevated, and Windows asks the user for permission (UAC) first. B-Rar never elevates on its own, and everything else runs without administrator rights. |
+**runFullTrust**
 
+```
+B-Rar is a Win32 desktop app (written in Rust) packaged as MSIX. It needs full trust for three things:
+
+1. Reading archives and writing extracted files anywhere on disk. Users open archives from any folder or drive (Downloads, external disks, network shares) and extract them to a folder they choose. B-Rar reads only the archive the user opened and writes only to the destination the user picked.
+
+2. The File Explorer right-click menu. The package registers a context-menu handler (windows.fileExplorerContextMenus with a COM surrogate server, B-Rar-Shell.dll). When the user right-clicks an archive, it shows "Open in B-Rar", "Extract files...", "Extract to folder", "Extract here" and "Test archive", and starts B-Rar-GUI.exe for the chosen action.
+
+3. The command line. The app execution alias B-Rar.exe lets users extract archives from any terminal.
+
+B-Rar doesn't connect to the internet, collects no data, and changes nothing outside the folders the user picks.
+```
+
+**allowElevation**
+
+```
+B-Rar uses elevation for one case only: when the user chooses to extract an archive into a folder that only administrators can write to, such as C:\Program Files.
+
+Before extracting, B-Rar checks whether it can write to the chosen folder. If Windows denies access, B-Rar restarts that single extraction with administrator rights, and Windows shows its UAC prompt so the user decides. If the user declines, nothing is extracted and B-Rar explains that the folder needs administrator permission.
+
+B-Rar never elevates on its own or at startup. Everything else (browsing archives, extracting to normal folders, the right-click menu) runs without administrator rights.
+```
 ## Age rating questionnaire
 
 Category: **Utility, productivity or other app**. No user-generated content shared with others, no communication between users, no location sharing, no in-app purchases, no ads, no personal data collected. Expected rating: 3+ / Everyone.
 
 ## Images
 
-| Image | Size | Notes |
-|---|---|---|
-| Store logo | 300×300 PNG | `assets/brar-full-512.png`, scaled to 300×300 |
-| Screenshots | 1366×768 or larger, PNG, 1 to 10 | the archive browser, the right-click menu, the progress window, the done window |
+All in `store/images/` (screenshots 1920×1080; made from a demo archive, see the captions):
 
+| File | Used for | Caption |
+|---|---|---|
+| `logo-300.png` | 1:1 app tile icon (300×300) | |
+| `1-browse.png` | Screenshot 1 | Look inside an archive and extract only what you pick |
+| `2-extracting.png` | Screenshot 2 | Extracts on every core: 1.2 GB in under 2 seconds |
+| `3-done.png` | Screenshot 3 | Every file checked as it's extracted |
+| `4-home.png` | Screenshot 4 | Open an archive, or right-click one in File Explorer |
+
+## Other fields
+
+| Field | Value |
+|---|---|
+| Additional license terms | Free for personal and other non-commercial use under the PolyForm Noncommercial License 1.0.0: https://github.com/ahmedanjum30/B-Rar/blob/main/LICENSE |
+| Developed by | Ahmad Anjum |
+| Personal information | Partner Center forces "Yes" for any app with runFullTrust; the privacy policy URL is what matters. |
 ## Notes for certification (optional field)
 
 ```
