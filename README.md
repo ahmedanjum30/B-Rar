@@ -85,7 +85,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 ## Credits
 
-RAR 4 archives, solid and encrypted RAR archives are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate uses [libdeflate](https://github.com/ebiggers/libdeflate); 7z uses [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate uses [libdeflate](https://github.com/ebiggers/libdeflate); 7z uses [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
 
 ## License
 

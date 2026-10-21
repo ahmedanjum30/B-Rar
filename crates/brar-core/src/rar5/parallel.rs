@@ -22,7 +22,7 @@ use std::{
 };
 
 use super::{
-    Entry,
+    Entry, Source,
     unpack::{
         self, Bits, Corrupt, DCB, DCX, E_LITERAL, E_MATCH, Filter, INPUT_PADDING, MAX_MATCH, Recent, Res, Tables, filter_block, read_block_header,
         read_dist, read_filter, read_tables, slot_to_length,
@@ -72,7 +72,7 @@ const SLIDE_ROOM: usize = 32 << 20;
 #[derive(Clone, Copy)]
 struct Span {
     file: usize,
-    /// Offsets in the archive of its header and of the next block's header.
+    /// Offsets in the file's packed data of its header and of the next block's header.
     start: usize,
     end: usize,
     has_tables: bool,
@@ -117,9 +117,9 @@ const TAIL: u32 = 7;
 const FILE_END: u32 = 8;
 
 /// Decodes `files` (in stream order: one file, or every data file of a solid archive) from
-/// the archive bytes `map`, sending the output to `out`. `window` is the dictionary size.
-pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize, out: &mut dyn Output) -> Result<(), Failure> {
-    let spans = scan(map, files)?;
+/// the archive's volumes, sending the output to `out`. `window` is the dictionary size.
+pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usize, out: &mut dyn Output) -> Result<(), Failure> {
+    let spans = scan(src, files)?;
     let chunks = group(&spans)?;
     let total: usize = files.iter().map(|e| e.size as usize).sum();
     let workers = threads.max(1);
@@ -162,7 +162,7 @@ pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize
                         return;
                     }
                     let k = spare.lock().unwrap().pop().unwrap_or_default();
-                    let tokens = decode_chunk(map, &spans, &chunks[i], files, &mut tables, &mut input, k);
+                    let tokens = decode_chunk(src, &spans, &chunks[i], files, &mut tables, &mut input, k);
                     queue.lock().unwrap().slots[i] = Some(tokens);
                     ready.notify_one();
                 }
@@ -222,26 +222,27 @@ pub(crate) fn decode(map: &[u8], files: &[&Entry], window: usize, threads: usize
 }
 /// Reads the block headers of every file's packed data (each header gives its block's size,
 /// so nothing is decoded here).
-fn scan(map: &[u8], files: &[&Entry]) -> Res<Vec<Span>> {
+fn scan(src: &Source, files: &[&Entry]) -> Res<Vec<Span>> {
     let mut spans = Vec::new();
+    let mut h = Vec::new();
     for (file, e) in files.iter().enumerate() {
         if e.packed == 0 {
             continue;
         }
-        let (mut at, stop) = (e.data_start as usize, (e.data_start + e.packed) as usize);
-        if stop > map.len() {
-            return Err(Corrupt);
-        }
+        let (mut at, stop) = (0usize, e.packed as usize);
         loop {
-            let flags = *map.get(at).ok_or(Corrupt)?;
+            // flags | check | size (1-3 bytes)
+            h.clear();
+            e.read(src, at as u64, (at + 5).min(stop) as u64, &mut h)?;
+            let flags = *h.first().ok_or(Corrupt)?;
             let bytes = usize::from((flags >> 3) & 3) + 1;
             if bytes == 4 || at + 2 + bytes > stop {
                 return Err(Corrupt);
             }
-            let size = (0..bytes).fold(0u32, |v, i| v | u32::from(map[at + 2 + i]) << (8 * i));
+            let size = (0..bytes).fold(0u32, |v, i| v | u32::from(h[2 + i]) << (8 * i));
             let check = (0x5A ^ u32::from(flags) ^ size ^ (size >> 8) ^ (size >> 16)) & 0xff;
             let end = at + 2 + bytes + size as usize;
-            if check != u32::from(map[at + 1]) || end > stop {
+            if check != u32::from(h[1]) || end > stop {
                 return Err(Corrupt);
             }
             spans.push(Span {
@@ -290,11 +291,13 @@ fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
     Ok(chunks)
 }
 
-/// `input` = the bytes `map[from..to]`, followed by the zero padding the bit reader needs.
-fn fill(input: &mut Vec<u8>, map: &[u8], from: usize, to: usize) {
+/// `input` = bytes `from..to` of `e`'s packed data, followed by the zero padding the bit
+/// reader needs.
+fn fill(input: &mut Vec<u8>, src: &Source, e: &Entry, from: usize, to: usize) -> Res<()> {
     input.clear();
-    input.extend_from_slice(&map[from..to]);
+    e.read(src, from as u64, to as u64, input)?;
     input.resize(to - from + INPUT_PADDING, 0);
+    Ok(())
 }
 
 fn dist_codes(e: &Entry) -> usize {
@@ -302,13 +305,13 @@ fn dist_codes(e: &Entry) -> usize {
 }
 
 /// Phase A for one chunk, into `k` (a recycled buffer). `input` is the worker's scratch.
-fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
+fn decode_chunk(src: &Source, spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
     k.lits.clear();
     k.ops.clear();
     if c.tables_from != c.first {
         // This chunk continues with an earlier block's tables: read them from that block.
         let s = spans[c.tables_from];
-        fill(input, map, s.start, s.end);
+        fill(input, src, files[s.file], s.start, s.end)?;
         let mut bits = Bits::new(input, s.end - s.start);
         let limit = (s.end - s.start + 16) * 8;
         if !read_block_header(&mut bits, limit)?.has_tables {
@@ -319,8 +322,7 @@ fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut
     let mut mark = 0;
     let mut b = c.first;
     while b < c.last {
-        // The chunk's blocks of one file are contiguous in the archive; the next file's start
-        // after its headers.
+        // The chunk's blocks of one file are contiguous in its packed data.
         let file = spans[b].file;
         if b > c.first {
             k.ops.push(Op {
@@ -335,7 +337,7 @@ fn decode_chunk(map: &[u8], spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut
             e += 1;
         }
         let (from, to) = (spans[b].start, spans[e - 1].end);
-        fill(input, map, from, to);
+        fill(input, src, files[file], from, to)?;
         let mut bits = Bits::new(input, to - from);
         let limit = (to - from + 16) * 8;
         let codes = dist_codes(files[file]);
@@ -453,7 +455,7 @@ struct FileState {
     /// Its bytes are stream positions start..end.
     start: usize,
     end: usize,
-    crc: u32,
+    check: super::Check,
     hasher: crc32fast::Hasher,
 }
 
@@ -463,7 +465,7 @@ impl FileState {
             index,
             start,
             end: start + files[index].size as usize,
-            crc: files[index].crc,
+            check: files[index].check.clone(),
             hasher: crc32fast::Hasher::new(),
         }
     }
@@ -694,7 +696,7 @@ impl Window {
             return Err(Failure::Corrupt);
         }
         let hasher = std::mem::take(&mut f.hasher);
-        if hasher.finalize() != f.crc {
+        if !f.check.ok(hasher.finalize()) {
             return Err(Failure::Corrupt);
         }
         out.finish(f.index).map_err(Failure::Stop)

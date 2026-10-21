@@ -227,15 +227,19 @@ dependencies = [
 name = "brar-core"
 version = "1.0.0"
 dependencies = [
+ "aes",
  "bzip2",
+ "cbc",
  "crc32fast",
  "flate2",
+ "hmac",
  "jiff",
  "libdeflater",
  "liblzma",
  "memmap2",
  "rayon",
  "sevenz-rust2",
+ "sha2",
  "tar",
  "thiserror 2.0.21",
  "unrar",

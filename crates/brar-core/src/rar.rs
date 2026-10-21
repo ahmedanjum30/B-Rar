@@ -1,9 +1,9 @@
 //! RAR: B-Rar's own RAR5 decoder first, the official unRAR library for everything else.
 //!
-//! Fast path ([`crate::rar5`]): files in non-solid, single-volume, unencrypted RAR5 archives
-//! decode in parallel, one whole file per job, each checked against its CRC32. Big files, and
-//! solid archives, go through the two-phase engine ([`rar5::parallel`]), which spreads one
-//! stream over all cores. Any file B-Rar's decoder can't handle or that fails its check goes to
+//! Fast path ([`crate::rar5`]): files in non-solid RAR5 archives (in one or several volumes,
+//! encrypted or not) decode in parallel, one whole file per job, each checked against its
+//! CRC32. Big files, and solid archives, go through the two-phase engine ([`rar5::parallel`]),
+//! which spreads one stream over all cores. Any file B-Rar's decoder can't handle or that fails its check goes to
 //! unRAR, so a decoder bug costs speed, never correctness.
 //!
 //! unRAR path: several unRAR handles each decode their own share of a non-solid archive in
@@ -11,7 +11,7 @@
 //! sequential pass, where small files are decoded into memory and written on the background
 //! pool while unRAR moves on.
 
-use std::{cell::RefCell, cmp::Reverse, collections::HashSet, fs::File, path::Path, sync::Mutex};
+use std::{cell::RefCell, cmp::Reverse, collections::HashSet, path::Path, sync::Mutex};
 
 use rayon::prelude::*;
 use unrar::VolumeInfo;
@@ -19,12 +19,12 @@ use unrar::VolumeInfo;
 use crate::{
     EntryInfo, Error, IoContext, Options, Result,
     rar5::{
-        self,
+        self, Source,
         unpack::{INPUT_PADDING, OUTPUT_SLACK, Unpacker},
     },
     sink::{FileOut, SMALL_FILE, Sink},
     time,
-    whole::{BUDGET, Budget, read_at},
+    whole::{BUDGET, Budget},
 };
 
 thread_local! {
@@ -64,7 +64,7 @@ pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
 pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
     // BRAR_NO_RAR5=1 forces the unRAR path (for comparing the two decoders).
     if std::env::var_os("BRAR_NO_RAR5").is_none()
-        && let Some(archive) = rar5::parse(path)?
+        && let Some(archive) = rar5::parse(path, opts.password.as_deref())?
     {
         return if archive.solid {
             extract_solid(path, archive, sink, opts)
@@ -120,7 +120,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     // Biggest first, one FIFO job each (see zip.rs for why not a parallel iterator).
     fast.sort_unstable_by_key(|e| Reverse(e.packed));
 
-    let file = File::open(path).at(path)?;
+    let src = Source::open(&archive)?;
     let budget = Budget::new(BUDGET);
     let failed = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
@@ -143,7 +143,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                                 if i >= big.len() || stop.lock().unwrap().is_some() {
                                     return;
                                 }
-                                match run_engine(path, &[big[i]], sink, per_file) {
+                                match run_engine(&src, &[big[i]], sink, per_file) {
                                     Ok(()) => {}
                                     Err(Fail::Retry) => retry.lock().unwrap().push(big[i].index),
                                     Err(Fail::Stop(err)) => {
@@ -162,12 +162,12 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
         });
         opts.pool()?.scope_fifo(|s| {
             for e in &fast {
-                let (file, budget, failed, stop) = (&file, &budget, &failed, &stop);
+                let (src, budget, failed, stop) = (&src, &budget, &failed, &stop);
                 s.spawn_fifo(move |_| {
                     if stop.lock().unwrap().is_some() {
                         return;
                     }
-                    match extract_fast(file, e, sink, budget) {
+                    match extract_fast(src, e, sink, budget) {
                         Ok(()) => {}
                         Err(Fail::Retry) => failed.lock().unwrap().push(e.index),
                         Err(Fail::Stop(err)) => {
@@ -204,7 +204,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
 }
 
 /// A solid archive: one stream across all files, decoded by the engine in parallel. Anything
-/// it can't do (encryption, stored files, damage) sends the whole archive to unRAR.
+/// it can't do (stored files, no or a wrong password, damage) sends the whole archive to unRAR.
 fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options) -> Result<()> {
     let files: Vec<&rar5::Entry> = archive.entries.iter().filter(|e| !e.is_dir).collect();
     if files.iter().any(|e| !e.supported || e.method == 0) {
@@ -214,7 +214,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
     for e in archive.entries.iter().filter(|e| e.is_dir) {
         sink.dir(&e.name)?;
     }
-    let result = run_engine(path, &files, sink, opts.thread_count());
+    let result = run_engine(&Source::open(&archive)?, &files, sink, opts.thread_count());
     if std::env::var_os("BRAR_STATS").is_some() {
         let how = if result.is_ok() { "the engine" } else { "unRAR" };
         eprintln!("rar5: solid archive, {} files by {how}", files.len());
@@ -228,20 +228,19 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
 
 /// The two-phase engine over `files` (one big file, or a solid archive's files in order),
 /// with `threads` workers.
-fn run_engine(path: &Path, files: &[&rar5::Entry], sink: &Sink, threads: usize) -> std::result::Result<(), Fail> {
+fn run_engine(src: &Source, files: &[&rar5::Entry], sink: &Sink, threads: usize) -> std::result::Result<(), Fail> {
     let total: u64 = files.iter().map(|e| e.size).sum();
     let window = files.iter().map(|e| e.dict).max().unwrap_or(0).min(total);
     if window > MAX_WINDOW {
         return Err(Fail::Retry);
     }
-    let map = crate::mmap(path).map_err(Fail::Stop)?;
     let mut out = EngineOutput {
         sink,
         files,
         open: None,
         written: Vec::new(),
     };
-    match rar5::parallel::decode(&map, files, window as usize, threads, &mut out) {
+    match rar5::parallel::decode(src, files, window as usize, threads, &mut out) {
         Ok(()) => Ok(()),
         Err(rar5::parallel::Failure::Corrupt) => {
             out.discard();
@@ -328,16 +327,18 @@ impl rar5::parallel::Output for EngineOutput<'_> {
     }
 }
 
-fn extract_fast(file: &File, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> std::result::Result<(), Fail> {
+fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> std::result::Result<(), Fail> {
     sink.check().map_err(Fail::Stop)?;
     sink.start(&e.name);
     let (packed, size) = (e.packed as usize, e.size as usize);
     let _lease = budget.take(e.packed + e.size);
 
-    let mut input = vec![0u8; packed + INPUT_PADDING];
-    read_at(file, e.data_start, &mut input[..packed]).map_err(|_| Fail::Retry)?;
+    let mut input = Vec::with_capacity(packed + INPUT_PADDING);
+    e.read(src, 0, e.packed, &mut input).map_err(|_| Fail::Retry)?;
+    input.resize(packed + INPUT_PADDING, 0);
     let data = if e.method == 0 {
-        if packed != size {
+        // Encrypted data is padded to whole AES blocks.
+        if packed != size && !(e.crypt.is_some() && packed >= size && packed - size < 16) {
             return Err(Fail::Retry);
         }
         input.truncate(size);
@@ -351,7 +352,7 @@ fn extract_fast(file: &File, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> s
         out.truncate(size);
         out
     };
-    if crc32fast::hash(&data) != e.crc {
+    if !e.check.ok(crc32fast::hash(&data)) {
         return Err(Fail::Retry);
     }
     let written = if e.size <= SMALL_FILE {
@@ -366,7 +367,9 @@ fn extract_fast(file: &File, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> s
 fn extract_unrar(path: &Path, sink: &Sink, opts: &Options, only: Option<&HashSet<usize>>) -> Result<()> {
     let wanted = |i: usize| only.is_none_or(|set| set.contains(&i));
     let probe = open(path, opts).open_for_processing()?;
-    let independent = !probe.is_solid() && matches!(probe.volume_info(), VolumeInfo::None);
+    // With encrypted headers unRAR can't see the archive flags yet and reports neither solid
+    // nor volume, so the name counts too: a volume set needs the one sequential pass.
+    let independent = !probe.is_solid() && matches!(probe.volume_info(), VolumeInfo::None) && crate::volumes::RarSet::of(path).is_none();
     drop(probe);
 
     // Header-only pass (cheap): sizes for the progress total and for load balancing.
@@ -407,7 +410,7 @@ fn extract_unrar(path: &Path, sink: &Sink, opts: &Options, only: Option<&HashSet
     opts.pool()?.install(|| {
         (0..workers)
             .into_par_iter()
-            .try_for_each(|w| extract_where(path, sink, opts, |i| wanted(i) && owner[i] == w))
+            .try_for_each(|w| extract_where(path, sink, opts, |i| wanted(i) && owner.get(i) == Some(&w)))
     })
 }
 

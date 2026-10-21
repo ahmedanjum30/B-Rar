@@ -18,6 +18,29 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-21 (22:42): encrypted and multi-volume RAR5 through B-Rar's own decoder
+
+RAR5 archives with encrypted data (AES-256), encrypted headers, or several volumes now use
+B-Rar's decoder and engine instead of unRAR. All cores, best of 3, 5 s apart, password
+"secret". "B-Rar (prev)" is the build from before the two-phase engine. The archives were made
+with Rar.exe 7 `-ma5 -m3`. Every B-Rar run: 0 files left to unRAR.
+
+| Archive | UnRAR | B-Rar (prev) | B-Rar (new) |
+|---|---|---|---|
+| plain: one 545 MB file (check) | 1.51 s | 1.46 s | **0.81 s** |
+| plain: solid 1 GB game (check) | 3.21 s | 3.04 s | **1.64 s** |
+| encrypted (`-p`): one 545 MB file | 1.77 s | 3.93 s | **0.89 s** |
+| encrypted headers (`-hp`), solid 1 GB, 4 × 300 MB volumes | 3.84 s | 22.05 s ¹ | **1.83 s** |
+| encrypted (`-p`), 1.1 GB, 2 big + 77 files, 12 × 100 MB volumes | 4.04 s | 9.39 s | **1.29 s** |
+
+Decryption costs B-Rar's engine about 1.3 cycles per byte in phase A (10.3 -> 11.6 on the
+545 MB file), spread over the workers. The plain archives didn't get slower (0.87 / 1.68 s
+before).
+
+¹ A bug, fixed in the same change: with encrypted headers unRAR reports a volume set as
+neither solid nor multi-volume, so B-Rar split it over parallel unRAR handles, each of which
+had to decode the whole solid stream (and on some sets it crashed). Volume sets are now
+always one sequential unRAR pass, when unRAR is needed at all.
 ## 2026-10-21 (22:11): RAR5 engine (big files, solid archives) and a 28.6 GB real archive
 
 After the decoder rewrite and the two-phase engine (`rar5/parallel.rs`). All cores, one run

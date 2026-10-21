@@ -1,15 +1,23 @@
 //! B-Rar's own RAR5 reader: the container (headers) here, the decompressor in [`unpack`].
 //!
-//! It handles single-volume RAR5 archives without
-//! encryption, and marks everything else for the unRAR fallback. The container layout follows
-//! RARLAB's published "RAR 5.0 archive format" description.
+//! It reads RAR5 archives in one or several volumes, with or without encryption (of the data,
+//! or of the headers too), and marks what it can't decode for the unRAR fallback. The
+//! container layout follows RARLAB's published "RAR 5.0 archive format" description.
 
+pub(crate) mod crypt;
 pub(crate) mod parallel;
 pub(crate) mod unpack;
 
-use std::{path::Path, time::SystemTime};
+use std::{
+    collections::HashMap,
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
 
-use crate::{Result, mmap, time};
+use crate::{IoContext, Result, mmap, time, volumes::RarSet, whole};
+use crypt::Keys;
 
 const SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
 
@@ -19,17 +27,46 @@ const HEAD_FILE: u64 = 2;
 const HEAD_CRYPT: u64 = 4;
 const HEAD_END: u64 = 5;
 
-/// One file or directory, in archive order. `index` counts file headers only, which is how
-/// unRAR's header iteration counts them, so the fallback can pick the same entries.
-#[derive(Debug, Clone)]
+/// A file's packed data within one volume. A file split across volumes has one per volume.
+#[derive(Clone)]
+pub(crate) struct Piece {
+    pub volume: usize,
+    pub start: u64,
+    pub len: u64,
+}
+
+/// The CRC32 a file's data must have, stored plainly or as a MAC (encrypted archives).
+#[derive(Clone)]
+pub(crate) struct Check {
+    crc: u32,
+    mac: Option<Arc<Keys>>,
+}
+
+impl Check {
+    pub(crate) fn ok(&self, crc: u32) -> bool {
+        match &self.mac {
+            Some(keys) => keys.mac(crc) == self.crc,
+            None => crc == self.crc,
+        }
+    }
+}
+
+/// One file or directory, in archive order. `index` counts file headers only (a file split
+/// across volumes once), which is how unRAR's header iteration counts them, so the fallback
+/// can pick the same entries.
+#[derive(Clone)]
 pub(crate) struct Entry {
     pub index: usize,
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
-    pub data_start: u64,
+    pub pieces: Vec<Piece>,
+    /// Total packed size: all pieces.
     pub packed: u64,
-    pub crc: u32,
+    /// Encrypted: the keys and the IV. The ciphertext is one CBC stream over all pieces (the
+    /// split points needn't fall on AES blocks).
+    pub crypt: Option<(Arc<Keys>, [u8; 16])>,
+    pub check: Check,
     /// 0 = stored, 1-5 = compressed.
     pub method: u8,
     /// RAR 7 ("v70") stream: larger distance alphabet.
@@ -45,181 +82,386 @@ pub(crate) struct Archive {
     pub entries: Vec<Entry>,
     /// One compressed stream across all files.
     pub solid: bool,
+    /// The volumes, in order (just the archive itself, usually).
+    pub volumes: Vec<PathBuf>,
 }
 
-/// Parses a RAR5 archive's headers. `None` means "leave the whole archive to unRAR": not RAR5,
-/// multi-volume, encrypted headers, or anything that doesn't parse cleanly. Solid archives
-/// parse; their entries' `supported` says whether the stream engine can decode them.
-pub(crate) fn parse(path: &Path) -> Result<Option<Archive>> {
-    let map = mmap(path)?;
-    Ok(parse_bytes(&map))
+/// The archive's volumes, open for reading packed data.
+pub(crate) struct Source {
+    files: Vec<File>,
+}
+
+impl Source {
+    pub(crate) fn open(archive: &Archive) -> Result<Self> {
+        let files = archive.volumes.iter().map(|p| File::open(p).at(p)).collect::<Result<_>>()?;
+        Ok(Self { files })
+    }
+}
+
+impl Entry {
+    /// Appends bytes `from..to` of this file's packed data (decrypted, across volumes) to
+    /// `out`.
+    pub(crate) fn read(&self, src: &Source, from: u64, to: u64, out: &mut Vec<u8>) -> unpack::Res<()> {
+        let Some((keys, iv)) = &self.crypt else {
+            return self.read_raw(src, from, to, out);
+        };
+        // Whole 16-byte blocks, plus the ciphertext block before them.
+        let (b0, b1) = (from / 16 * 16, to.div_ceil(16) * 16);
+        let mut prev = *iv;
+        if b0 > 0 {
+            let mut p = Vec::with_capacity(16);
+            self.read_raw(src, b0 - 16, b0, &mut p)?;
+            prev.copy_from_slice(&p);
+        }
+        let start = out.len();
+        self.read_raw(src, b0, b1, out)?;
+        keys.decrypt(prev, &mut out[start..]);
+        let (skip, n) = ((from - b0) as usize, (to - from) as usize);
+        out.copy_within(start + skip..start + skip + n, start);
+        out.truncate(start + n);
+        Ok(())
+    }
+
+    /// Like [`Entry::read`], without decrypting.
+    fn read_raw(&self, src: &Source, from: u64, to: u64, out: &mut Vec<u8>) -> unpack::Res<()> {
+        if to > self.packed {
+            return Err(unpack::Corrupt);
+        }
+        let mut at = 0u64;
+        for p in &self.pieces {
+            let (lo, hi) = (from.max(at) - at, to.min(at + p.len).saturating_sub(at));
+            at += p.len;
+            if lo < hi {
+                let file = src.files.get(p.volume).ok_or(unpack::Corrupt)?;
+                let start = out.len();
+                out.resize(start + (hi - lo) as usize, 0);
+                whole::read_at(file, p.start + lo, &mut out[start..]).map_err(|_| unpack::Corrupt)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parses a RAR5 archive's headers, following its volumes from `path` (the first). `None`
+/// means "leave the whole archive to unRAR": not RAR5, a volume missing, encrypted headers
+/// without the right password, or anything that doesn't parse cleanly. Entries B-Rar can't
+/// decode (no or wrong password among them: unRAR reports those) aren't `supported`.
+pub(crate) fn parse(path: &Path, password: Option<&str>) -> Result<Option<Archive>> {
+    let mut p = Parser {
+        password,
+        keys: HashMap::new(),
+        entries: Vec::new(),
+        open: None,
+        solid: false,
+    };
+    let set = RarSet::of(path);
+    let mut volumes = vec![path.to_path_buf()];
+    loop {
+        let map = mmap(volumes.last().unwrap())?;
+        let Some(more) = p.volume(&map, volumes.len() - 1) else {
+            return Ok(None);
+        };
+        if !more {
+            break;
+        }
+        let Some(set) = &set else { return Ok(None) };
+        let next = set.part(volumes.len() + 1);
+        if !next.is_file() {
+            return Ok(None); // unRAR names the missing volume
+        }
+        volumes.push(next);
+    }
+    if p.open.is_some() {
+        return Ok(None); // the last file continues in a volume that isn't there
+    }
+    Ok(Some(Archive {
+        entries: p.entries,
+        solid: p.solid,
+        volumes,
+    }))
 }
 
 /// One header block: CRC32 (4) | header size (vint) | body (type, flags, [extra size],
-/// [data size], type-specific fields, extra area), followed by its data area.
-struct Header<'a> {
+/// [data size], type-specific fields, extra area), followed by its data area. With encrypted
+/// headers, a 16-byte IV comes first and the block is padded to 16 bytes.
+struct Header {
     kind: u64,
     flags: u64,
-    body: &'a [u8],
-    /// Offset in `body` of the type-specific fields.
+    body: Vec<u8>,
+    /// Offset in `body` of the type-specific fields, and of the extra area.
     fields: usize,
-    extra: &'a [u8],
+    extra_at: usize,
     data_start: u64,
     data_size: u64,
     /// Offset of the next header.
     next: usize,
 }
 
-/// Reads and CRC-checks the header at `pos`.
-fn header_at(b: &[u8], pos: usize) -> Option<Header<'_>> {
-    let crc = u32::from_le_bytes(b.get(pos..pos + 4)?.try_into().ok()?);
-    let mut p = pos + 4;
-    let size = vint(b, &mut p)? as usize;
-    let body_end = p.checked_add(size)?;
-    let body = b.get(p..body_end)?;
-    if crc32fast::hash(b.get(pos + 4..body_end)?) != crc {
-        return None;
+impl Header {
+    fn extra(&self) -> &[u8] {
+        &self.body[self.extra_at..]
     }
+}
+
+/// Reads (decrypting with `keys`) and CRC-checks the header at `pos`.
+fn header_at(b: &[u8], pos: usize, keys: Option<&Keys>) -> Option<Header> {
+    let (body, body_end) = match keys {
+        None => {
+            let crc = u32::from_le_bytes(b.get(pos..pos + 4)?.try_into().ok()?);
+            let mut p = pos + 4;
+            let size = vint(b, &mut p)? as usize;
+            let body_end = p.checked_add(size)?;
+            if crc32fast::hash(b.get(pos + 4..body_end)?) != crc {
+                return None;
+            }
+            (b[p..body_end].to_vec(), body_end)
+        }
+        Some(keys) => {
+            let iv: [u8; 16] = b.get(pos..pos + 16)?.try_into().ok()?;
+            let mut first = b.get(pos + 16..pos + 32)?.to_vec();
+            keys.decrypt(iv, &mut first);
+            let mut p = 4;
+            let size = vint(&first, &mut p)? as usize;
+            let total = p.checked_add(size)?;
+            let mut h = b.get(pos + 16..(pos + 16).checked_add(total.div_ceil(16) * 16)?)?.to_vec();
+            keys.decrypt(iv, &mut h);
+            if crc32fast::hash(&h[4..total]) != u32::from_le_bytes(h[..4].try_into().ok()?) {
+                return None;
+            }
+            let body_end = pos + 16 + h.len();
+            (h[p..total].to_vec(), body_end)
+        }
+    };
     let mut q = 0usize;
-    let kind = vint(body, &mut q)?;
-    let flags = vint(body, &mut q)?;
-    let extra_size = if flags & 0x1 != 0 { vint(body, &mut q)? as usize } else { 0 };
-    let data_size = if flags & 0x2 != 0 { vint(body, &mut q)? } else { 0 };
+    let kind = vint(&body, &mut q)?;
+    let flags = vint(&body, &mut q)?;
+    let extra_size = if flags & 0x1 != 0 { vint(&body, &mut q)? as usize } else { 0 };
+    let data_size = if flags & 0x2 != 0 { vint(&body, &mut q)? } else { 0 };
     let data_start = body_end as u64;
     Some(Header {
         kind,
         flags,
+        extra_at: body.len().checked_sub(extra_size)?,
         body,
         fields: q,
-        extra: body.get(body.len().checked_sub(extra_size)?..)?,
         data_start,
         data_size,
         next: usize::try_from(data_start.checked_add(data_size)?).ok()?,
     })
 }
 
-fn parse_bytes(b: &[u8]) -> Option<Archive> {
-    if b.get(..8)? != SIGNATURE {
-        return None;
+struct Parser<'a> {
+    password: Option<&'a str>,
+    /// Derived keys by (salt, iteration count): deriving takes milliseconds, and archives
+    /// usually use one salt throughout.
+    keys: HashMap<([u8; 16], u8), Arc<Keys>>,
+    entries: Vec<Entry>,
+    /// A file continued in the next volume.
+    open: Option<Entry>,
+    solid: bool,
+}
+
+impl Parser<'_> {
+    /// The keys for this salt and count, if there's a password.
+    fn keys(&mut self, salt: [u8; 16], lg2_count: u8) -> Option<Arc<Keys>> {
+        let password = self.password?;
+        if lg2_count > crypt::MAX_LG2_COUNT {
+            return None;
+        }
+        Some(Arc::clone(
+            self.keys
+                .entry((salt, lg2_count))
+                .or_insert_with(|| Arc::new(Keys::derive(password, &salt, lg2_count))),
+        ))
     }
-    let mut pos = 8usize;
-    let mut entries = Vec::new();
-    let mut solid = false;
-    loop {
-        let h = header_at(b, pos)?;
-        match h.kind {
-            HEAD_MAIN => {
-                let archive_flags = vint(h.body, &mut h.fields.clone())?;
-                // Volumes (0x1) go to unRAR as a whole.
-                if archive_flags & 0x1 != 0 {
+
+    /// Parses one volume; `Some(true)` when another volume follows.
+    fn volume(&mut self, b: &[u8], volume: usize) -> Option<bool> {
+        if b.get(..8)? != SIGNATURE {
+            return None;
+        }
+        let mut pos = 8usize;
+        let mut header_keys: Option<Arc<Keys>> = None;
+        loop {
+            let h = header_at(b, pos, header_keys.as_deref())?;
+            match h.kind {
+                HEAD_CRYPT => {
+                    // Everything after it is encrypted: version | flags | count | salt | check.
+                    let mut q = h.fields;
+                    let (version, flags) = (vint(&h.body, &mut q)?, vint(&h.body, &mut q)?);
+                    let lg2_count = *h.body.get(q)?;
+                    let salt: [u8; 16] = h.body.get(q + 1..q + 17)?.try_into().ok()?;
+                    let keys = self.keys(salt, lg2_count).filter(|_| version == 0)?;
+                    if flags & 0x1 != 0 && h.body.get(q + 17..q + 25)? != keys.check {
+                        return None; // wrong password
+                    }
+                    header_keys = Some(keys);
+                }
+                HEAD_MAIN => {
+                    let archive_flags = vint(&h.body, &mut h.fields.clone())?;
+                    self.solid = archive_flags & 0x4 != 0;
+                }
+                HEAD_FILE => self.file(&h, volume)?,
+                // End-of-archive flags: 0x1 = "volume, and not the last one".
+                HEAD_END => return Some(vint(&h.body, &mut h.fields.clone())? & 0x1 != 0),
+                _ => {} // service headers (comments, quick open, ACLs...) and unknown blocks
+            }
+            pos = h.next;
+            if pos >= b.len() {
+                return Some(false);
+            }
+        }
+    }
+
+    /// A file header: a new entry, or the next piece of one split across volumes (0x8 =
+    /// continued from the previous volume, 0x10 = continues in the next).
+    fn file(&mut self, h: &Header, volume: usize) -> Option<()> {
+        let (split_before, split_after) = (h.flags & 0x8 != 0, h.flags & 0x10 != 0);
+        let (part, has_crc) = self.file_entry(h, volume)?;
+        let mut e = match self.open.take() {
+            Some(mut e) if split_before => {
+                if e.name != part.name {
                     return None;
                 }
-                solid = archive_flags & 0x4 != 0;
-            }
-            HEAD_FILE => {
-                // Split across volumes (0x8 / 0x10): not in a single-volume archive.
-                if h.flags & (0x8 | 0x10) != 0 {
+                e.packed += part.packed;
+                e.pieces.extend(part.pieces);
+                // Same keys throughout; the CBC chain carries on from the first piece's IV.
+                if e.crypt.is_some() != part.crypt.is_some() {
                     return None;
                 }
-                let index = entries.len();
-                entries.push(file_entry(h.body, h.fields, h.extra, index, h.data_start, h.data_size)?);
+                e.supported &= part.supported;
+                // The file's CRC is in its last piece's header.
+                e.check = part.check;
+                e
             }
-            HEAD_CRYPT => return None,
-            HEAD_END => break,
-            _ => {} // service headers (comments, quick open, ACLs...) and unknown blocks
+            None if !split_before => {
+                let mut e = part;
+                e.index = self.entries.len();
+                e
+            }
+            _ => return None,
+        };
+        if split_after {
+            self.open = Some(e);
+        } else {
+            e.supported &= has_crc;
+            self.entries.push(e);
         }
-        pos = h.next;
-        if pos >= b.len() {
-            break;
-        }
+        Some(())
     }
-    Some(Archive { entries, solid })
+
+    /// The entry for one file header (one piece, if split), and whether it has a CRC.
+    fn file_entry(&mut self, h: &Header, volume: usize) -> Option<(Entry, bool)> {
+        let (body, mut q, extra) = (&h.body[..], h.fields, h.extra());
+        let file_flags = vint(body, &mut q)?;
+        let size = vint(body, &mut q)?;
+        let _attributes = vint(body, &mut q)?;
+        let mut modified = None;
+        if file_flags & 0x2 != 0 {
+            modified = time::unix(u32::from_le_bytes(body.get(q..q + 4)?.try_into().ok()?).into());
+            q += 4;
+        }
+        let crc = if file_flags & 0x4 != 0 {
+            let c = u32::from_le_bytes(body.get(q..q + 4)?.try_into().ok()?);
+            q += 4;
+            Some(c)
+        } else {
+            None
+        };
+        let comp = vint(body, &mut q)?;
+        let _host_os = vint(body, &mut q)?;
+        let name_len = vint(body, &mut q)? as usize;
+        let name = String::from_utf8_lossy(body.get(q..q.checked_add(name_len)?)?).into_owned();
+
+        let version = comp & 0x3f;
+        let method = ((comp >> 7) & 7) as u8;
+        let is_dir = file_flags & 0x1 != 0;
+        let size_unknown = file_flags & 0x8 != 0;
+
+        let mut special = false; // BLAKE2 hash, links, encryption B-Rar can't open: unRAR's job
+        let mut crypt = None;
+        let mut mac = None;
+        let mut r = 0usize;
+        while r < extra.len() {
+            let rec_size = vint(extra, &mut r)? as usize;
+            let rec_end = r.checked_add(rec_size)?;
+            let rec = extra.get(r..rec_end)?;
+            let mut s = 0usize;
+            match vint(rec, &mut s)? {
+                0x01 => {
+                    // Encryption: version | flags | count | salt | IV | [check value].
+                    let (version, flags) = (vint(rec, &mut s)?, vint(rec, &mut s)?);
+                    let lg2_count = *rec.get(s)?;
+                    let salt: [u8; 16] = rec.get(s + 1..s + 17)?.try_into().ok()?;
+                    let iv: [u8; 16] = rec.get(s + 17..s + 33)?.try_into().ok()?;
+                    // No password, a wrong one, an unknown version: unRAR reports it.
+                    match self.keys(salt, lg2_count).filter(|_| version == 0) {
+                        Some(keys) if flags & 0x1 == 0 || rec.get(s + 33..s + 41)? == keys.check => {
+                            // 0x2: the CRC is stored as a MAC.
+                            if flags & 0x2 != 0 {
+                                mac = Some(Arc::clone(&keys));
+                            }
+                            crypt = Some((keys, iv));
+                        }
+                        _ => special = true,
+                    }
+                }
+                0x02 | 0x05 => special = true, // file hash, redirection
+                0x03 => {
+                    if let Some(t) = high_precision_mtime(rec, s) {
+                        modified = Some(t);
+                    }
+                }
+                _ => {}
+            }
+            r = rec_end;
+        }
+
+        // 128 KB << n; RAR7 allows n up to 31 and adds a fraction in 32nds.
+        let n = (comp >> 10) & if version == 0 { 0x0f } else { 0x1f };
+        let mut dict = 0x20000u64.checked_shl(n as u32).unwrap_or(u64::MAX);
+        if version == 1 {
+            dict = dict.saturating_add(dict / 32 * ((comp >> 15) & 0x1f));
+        }
+        let supported = !is_dir && !special && !size_unknown && version <= 1 && method <= 5;
+        let entry = Entry {
+            index: 0,
+            name,
+            is_dir,
+            size,
+            pieces: vec![Piece {
+                volume,
+                start: h.data_start,
+                len: h.data_size,
+            }],
+            packed: h.data_size,
+            crypt,
+            check: Check { crc: crc.unwrap_or(0), mac },
+            method,
+            extra_dist: version == 1,
+            dict,
+            modified,
+            supported,
+        };
+        Some((entry, crc.is_some()))
+    }
 }
 
 /// For one RAR5 volume: does its end-of-archive record say another volume follows?
-/// `false` when unsure (not RAR5, unreadable, no end record).
+/// `false` when unsure (not RAR5, unreadable, encrypted headers, no end record).
 pub(crate) fn more_volumes_follow(path: &Path) -> bool {
     let Ok(map) = mmap(path) else { return false };
     if map.get(..8) != Some(&SIGNATURE[..]) {
         return false;
     }
     let mut pos = 8usize;
-    while let Some(h) = header_at(&map, pos) {
+    while let Some(h) = header_at(&map, pos, None) {
         if h.kind == HEAD_END {
-            // End-of-archive flags: 0x1 = "volume, and not the last one".
-            return vint(h.body, &mut h.fields.clone()).is_some_and(|f| f & 0x1 != 0);
+            return vint(&h.body, &mut h.fields.clone()).is_some_and(|f| f & 0x1 != 0);
         }
         pos = h.next;
     }
     false
-}
-
-fn file_entry(body: &[u8], mut q: usize, extra: &[u8], index: usize, data_start: u64, packed: u64) -> Option<Entry> {
-    let file_flags = vint(body, &mut q)?;
-    let size = vint(body, &mut q)?;
-    let _attributes = vint(body, &mut q)?;
-    let mut modified = None;
-    if file_flags & 0x2 != 0 {
-        modified = time::unix(u32::from_le_bytes(body.get(q..q + 4)?.try_into().ok()?).into());
-        q += 4;
-    }
-    let crc = if file_flags & 0x4 != 0 {
-        let c = u32::from_le_bytes(body.get(q..q + 4)?.try_into().ok()?);
-        q += 4;
-        Some(c)
-    } else {
-        None
-    };
-    let comp = vint(body, &mut q)?;
-    let _host_os = vint(body, &mut q)?;
-    let name_len = vint(body, &mut q)? as usize;
-    let name = String::from_utf8_lossy(body.get(q..q.checked_add(name_len)?)?).into_owned();
-
-    let version = comp & 0x3f;
-    let method = ((comp >> 7) & 7) as u8;
-    let is_dir = file_flags & 0x1 != 0;
-    let size_unknown = file_flags & 0x8 != 0;
-
-    let mut special = false; // encryption, BLAKE2 hash, links: unRAR's job
-    let mut r = 0usize;
-    while r < extra.len() {
-        let rec_size = vint(extra, &mut r)? as usize;
-        let rec_end = r.checked_add(rec_size)?;
-        let rec = extra.get(r..rec_end)?;
-        let mut s = 0usize;
-        match vint(rec, &mut s)? {
-            0x01 | 0x02 | 0x05 => special = true, // encryption, file hash, redirection
-            0x03 => {
-                if let Some(t) = high_precision_mtime(rec, s) {
-                    modified = Some(t);
-                }
-            }
-            _ => {}
-        }
-        r = rec_end;
-    }
-
-    // 128 KB << n; RAR7 allows n up to 31 and adds a fraction in 32nds.
-    let n = (comp >> 10) & if version == 0 { 0x0f } else { 0x1f };
-    let mut dict = 0x20000u64.checked_shl(n as u32).unwrap_or(u64::MAX);
-    if version == 1 {
-        dict = dict.saturating_add(dict / 32 * ((comp >> 15) & 0x1f));
-    }
-    let supported = !is_dir && !special && !size_unknown && crc.is_some() && version <= 1 && method <= 5;
-    Some(Entry {
-        index,
-        name,
-        is_dir,
-        size,
-        data_start,
-        packed,
-        crc: crc.unwrap_or(0),
-        method,
-        extra_dist: version == 1,
-        dict,
-        modified,
-        supported,
-    })
 }
 
 /// The "file time" extra record: Windows FILETIME, or Unix seconds plus optional nanoseconds.
@@ -298,15 +540,16 @@ mod tests {
             "archive", "packed MB", "out MB", "MB/s", "cyc/out B", "cyc/in B", "GHz"
         );
         for path in paths.split(';').filter(|p| !p.is_empty()) {
-            let arc = parse(Path::new(path)).unwrap().expect("not a supported RAR5 archive");
-            let file = std::fs::File::open(path).unwrap();
+            let arc = parse(Path::new(path), None).unwrap().expect("not a supported RAR5 archive");
+            let src = Source::open(&arc).unwrap();
             let entries: Vec<_> = arc.entries.iter().filter(|e| e.supported).collect();
             let mut u = unpack::Unpacker::default();
             let (mut packed, mut size, mut best_s, mut best_c) = (0u64, 0u64, 0f64, 0u64);
             for e in &entries {
                 let (p, n) = (e.packed as usize, e.size as usize);
-                let mut input = vec![0u8; p + unpack::INPUT_PADDING];
-                crate::whole::read_at(&file, e.data_start, &mut input[..p]).unwrap();
+                let mut input = Vec::new();
+                e.read(&src, 0, e.packed, &mut input).unwrap();
+                input.resize(p + unpack::INPUT_PADDING, 0);
                 let mut out = vec![1u8; n + unpack::OUTPUT_SLACK];
                 let (mut s_min, mut c_min) = (f64::MAX, u64::MAX);
                 for _ in 0..7 {
@@ -319,7 +562,7 @@ mod tests {
                     c_min = c_min.min(cycles() - c0);
                     s_min = s_min.min(t.elapsed().as_secs_f64());
                 }
-                assert_eq!(crc32fast::hash(&out[..n]), e.crc, "{}", e.name);
+                assert!(e.check.ok(crc32fast::hash(&out[..n])), "{}", e.name);
                 (packed, size, best_s, best_c) = (packed + e.packed, size + e.size, best_s + s_min, best_c + c_min);
             }
             let name = Path::new(path).file_name().unwrap().to_string_lossy();
@@ -369,15 +612,16 @@ mod tests {
         let out_path = std::env::var("BRAR_PROFILE_OUT").expect("set BRAR_PROFILE_OUT");
         let secs: u64 = std::env::var("BRAR_PROFILE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
 
-        let arc = parse(Path::new(&path)).unwrap().expect("not a supported RAR5 archive");
-        let file = std::fs::File::open(&path).unwrap();
+        let arc = parse(Path::new(&path), None).unwrap().expect("not a supported RAR5 archive");
+        let src = Source::open(&arc).unwrap();
         let jobs: Vec<_> = arc
             .entries
             .iter()
             .filter(|e| e.supported && e.method != 0)
             .map(|e| {
-                let mut input = vec![0u8; e.packed as usize + unpack::INPUT_PADDING];
-                crate::whole::read_at(&file, e.data_start, &mut input[..e.packed as usize]).unwrap();
+                let mut input = Vec::new();
+                e.read(&src, 0, e.packed, &mut input).unwrap();
+                input.resize(e.packed as usize + unpack::INPUT_PADDING, 0);
                 (e, input)
             })
             .collect();
@@ -436,7 +680,15 @@ mod tests {
     }
     #[test]
     fn rejects_non_rar5() {
-        assert!(parse_bytes(b"Rar!\x1a\x07\x00rest-of-a-rar4").is_none());
-        assert!(parse_bytes(b"PK\x03\x04").is_none());
+        for bytes in [&b"Rar!\x1a\x07\x00rest-of-a-rar4"[..], b"PK\x03\x04"] {
+            let mut p = Parser {
+                password: None,
+                keys: HashMap::new(),
+                entries: Vec::new(),
+                open: None,
+                solid: false,
+            };
+            assert!(p.volume(bytes, 0).is_none());
+        }
     }
 }
