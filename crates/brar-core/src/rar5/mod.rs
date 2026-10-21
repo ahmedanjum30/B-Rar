@@ -737,10 +737,36 @@ mod tests {
                 hits
             })
         };
+        // BRAR_PROFILE_ENGINE=1: the two-phase engine instead (all files of a solid archive, or
+        // the biggest file), sampling this thread, which runs its serial phase B.
+        struct Null;
+        impl parallel::Output for Null {
+            fn start(&mut self, _: usize) -> Result<()> {
+                Ok(())
+            }
+            fn write(&mut self, _: usize, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn finish(&mut self, _: usize) -> Result<()> {
+                Ok(())
+            }
+        }
+        let engine: Vec<&Entry> = if arc.solid {
+            arc.entries.iter().filter(|e| !e.is_dir).collect()
+        } else {
+            arc.entries.iter().filter(|e| e.method != 0).max_by_key(|e| e.size).into_iter().collect()
+        };
+        let use_engine = std::env::var_os("BRAR_PROFILE_ENGINE").is_some();
+        let window = engine.iter().map(|e| e.dict).max().unwrap_or(0).min(engine.iter().map(|e| e.size).sum()) as usize;
         let mut u = unpack::Unpacker::default();
         let start = Instant::now();
         let mut rounds = 0;
         while start.elapsed() < Duration::from_secs(secs) {
+            if use_engine {
+                assert!(parallel::decode(&src, &engine, window, 16, &mut Null).is_ok());
+                rounds += 1;
+                continue;
+            }
             for (e, input) in &jobs {
                 let n = e.size as usize;
                 let mut out = vec![0u8; n + unpack::OUTPUT_SLACK];

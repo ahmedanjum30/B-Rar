@@ -16,7 +16,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Condvar, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{Receiver, Sender, SyncSender, channel, sync_channel},
     },
@@ -70,7 +70,7 @@ const CHUNK_PACKED: usize = 1 << 20;
 /// every so often: at least this much, and as much as the dictionary up to [`MAX_ROOM`], so a
 /// big dictionary doesn't mean moving it all every few MB (256 MB per 32 MB of output, at a
 /// 256 MB dictionary, measured +1.7 cycles per byte).
-const SLIDE_ROOM: usize = 32 << 20;
+const SLIDE_ROOM: usize = 64 << 20;
 const MAX_ROOM: usize = 1 << 30;
 
 /// One block of the stream, found by the header scan.
@@ -83,12 +83,11 @@ struct Span {
     has_tables: bool,
 }
 
-/// Consecutive blocks decoded by one worker. `tables_from` is the block whose tables apply
-/// at `first` (itself, or an earlier one).
+/// Consecutive blocks decoded by one worker. `tables` is the earlier block whose tables
+/// apply at the first one, when that doesn't carry its own.
 struct Chunk {
-    first: usize,
-    last: usize,
-    tables_from: usize,
+    spans: Vec<Span>,
+    tables: Option<Span>,
 }
 
 /// Phase A's output for one chunk.
@@ -125,9 +124,6 @@ const FILE_END: u32 = 8;
 /// the archive's volumes, sending the output to `out`. `window` is the dictionary size.
 pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usize, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
     let t0 = std::time::Instant::now();
-    let spans = scan(src, files)?;
-    let scanned = t0.elapsed();
-    let chunks = group(&spans)?;
     let total: usize = files.iter().map(|e| e.size as usize).sum();
     // Phase A needs only a few cores to keep ahead of phase B (the serial step), and more
     // workers share physical cores with phase B and the drain thread, slowing them down:
@@ -136,15 +132,24 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
     // Chunks decoded ahead of phase B, which bounds the tokens held in memory.
     let ahead = 2 * workers + 2;
 
+    // The header scan runs alongside phase A and B, publishing chunks as it finds them.
     struct Queue {
+        chunks: Vec<Arc<Chunk>>,
         slots: Vec<Option<Res<Tokens>>>,
         consumed: usize,
+        /// Set when the scan is over: the number of blocks, or the stream is damaged.
+        scanned: Option<Res<usize>>,
+        scan_time: std::time::Duration,
     }
     let queue = Mutex::new(Queue {
-        slots: (0..chunks.len()).map(|_| None).collect(),
+        chunks: Vec::new(),
+        slots: Vec::new(),
         consumed: 0,
+        scanned: None,
+        scan_time: std::time::Duration::ZERO,
     });
-    // Phase B waits on `ready` for the next chunk; workers wait on `space` when too far ahead.
+    // Phase B waits on `ready` for the next chunk; workers wait on `space` when too far ahead
+    // or for the scan to find their chunk.
     let (ready, space) = (Condvar::new(), Condvar::new());
     // Token buffers phase B is done with, reused by the workers (fresh ones cost page faults).
     let spare: Mutex<Vec<Tokens>> = Mutex::new(Vec::new());
@@ -154,25 +159,53 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
     let stats = std::env::var_os("BRAR_STATS").is_some();
     let phase_b_start = thread_cycles();
 
+    // Outside the scope: the drain thread reads it in place, so it must outlive that thread
+    // even when phase B panics.
+    let mut w = Window::new(window.min(total), total);
+    let drained_state = Arc::new(Drained::default());
     let (result, phase_b, drain_cycles) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = scan(src, files, &abort, |c| {
+                let mut q = queue.lock().unwrap();
+                q.chunks.push(Arc::new(c));
+                q.slots.push(None);
+                drop(q);
+                space.notify_all();
+            });
+            let mut q = queue.lock().unwrap();
+            q.scanned = Some(result);
+            q.scan_time = t0.elapsed();
+            drop(q);
+            space.notify_all();
+            ready.notify_all();
+        });
         for _ in 0..workers {
             scope.spawn(|| {
                 let mut tables = Tables::new();
                 let mut input = Vec::new();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i < chunks.len() {
+                    let chunk = {
                         let mut q = queue.lock().unwrap();
-                        while i >= q.consumed + ahead && !abort.load(Ordering::Relaxed) {
+                        loop {
+                            if abort.load(Ordering::Relaxed) {
+                                break None;
+                            }
+                            if i < q.chunks.len() && i < q.consumed + ahead {
+                                break Some(Arc::clone(&q.chunks[i]));
+                            }
+                            if i >= q.chunks.len() && q.scanned.is_some() {
+                                break None; // no such chunk
+                            }
                             q = space.wait(q).unwrap();
                         }
-                    }
-                    if i >= chunks.len() || abort.load(Ordering::Relaxed) {
+                    };
+                    let Some(chunk) = chunk else {
                         phase_a.fetch_add(thread_cycles(), Ordering::Relaxed);
                         return;
-                    }
+                    };
                     let k = spare.lock().unwrap().pop().unwrap_or_default();
-                    let tokens = decode_chunk(src, &spans, &chunks[i], files, &mut tables, &mut input, k);
+                    let tokens = decode_chunk(src, &chunk, files, &mut tables, &mut input, k);
                     queue.lock().unwrap().slots[i] = Some(tokens);
                     ready.notify_one();
                 }
@@ -182,8 +215,9 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
         let (tx, rx) = sync_channel(BATCHES);
         let (spare_tx, spare_rx) = channel();
         let abort = &abort;
+        let state = Arc::clone(&drained_state);
         let drained = scope.spawn(move || {
-            let r = drain(rx, spare_tx, abort, out);
+            let r = drain(rx, spare_tx, abort, &state, out);
             (r, thread_cycles())
         });
         let mut out = Drain {
@@ -191,30 +225,48 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
             spare: spare_rx,
             batch: Vec::with_capacity(BATCH),
             file: 0,
+            sent: 0,
+            drained: Arc::clone(&drained_state),
         };
         let out = &mut out;
-        let mut w = Window::new(window.min(total), total);
+        let w = &mut w;
         let result = (|| -> Result<(), Failure> {
             let mut current = FileState::new(files, 0, 0);
             out.start(0, &files[0].check)?;
             let mut waited = std::time::Duration::ZERO;
-            for (i, chunk) in chunks.iter().enumerate() {
-                let tokens = {
+            for i in 0.. {
+                let (tokens, chunk) = {
                     let mut q = queue.lock().unwrap();
                     loop {
-                        if let Some(t) = q.slots[i].take() {
+                        if let Some(t) = q.slots.get_mut(i).and_then(Option::take) {
                             q.consumed = i + 1;
-                            break t;
+                            break (t, Arc::clone(&q.chunks[i]));
+                        }
+                        match &q.scanned {
+                            Some(Err(_)) => return Err(Failure::Corrupt),
+                            Some(Ok(_)) if i >= q.chunks.len() => {
+                                break (
+                                    Ok(Tokens::default()),
+                                    Arc::new(Chunk {
+                                        spans: Vec::new(),
+                                        tables: None,
+                                    }),
+                                );
+                            }
+                            _ => {}
                         }
                         let t = std::time::Instant::now();
                         q = ready.wait(q).unwrap();
                         waited += t.elapsed();
                     }
                 };
+                if chunk.spans.is_empty() {
+                    break; // the scan is over and every chunk applied
+                }
                 space.notify_all();
                 let tokens = tokens?;
                 // A chunk starting with a later file's data: the files before it are done.
-                let first_file = spans[chunk.first].file;
+                let first_file = chunk.spans[0].file;
                 if first_file > current.index {
                     w.switch(&mut current, first_file, files, out)?;
                 }
@@ -224,8 +276,8 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
             w.finish_file(&mut current, out)?;
             if stats {
                 eprintln!(
-                    "engine: scan {:.3} s, phase B done at {:.3} s, waited {:.3} s for phase A",
-                    scanned.as_secs_f64(),
+                    "engine: scan done at {:.3} s, phase B done at {:.3} s, waited {:.3} s for phase A",
+                    queue.lock().unwrap().scan_time.as_secs_f64(),
                     t0.elapsed().as_secs_f64(),
                     waited.as_secs_f64()
                 );
@@ -240,6 +292,8 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
         })();
         if result.is_err() {
             abort.store(true, Ordering::Relaxed);
+            // Under the lock, so no waiting thread misses it.
+            drop(queue.lock().unwrap());
             space.notify_all();
         }
         let phase_b = thread_cycles() - phase_b_start;
@@ -249,11 +303,12 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
         (drained.and(result), phase_b, drain_cycles)
     });
     if stats {
+        let q = queue.lock().unwrap();
         eprintln!(
             "engine: window {} MB, {} chunks, {} blocks, phase A {:.2} cycles/B, phase B {:.2} cycles/B, drain {:.2} cycles/B",
             window.min(total) >> 20,
-            chunks.len(),
-            spans.len(),
+            q.chunks.len(),
+            q.scanned.as_ref().map_or(0, |r| *r.as_ref().unwrap_or(&0)),
             phase_a.load(Ordering::Relaxed) as f64 / total.max(1) as f64,
             phase_b as f64 / total.max(1) as f64,
             drain_cycles as f64 / total.max(1) as f64
@@ -262,76 +317,78 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
     result
 }
 /// Reads the block headers of every file's packed data (each header gives its block's size,
-/// so nothing is decoded here).
-fn scan(src: &Source, files: &[&Entry]) -> Res<Vec<Span>> {
-    let mut spans = Vec::new();
+/// so nothing is decoded here) and groups the blocks into chunks of about [`CHUNK_PACKED`],
+/// each starting at a block with tables where possible, handing each to `chunk` as soon as
+/// it's complete. Chunks span files: a solid archive of many small files still gets few
+/// chunks. Returns the number of blocks.
+fn scan(src: &Source, files: &[&Entry], abort: &AtomicBool, mut chunk: impl FnMut(Chunk)) -> Res<usize> {
     let mut h = Vec::new();
+    let mut blocks = 0;
+    let mut current = Chunk {
+        spans: Vec::new(),
+        tables: None,
+    };
+    let mut bytes = 0;
+    // The latest block with tables: what applies at the start of a chunk without its own.
+    let mut last_tables: Option<Span> = None;
     for (file, e) in files.iter().enumerate() {
         if e.packed == 0 {
             continue;
         }
         let (mut at, stop) = (0usize, e.packed as usize);
         loop {
+            if abort.load(Ordering::Relaxed) {
+                return Ok(blocks);
+            }
             // flags | check | size (1-3 bytes)
             h.clear();
             e.read(src, at as u64, (at + 5).min(stop) as u64, &mut h)?;
             let flags = *h.first().ok_or(Corrupt)?;
-            let bytes = usize::from((flags >> 3) & 3) + 1;
-            if bytes == 4 || at + 2 + bytes > stop {
+            let n = usize::from((flags >> 3) & 3) + 1;
+            if n == 4 || at + 2 + n > stop {
                 return Err(Corrupt);
             }
-            let size = (0..bytes).fold(0u32, |v, i| v | u32::from(h[2 + i]) << (8 * i));
+            let size = (0..n).fold(0u32, |v, i| v | u32::from(h[2 + i]) << (8 * i));
             let check = (0x5A ^ u32::from(flags) ^ size ^ (size >> 8) ^ (size >> 16)) & 0xff;
-            let end = at + 2 + bytes + size as usize;
+            let end = at + 2 + n + size as usize;
             if check != u32::from(h[1]) || end > stop {
                 return Err(Corrupt);
             }
-            spans.push(Span {
+            let span = Span {
                 file,
                 start: at,
                 end,
                 has_tables: flags & 0x80 != 0,
-            });
+            };
+            blocks += 1;
+            if span.has_tables && bytes >= CHUNK_PACKED {
+                let next = Chunk {
+                    spans: Vec::new(),
+                    tables: None,
+                };
+                chunk(std::mem::replace(&mut current, next));
+                bytes = 0;
+            }
+            if current.spans.is_empty() && !span.has_tables {
+                // The first block of the stream must carry tables.
+                current.tables = Some(last_tables.ok_or(Corrupt)?);
+            }
+            current.spans.push(span);
+            bytes += end - at;
+            if span.has_tables {
+                last_tables = Some(span);
+            }
             if flags & 0x40 != 0 {
                 break; // the file's last block
             }
             at = end;
         }
     }
-    Ok(spans)
-}
-
-/// Groups blocks into chunks of about [`CHUNK_PACKED`], starting at a block with tables where
-/// possible. Chunks span files: a solid archive of many small files still gets few chunks.
-fn group(spans: &[Span]) -> Res<Vec<Chunk>> {
-    let mut chunks = Vec::new();
-    let mut tables_at = None;
-    let mut i = 0;
-    while i < spans.len() {
-        if spans[i].has_tables {
-            tables_at = Some(i);
-        }
-        // The first block of the stream must carry tables.
-        let tables_from = tables_at.ok_or(Corrupt)?;
-        let mut bytes = spans[i].end - spans[i].start;
-        let mut j = i + 1;
-        while j < spans.len() && !(spans[j].has_tables && bytes >= CHUNK_PACKED) {
-            if spans[j].has_tables {
-                tables_at = Some(j);
-            }
-            bytes += spans[j].end - spans[j].start;
-            j += 1;
-        }
-        chunks.push(Chunk {
-            first: i,
-            last: j,
-            tables_from,
-        });
-        i = j;
+    if !current.spans.is_empty() {
+        chunk(current);
     }
-    Ok(chunks)
+    Ok(blocks)
 }
-
 /// `input` = bytes `from..to` of `e`'s packed data, followed by the zero padding the bit
 /// reader needs.
 fn fill(input: &mut Vec<u8>, src: &Source, e: &Entry, from: usize, to: usize) -> Res<()> {
@@ -346,12 +403,12 @@ fn dist_codes(e: &Entry) -> usize {
 }
 
 /// Phase A for one chunk, into `k` (a recycled buffer). `input` is the worker's scratch.
-fn decode_chunk(src: &Source, spans: &[Span], c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
+fn decode_chunk(src: &Source, c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
     k.lits.clear();
     k.ops.clear();
-    if c.tables_from != c.first {
+    let spans = &c.spans[..];
+    if let Some(s) = c.tables {
         // This chunk continues with an earlier block's tables: read them from that block.
-        let s = spans[c.tables_from];
         fill(input, src, files[s.file], s.start, s.end)?;
         let mut bits = Bits::new(input, s.end - s.start);
         let limit = (s.end - s.start + 16) * 8;
@@ -361,11 +418,11 @@ fn decode_chunk(src: &Source, spans: &[Span], c: &Chunk, files: &[&Entry], t: &m
         read_tables(&mut bits, t, dist_codes(files[s.file]), limit)?;
     }
     let mut mark = 0;
-    let mut b = c.first;
-    while b < c.last {
+    let mut b = 0;
+    while b < spans.len() {
         // The chunk's blocks of one file are contiguous in its packed data.
         let file = spans[b].file;
-        if b > c.first {
+        if b > 0 {
             k.ops.push(Op {
                 lits: (k.lits.len() - mark) as u32,
                 len: FILE_END << KIND_SHIFT,
@@ -374,7 +431,7 @@ fn decode_chunk(src: &Source, spans: &[Span], c: &Chunk, files: &[&Entry], t: &m
             mark = k.lits.len();
         }
         let mut e = b + 1;
-        while e < c.last && spans[e].file == file {
+        while e < spans.len() && spans[e].file == file {
             e += 1;
         }
         let (from, to) = (spans[b].start, spans[e - 1].end);
@@ -402,6 +459,7 @@ fn decode_chunk(src: &Source, spans: &[Span], c: &Chunk, files: &[&Entry], t: &m
             dist: 0,
         });
     }
+    k.lits.extend_from_slice(&[0; LIT_PAD]);
     Ok(k)
 }
 /// Decodes one block's symbols into tokens. Like the single-threaded decoder's hot loop, it
@@ -481,6 +539,29 @@ fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark
     }
 }
 
+/// Padding after a chunk's literals, for [`copy_lits`].
+const LIT_PAD: usize = 16;
+
+/// Copies `n` literal bytes. Most runs are short, where a call to the C runtime's memcpy
+/// (in ucrtbase.dll on this target) cost more than the copy: 39% of phase B's time went
+/// there. Up to 15 bytes past `n` are read and written.
+#[inline(always)]
+unsafe fn copy_lits(dst: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller guarantees n + 15 readable bytes at src, writable at dst, and that
+    // the two don't overlap (one is the window, the other a chunk's tokens).
+    unsafe {
+        if n <= 64 {
+            let mut i = 0;
+            while i < n {
+                std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), 16);
+                i += 16;
+            }
+        } else {
+            std::ptr::copy_nonoverlapping(src, dst, n);
+        }
+    }
+}
+
 #[inline(always)]
 fn push(v: &mut Vec<u8>, b: u8) {
     // SAFETY: the caller reserved room for two bytes per loop round.
@@ -517,20 +598,59 @@ enum Msg {
     /// A file starts; its data must have this checksum.
     Start(usize, super::Check),
     Data(usize, Vec<u8>),
+    /// Bytes in phase B's window, read in place (see [`Drain::range`]).
+    Range(usize, Bytes),
     Finish(usize),
 }
 
-/// Phase B's end of the drain: finished bytes go out in batches to the drain thread, which
-/// computes the CRCs and writes the files, so phase B (the one serial step) only decodes.
+/// A piece of the window, handed to the drain thread without copying it.
+struct Bytes(*const u8, usize);
+// SAFETY: phase B doesn't touch the bytes until the drain thread has said it's done with them
+// (Drained), and the window outlives the drain thread.
+unsafe impl Send for Bytes {}
+
+/// How many window bytes the drain thread is done with.
+#[derive(Default)]
+struct Drained {
+    done: Mutex<(u64, bool)>,
+    changed: Condvar,
+}
+
+/// Emit finished bytes at least this often, so the drain thread keeps up and a window slide
+/// (which must wait for it) rarely waits long.
+const EMIT_EVERY: usize = 1 << 20;
+
+/// Phase B's end of the drain: finished bytes go to the drain thread, which computes the CRCs
+/// and writes the files, so phase B (the one serial step) only decodes. Window bytes are
+/// passed by reference; only filtered blocks (built in a scratch buffer) are copied.
 struct Drain {
     tx: Option<SyncSender<Msg>>,
     /// Batches the drain thread is done with.
     spare: Receiver<Vec<u8>>,
     batch: Vec<u8>,
     file: usize,
+    /// Window bytes handed over so far, and how many the drain thread is done with.
+    sent: u64,
+    drained: Arc<Drained>,
 }
 
 impl Drain {
+    /// Hands over window bytes. They must stay untouched until [`Drain::settle`].
+    fn range(&mut self, bytes: &[u8]) -> Result<(), Failure> {
+        self.flush()?;
+        self.sent += bytes.len() as u64;
+        self.send(Msg::Range(self.file, Bytes(bytes.as_ptr(), bytes.len())))
+    }
+
+    /// Waits until the drain thread is done with every window byte handed over (or has
+    /// stopped), so the window may move.
+    fn settle(&self) {
+        let mut d = self.drained.done.lock().unwrap();
+        while d.0 < self.sent && !d.1 {
+            d = self.drained.changed.wait(d).unwrap();
+        }
+    }
+
     fn send(&self, m: Msg) -> Result<(), Failure> {
         // The drain thread only hangs up after a failure, which it returns itself.
         self.tx.as_ref().ok_or(Failure::Corrupt)?.send(m).map_err(|_| Failure::Corrupt)
@@ -570,7 +690,16 @@ impl Drain {
 }
 
 /// The drain thread: CRCs and output, in order.
-fn drain(rx: Receiver<Msg>, spare: Sender<Vec<u8>>, abort: &AtomicBool, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
+fn drain(rx: Receiver<Msg>, spare: Sender<Vec<u8>>, abort: &AtomicBool, drained: &Drained, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
+    // However this ends, phase B mustn't wait for it any more.
+    struct Stopped<'a>(&'a Drained);
+    impl Drop for Stopped<'_> {
+        fn drop(&mut self) {
+            self.0.done.lock().unwrap().1 = true;
+            self.0.changed.notify_all();
+        }
+    }
+    let _stopped = Stopped(drained);
     let mut hasher = None;
     for m in rx {
         if abort.load(Ordering::Relaxed) {
@@ -586,6 +715,14 @@ fn drain(rx: Receiver<Msg>, spare: Sender<Vec<u8>>, abort: &AtomicBool, out: &mu
                 out.write(file, &data).map_err(Failure::Stop)?;
                 data.clear();
                 let _ = spare.send(data);
+            }
+            Msg::Range(file, Bytes(ptr, len)) => {
+                // SAFETY: phase B leaves these bytes alone until `drained` counts them.
+                let data = unsafe { std::slice::from_raw_parts(ptr, len) };
+                hasher.as_mut().ok_or(Failure::Corrupt)?.0.update(data);
+                out.write(file, data).map_err(Failure::Stop)?;
+                drained.done.lock().unwrap().0 += len as u64;
+                drained.changed.notify_one();
             }
             Msg::Finish(file) => {
                 let (h, check) = hasher.take().ok_or(Failure::Corrupt)?;
@@ -615,6 +752,8 @@ struct Window {
     scratch: Vec<u8>,
     /// Free space after a slide.
     slide: usize,
+    /// Emit when the output gets here.
+    emit_at: usize,
 }
 
 /// Copies looked at ahead of phase B, so their (often far back, so uncached) source bytes are
@@ -703,6 +842,7 @@ impl Window {
             filtered: Vec::new(),
             scratch: Vec::new(),
             slide,
+            emit_at: EMIT_EVERY,
         }
     }
 
@@ -713,6 +853,8 @@ impl Window {
             return Ok(());
         }
         self.emit(f, out)?;
+        // The drain thread reads sent bytes in place: let it finish before they move.
+        out.settle();
         let keep_from = self.emitted.min(self.pos.saturating_sub(self.keep)).max(self.base);
         let shift = keep_from - self.base;
         self.buf.copy_within(shift..self.pos - self.base, 0);
@@ -733,13 +875,20 @@ impl Window {
         };
         for (oi, op) in k.ops.iter().enumerate() {
             ahead.run(&k.ops, oi + PREFETCH, &self.buf, self.base);
+            if self.pos >= self.emit_at {
+                self.emit(f, out)?;
+                self.emit_at = self.pos + EMIT_EVERY;
+            }
             // Literals, in pieces that fit the window, up to the end of the file.
             let mut run = op.lits as usize;
             while run > 0 && self.pos < f.end {
                 let n = run.min(self.slide / 2).min(f.end - self.pos);
                 self.room(n + MAX_MATCH, f, out)?;
                 let at = self.pos - self.base;
-                self.buf[at..at + n].copy_from_slice(&k.lits[lp..lp + n]);
+                debug_assert!(lp + n + LIT_PAD <= k.lits.len() && at + n + MAX_MATCH <= self.buf.len());
+                // SAFETY: room() left n + MAX_MATCH bytes at `at`, and the literals end in
+                // LIT_PAD bytes of padding (copy_lits copies up to 15 bytes too many).
+                unsafe { copy_lits(self.buf.as_mut_ptr().add(at), k.lits.as_ptr().add(lp), n) };
                 (self.pos, lp, run) = (self.pos + n, lp + n, run - n);
             }
             lp += run; // past the end of the file: discarded
@@ -839,7 +988,9 @@ impl Window {
         if dist > self.pos || dist == 0 {
             // Before the start of the stream: zeros (the reference decoder's rule).
             if dist != 0 {
-                self.buf[at..at + len].fill(0);
+                // SAFETY: room() left len + 32 bytes past `at`. (A raw write: the drain thread
+                // may be reading other parts of the window.)
+                unsafe { std::ptr::write_bytes(self.buf.as_mut_ptr().add(at), 0, len) };
             }
         } else if dist > at {
             return Err(Failure::Corrupt); // further back than the dictionary
@@ -884,8 +1035,7 @@ impl Window {
 
     fn send(&mut self, from: usize, to: usize, out: &mut Drain) -> Result<(), Failure> {
         if to > from {
-            let bytes = &self.buf[from - self.base..to - self.base];
-            out.write(bytes)?;
+            out.range(&self.buf[from - self.base..to - self.base])?;
             self.emitted = to;
         }
         Ok(())

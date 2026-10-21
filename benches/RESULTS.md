@@ -18,6 +18,29 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-22 (00:30): phase B profiled; header scan alongside decoding
+
+A sampling profile of phase B (`rar5_profile` with `BRAR_PROFILE_ENGINE=1`) put 39% of its
+time in ucrtbase.dll: memcpy/memmove, called for every literal run and for two bulk copies
+of the whole output. Measured while a game was running, back to back, test mode (`t`):
+
+| Change | one 545 MB file | solid 1 GB game | 256 MB dictionary game |
+|---|---|---|---|
+| start (5ea69eb) | 0.71 s, phase B 3.3 cyc/B | 1.38 s, 2.8 | 1.46 s |
+| short literal runs copied inline, not through memcpy | 0.58 s, 2.8 | 1.11 s, 2.26 | |
+| window slide room 32 -> 64 MB (half the memmoves) | 0.59 s, 2.8 | 1.04 s, 2.03 | |
+| drain thread reads finished bytes in the window, no copy | 0.44 s, 2.0 | 0.92 s, 1.75 | |
+| header scan runs alongside decoding | **0.41 s** | **0.82 s** | **0.91 s** |
+
+Extraction through the installed package (same load): one 545 MB file 0.51 s, solid 1 GB
+game 1.08 s, 1.1 GB 2 big + 77 files 0.87 s; output identical to UnRAR's for all five
+archives checked.
+
+*Measurement trap found on the way:* while the game ran, creating many small files from an
+unpackaged process (`target\release\B-Rar.exe`, or any copy of it) was 5-6x slower in kernel
+time than from the installed MSIX of the very same binary (48k-file archive: 50 s vs 9 s),
+presumably a driver that inspects unpackaged processes. Small-file extraction numbers taken
+from unpackaged builds while that's running mean nothing.
 ## 2026-10-21 (late): phase B (the engine's serial step) made cheaper
 
 Measured while a game was running on the same PC, so absolute times are ~10-25% slower
