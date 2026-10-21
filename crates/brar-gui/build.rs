@@ -42,7 +42,7 @@ BEGIN
       VALUE "FileDescription", "{description}"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "{file}"
-      VALUE "LegalCopyright", "Ahmad Anjum"
+      VALUE "LegalCopyright", "Copyright 2026 Ahmad Anjum. PolyForm Noncommercial 1.0.0."
       VALUE "OriginalFilename", "{file}"
       VALUE "ProductName", "B-Rar"
       VALUE "ProductVersion", "{version}"

@@ -1,8 +1,13 @@
-# Builds B-Rar in release mode and packages it as dist\B-Rar-<version>.msix, signed with the
-# certificate from new-cert.ps1 (run that once first). -Install also installs it on this PC.
+# Builds B-Rar in release mode and packages it as an MSIX in dist\:
+#
+#   build.ps1            B-Rar-<version>-x64.msix, signed with the certificate from new-cert.ps1
+#                        (run that once first). -Install also installs it on this PC.
+#   build.ps1 -Store     B-Rar-<version>-store.msix for Partner Center: the package identity the
+#                        Store assigned (installer\store-identity.json), unsigned (the Store signs).
+#
 # -Quick builds with the `quick` profile: much faster after a change, for packages to test
 # locally. Releases use the default (full LTO).
-param([switch] $Install, [switch] $Quick)
+param([switch] $Install, [switch] $Quick, [switch] $Store)
 # Native tools signal failure through exit codes (checked below); cargo's progress goes to
 # stderr, which Windows PowerShell would otherwise turn into a terminating error.
 $ErrorActionPreference = 'Continue'
@@ -19,9 +24,17 @@ $makeappx = $sdk.FullName
 $signtool = Join-Path $sdk.DirectoryName 'signtool.exe'
 $makepri = Join-Path $sdk.DirectoryName 'makepri.exe'
 
-$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $subject -and $_.FriendlyName -eq 'B-Rar MSIX signing' } |
-    Sort-Object NotAfter -Descending | Select-Object -First 1
-if (-not $cert) { Fail 'signing certificate not found: run installer\new-cert.ps1 once' }
+if ($Store) {
+    $identityFile = Join-Path $PSScriptRoot 'store-identity.json'
+    if (-not (Test-Path $identityFile)) {
+        Fail "$identityFile not found: copy Name, Publisher and PublisherDisplayName from Partner Center (Product identity)"
+    }
+    $identity = Get-Content $identityFile -Raw | ConvertFrom-Json
+} else {
+    $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $subject -and $_.FriendlyName -eq 'B-Rar MSIX signing' } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+    if (-not $cert) { Fail 'signing certificate not found: run installer\new-cert.ps1 once' }
+}
 
 # MSIX wants four version parts.
 $version = (Select-String -Path "$root\Cargo.toml" -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
@@ -42,8 +55,12 @@ try {
     Copy-Item "$bin\brar_shell.dll" "$layout\B-Rar-Shell.dll"
     Copy-Item 'installer\unrar-license.txt' $layout
     Copy-Item 'assets\msix\*.png' "$layout\Assets"
-    (Get-Content 'installer\AppxManifest.xml' -Raw).Replace('{{VERSION}}', $msixVersion) |
-        Set-Content -Encoding utf8 "$layout\AppxManifest.xml"
+    $manifest = (Get-Content 'installer\AppxManifest.xml' -Raw).Replace('{{VERSION}}', $msixVersion)
+    if ($Store) {
+        $manifest = $manifest.Replace("Name=`"$package`"", "Name=`"$($identity.Name)`"").Replace("Publisher=`"$subject`"", "Publisher=`"$($identity.Publisher)`"")
+        $manifest = $manifest -replace '<PublisherDisplayName>[^<]*</PublisherDisplayName>', "<PublisherDisplayName>$($identity.PublisherDisplayName)</PublisherDisplayName>"
+    }
+    $manifest | Set-Content -Encoding utf8 "$layout\AppxManifest.xml"
 
     # resources.pri indexes the logo variants (targetsize-*, altform-unplated). Without it
     # Windows only finds the base logo and draws it on a plate in the accent color.
@@ -54,14 +71,17 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail 'makepri new failed' }
 
     New-Item -ItemType Directory -Force 'dist' | Out-Null
-    $msix = Join-Path $root "dist\B-Rar-$version.msix"
+    $kind = if ($Store) { 'store' } else { 'x64' }
+    $msix = Join-Path $root "dist\B-Rar-$version-$kind.msix"
     & $makeappx pack /o /h SHA256 /d $layout /p $msix | Out-Null
     if ($LASTEXITCODE -ne 0) { & $makeappx pack /o /h SHA256 /d $layout /p $msix; Fail 'makeappx failed' }
-    & $signtool sign /q /fd SHA256 /sha1 $cert.Thumbprint /s My $msix
-    if ($LASTEXITCODE -ne 0) { Fail 'signtool failed' }
+    if (-not $Store) {
+        & $signtool sign /q /fd SHA256 /sha1 $cert.Thumbprint /s My $msix
+        if ($LASTEXITCODE -ne 0) { Fail 'signtool failed' }
+    }
     Get-Item $msix
 
-    if ($Install) {
+    if ($Install -and -not $Store) {
         # Windows won't reinstall the same version with new contents (a dev rebuild): remove it first.
         Get-AppxPackage -Name $package | Where-Object { $_.Version -eq $msixVersion } | Remove-AppxPackage
         Add-AppxPackage -Path $msix -ForceApplicationShutdown -ForceUpdateFromAnyVersion

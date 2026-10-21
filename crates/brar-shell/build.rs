@@ -20,7 +20,7 @@ BEGIN
       VALUE "FileDescription", "B-Rar context menu"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "B-Rar-Shell.dll"
-      VALUE "LegalCopyright", "Ahmad Anjum"
+      VALUE "LegalCopyright", "Copyright 2026 Ahmad Anjum. PolyForm Noncommercial 1.0.0."
       VALUE "OriginalFilename", "B-Rar-Shell.dll"
       VALUE "ProductName", "B-Rar"
       VALUE "ProductVersion", "{version}"

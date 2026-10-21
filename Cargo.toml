@@ -3,10 +3,12 @@ resolver = "3"
 members = ["crates/brar-core", "crates/brar-cli", "crates/brar-gui", "crates/brar-shell"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.99"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/ahmedanjum30/B-Rar"
+authors = ["Ahmad Anjum"]
 
 [patch.crates-io]
 # Exposes RAR's full-precision modification time and a progress hook (vendor/unrar/src).

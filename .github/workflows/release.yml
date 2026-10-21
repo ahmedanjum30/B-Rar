@@ -1,0 +1,80 @@
+name: Release
+
+# Pushing a v* tag builds the Microsoft Store package (a workflow artifact, uploaded to Partner
+# Center by hand; Microsoft signs it) and publishes the portable zip as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # The same format, lint and test checks as CI. They run alongside the build; nothing is
+  # published unless both succeed.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      # Unsigned, with the identity Partner Center assigned (installer\store-identity.json).
+      - name: Build the Store package
+        shell: pwsh
+        run: ./installer/build.ps1 -Store
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $name = "B-Rar-$version-portable-x64"
+          New-Item -ItemType Directory -Force "dist\$name" | Out-Null
+          Copy-Item target\release\B-Rar.exe, target\release\B-Rar-GUI.exe, README.md, LICENSE, installer\unrar-license.txt "dist\$name"
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
+          Remove-Item -Recurse "dist\$name"
+          Get-ChildItem dist -File -Filter *.zip | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            dist/B-Rar-*-portable-x64.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      # For Partner Center (Packages > upload); not a download for users.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-package
+          path: dist/B-Rar-*-store.msix
+          if-no-files-found: error
+
+  publish:
+    needs: [checks, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # Shown above the generated list of changes.
+          body: |
+            ## Install
+
+            Get B-Rar from the **Microsoft Store** for the full app with the right-click menu and automatic updates (or `winget install B-Rar`).
+
+            **The `-portable-x64.zip`** below has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` with nothing to install, and no right-click menu. It's built by this repository's release workflow; check it against `SHA256SUMS.txt`.
+          generate_release_notes: true

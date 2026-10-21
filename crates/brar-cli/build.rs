@@ -23,7 +23,7 @@ BEGIN
       VALUE "FileDescription", "B-Rar (command line)"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "B-Rar.exe"
-      VALUE "LegalCopyright", "Ahmad Anjum"
+      VALUE "LegalCopyright", "Copyright 2026 Ahmad Anjum. PolyForm Noncommercial 1.0.0."
       VALUE "OriginalFilename", "B-Rar.exe"
       VALUE "ProductName", "B-Rar"
       VALUE "ProductVersion", "{version}"

@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "brar-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "brar-core",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "brar-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bzip2",
  "crc32fast",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "brar-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "brar-core",
  "eframe",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "brar-shell"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "embed-resource",
  "windows",

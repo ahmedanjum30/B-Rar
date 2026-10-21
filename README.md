@@ -1,0 +1,94 @@
+<p align="center"><img src="assets/brar-full-512.png" width="160" alt="B-Rar"></p>
+
+# B-Rar
+
+**A fast archive extractor for Windows.** B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR, 7-Zip and Windows' own tar, using every core of your PC. It sits in the Windows 11 right-click menu, like WinRAR.
+
+[![CI](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
+
+Free for personal and other non-commercial use. See [License](#license).
+
+**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11.
+
+## Features
+
+- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) and uses [libdeflate](https://github.com/ebiggers/libdeflate) for ZIP.
+- **Right-click menu.** Right-click an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**, in the short Windows 11 menu.
+- **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
+- **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z, tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
+- **Archives in parts:** RAR volumes (`name.part1.rar`, `name.r00`) and split files (`name.7z.001`, `name.zip.001`). Start from any part; a missing part is named.
+- **Passwords:** asks when an archive is encrypted, including archives with encrypted file names.
+- **Safe by default:** asks before replacing a file (replace, skip, keep both, for all), refuses paths that would escape the destination folder, and checks every file's checksum.
+- **Protected folders:** extracting into Program Files or another folder that needs administrator rights shows the Windows permission prompt.
+- **Command line:** `B-Rar x archive.rar` from any terminal.
+
+B-Rar reads archives; it doesn't create them.
+
+## Speed
+
+One run per tool on the same PC (16 threads, NVMe SSD), extracting to the same drive. Lower is better. Full method and history: [benches/RESULTS.md](benches/RESULTS.md).
+
+| Archive | B-Rar | WinRAR | 7-Zip | Windows tar |
+|---|---|---|---|---|
+| ZIP, 1.2 GB | **3.0 s** | 7.1 s | 8.1 s | 4.1 s |
+| RAR5, 1.1 GB | **2.0 s** | 4.0 s | 8.1 s | 15.1 s |
+| RAR5, 48,000 small files | **7.1 s** | 28.2 s | 24.2 s | 26.3 s ¹ |
+| ZIP, 47,000 small files | **7.0 s** | 26.3 s | 27.2 s | 17.1 s ¹ |
+| tar.gz, 47,000 small files | **6.1 s** | 24.2 s | n/a | 17.1 s |
+| 7z (LZMA2), 1.0 GB | 7.0 s | 5.1 s | **5.0 s** | 44.4 s |
+
+¹ Windows tar stopped at a file with a non-ASCII name and skipped it.
+
+7z is the one format where 7-Zip is still faster; a faster LZMA decoder is planned.
+
+## Installing
+
+**Microsoft Store:** coming soon. It's the full app with the right-click menu, and it updates itself. Once it's in the Store, `winget install B-Rar` installs it too.
+
+**Portable:** `B-Rar-<version>-portable-x64.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` (the window) with nothing to install, and no right-click menu. Run `B-Rar-GUI.exe archive.zip` to browse an archive. The zip is built by this repository's [release workflow](.github/workflows/release.yml) from the source you see here; to check yours, compare its SHA-256 (`Get-FileHash <file>` in PowerShell) with `SHA256SUMS.txt` on the same release.
+## Command line
+
+```text
+B-Rar x archive.rar                      extract to a folder named after the archive
+B-Rar x archive.rar -o D:\out            extract to D:\out
+B-Rar x archive.rar --here               extract next to the archive
+B-Rar x archive.zip docs photos/2024     extract only these files and folders
+B-Rar x archive.zip docs/a.txt --from docs   ...written relative to docs
+B-Rar l archive.7z                       list the contents
+B-Rar t archive.7z                       test: decode everything, write nothing
+```
+
+Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all.
+
+## Building from source
+
+You need [Rust](https://rustup.rs/) 1.99 or newer with the `x86_64-pc-windows-gnu` toolchain, and a MinGW-w64 GCC (for example [WinLibs](https://winlibs.com) or MSYS2's UCRT64 `gcc`) on `PATH`: the bundled unRAR sources are C++.
+
+```sh
+cargo build --release
+```
+
+The programs are in `target/release`. `installer\build.ps1` packages them as an MSIX signed with a local certificate from `installer\new-cert.ps1` (`-Quick` for a fast test build, `-Install` to install it); `-Store` builds the unsigned package for the Microsoft Store.
+
+## Project layout
+
+| Path | What it is |
+|---|---|
+| `crates/brar-core` | The extraction engine: formats, parallel decoding, B-Rar's RAR5 decoder. No UI code. |
+| `crates/brar-cli` | `B-Rar.exe`, the command line. |
+| `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, built with [egui](https://github.com/emilk/egui). |
+| `crates/brar-shell` | `B-Rar-Shell.dll`, the Windows 11 right-click menu. |
+| `installer` | The MSIX manifest and packaging scripts. |
+| `vendor` | Patched copies of the `unrar` and `unrar_sys` crates. |
+| `benches` | Benchmark scripts and results. |
+
+## Credits
+
+RAR 4 archives, solid and encrypted RAR archives are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate uses [libdeflate](https://github.com/ebiggers/libdeflate); 7z uses [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+
+## License
+
+B-Rar is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). You can use, change and share it for any non-commercial purpose: personal use, hobby projects, study, and use by charities, schools, public research and government organizations.
+
+Commercial use needs a separate license. Please get in touch through [GitHub](https://github.com/ahmedanjum30).
