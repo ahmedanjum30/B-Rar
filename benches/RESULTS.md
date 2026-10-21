@@ -47,11 +47,16 @@ during the fifth):
 | solid 1 GB game | 4.02 s | 3.36 s | 7.24 s | 1.11 s | **1.08 s** |
 | solid 48k source files | 31.17 s | 28.77 s | 25.50 s | 50.44 s | **8.85 s** |
 
-With Defender on, an unpackaged process creating files from 16 threads at once is slowed
-dramatically (a plain test program: 5 s -> 53 s for these 48k files), while the one-at-a-time
-writers (WinRAR, UnRAR, 7-Zip) lose only ~5%, and the installed package is barely affected.
-So the portable (unpackaged) B-Rar needs fewer writer threads when Defender is on; see the
-next entry. (The 28.6 GB archive was no longer on disk, so it wasn't re-run.)
+With Defender on, files written by an unpackaged B-Rar are slowed dramatically, while
+WinRAR, UnRAR and 7-Zip lose only ~5% and the installed package is barely affected. It is not
+the number of writer threads: a plain test program creating the same 48k files took 43-48 s
+with 1, 2, 4, 8 or 16 threads alike (5 s with Defender off). Nor is it a signature alone: the
+same B-Rar.exe signed with the local self-signed certificate took 49.3 s against 50.6 s
+unsigned. Defender evidently scans the output of programs without a reputation (WinRAR, 7-Zip
+and UnRAR are signed by known publishers) and trusts the installed MSIX package. So nothing
+in the code fixes it: Store / winget installs are fast, and a portable zip would need a real
+code-signing certificate (e.g. Azure Trusted Signing) to be. (The 28.6 GB archive was no
+longer on disk, so it wasn't re-run.)
 ## 2026-10-22 (00:30): phase B profiled; header scan alongside decoding
 
 A sampling profile of phase B (`rar5_profile` with `BRAR_PROFILE_ENGINE=1`) put 39% of its
