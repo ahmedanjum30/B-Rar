@@ -18,6 +18,23 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-23 (15:36): two files at once in the single-file decoder: tried, dropped
+
+The same trick as phase A's (two streams per thread, up to three literals each per round),
+applied to the decoder that handles one whole file per job. On one thread it looked good
+(`pair_bench`, the 1.1 GB archive's 77 files under 64 MB: 9.63 -> 7.65 cycles/B), but in
+real extractions it didn't help:
+
+| Archive (non-solid) | test, before -> paired | extract, before -> paired |
+|---|---|---|
+| 110 x 5 MB pieces of the 545 MB file | 0.257 -> 0.276 s | 0.310 -> 0.328 s |
+| 48k source files | 0.787 -> 0.788 s | 7.061 -> 7.161 s |
+| the 8 usual archives | unchanged (the paired files are a small share of their bytes) | |
+
+With every logical CPU busy, SMT already interleaves two decoding threads per core in
+hardware, so interleaving in software adds nothing, and pairing halves the number of jobs
+(coarser balancing). The engine's interleaved phase A is different: it runs 8 workers on 16
+logical CPUs, so each worker has a core to itself, and there it saves cycles.
 ## 2026-10-23 (06:47): phase A decodes two chunks at once, less CPU per byte
 
 d820dfc against this commit, back to back, best of 3, idle PC, Defender off. cyc/B = the
