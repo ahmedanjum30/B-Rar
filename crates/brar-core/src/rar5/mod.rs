@@ -137,26 +137,103 @@ pub(crate) struct Archive {
     pub volumes: Vec<PathBuf>,
 }
 
-/// The archive's volumes, open for reading packed data: big reads (whole files, engine
-/// chunks) with positioned reads, small ones (block headers) from a memory map, where a
-/// syscall per header would cost more than the copy.
+/// The archive's volumes, open for reading packed data with positioned reads.
 pub(crate) struct Source {
     files: Vec<File>,
-    maps: Vec<memmap2::Mmap>,
 }
-
-/// Reads up to this size come from the map.
-const SMALL_READ: u64 = 4096;
 
 impl Source {
     pub(crate) fn open(archive: &Archive) -> Result<Self> {
         let files = archive.volumes.iter().map(|p| File::open(p).at(p)).collect::<Result<_>>()?;
-        let maps = archive.volumes.iter().map(|p| mmap(p)).collect::<Result<_>>()?;
-        Ok(Self { files, maps })
+        Ok(Self { files })
+    }
+}
+
+/// Small reads (block headers) through a memory-mapped section of a volume that moves along
+/// with them: a syscall per header costs ~3-10 us, a page touched in a mapping much less. Each
+/// section is unmapped when the reader moves past it, on the reading thread: mapping the
+/// whole archive left ~20 ms of unmapping at the very end.
+pub(crate) struct Views<'a> {
+    src: &'a Source,
+    /// Volume, offset of the section, the mapping.
+    cur: Option<(usize, u64, memmap2::Mmap)>,
+}
+
+/// Section size: a multiple of the 64 KB mapping granularity.
+const VIEW: u64 = 64 << 20;
+
+impl<'a> Views<'a> {
+    pub(crate) fn new(src: &'a Source) -> Self {
+        Self { src, cur: None }
+    }
+
+    /// `len` bytes at `off` in `volume`, or `None` if they can't be mapped (then read them).
+    fn get(&mut self, volume: usize, off: u64, len: usize) -> Option<&[u8]> {
+        let end = off.checked_add(len as u64)?;
+        let fits = matches!(&self.cur, Some((v, base, m)) if *v == volume && off >= *base && end <= base + m.len() as u64);
+        if !fits {
+            self.cur = None;
+            let file = self.src.files.get(volume)?;
+            let base = off & !0xffff;
+            let n = VIEW.min(file.metadata().ok()?.len().checked_sub(base)?);
+            if end > base + n {
+                return None;
+            }
+            // SAFETY: read-only, like the whole-archive maps elsewhere.
+            let map = unsafe { memmap2::MmapOptions::new().offset(base).len(n as usize).map(file) }.ok()?;
+            self.cur = Some((volume, base, map));
+        }
+        let (_, base, map) = self.cur.as_ref()?;
+        let at = (off - base) as usize;
+        map.get(at..at + len)
     }
 }
 
 impl Entry {
+    /// [`Entry::read`] for a few bytes (block headers), through `views` where it can.
+    pub(crate) fn read_small(&self, views: &mut Views, src: &Source, from: u64, to: u64, out: &mut Vec<u8>) -> unpack::Res<()> {
+        let Some((keys, iv)) = &self.crypt else {
+            match self.peek(views, from, to) {
+                Some(bytes) => out.extend_from_slice(bytes),
+                None => self.read_raw(src, from, to, out)?,
+            }
+            return Ok(());
+        };
+        // Whole AES blocks plus the ciphertext block before them (or the IV), decrypted here.
+        let (b0, b1) = (from / 16 * 16, to.div_ceil(16) * 16);
+        let Some(raw) = self.peek(views, b0.saturating_sub(16), b1) else {
+            return self.read(src, from, to, out);
+        };
+        let (prev, data) = if b0 == 0 {
+            (*iv, raw)
+        } else {
+            (raw[..16].try_into().unwrap(), &raw[16..])
+        };
+        let start = out.len();
+        out.extend_from_slice(data);
+        keys.decrypt(prev, &mut out[start..]);
+        let skip = (from - b0) as usize;
+        out.copy_within(start + skip..start + skip + (to - from) as usize, start);
+        out.truncate(start + (to - from) as usize);
+        Ok(())
+    }
+
+    /// Raw bytes `from..to` of the packed data straight from a mapped section, when they're
+    /// within one piece.
+    fn peek<'v>(&self, views: &'v mut Views, from: u64, to: u64) -> Option<&'v [u8]> {
+        if to > self.packed {
+            return None;
+        }
+        let mut at = 0;
+        for p in &self.pieces {
+            if from >= at && to <= at + p.len {
+                return views.get(p.volume, p.start + from - at, (to - from) as usize);
+            }
+            at += p.len;
+        }
+        None
+    }
+
     /// Appends bytes `from..to` of this file's packed data (decrypted, across volumes) to
     /// `out`.
     pub(crate) fn read(&self, src: &Source, from: u64, to: u64, out: &mut Vec<u8>) -> unpack::Res<()> {
@@ -189,11 +266,7 @@ impl Entry {
         for p in &self.pieces {
             let (lo, hi) = (from.max(at) - at, to.min(at + p.len).saturating_sub(at));
             at += p.len;
-            if lo < hi && hi - lo <= SMALL_READ {
-                let map = src.maps.get(p.volume).ok_or(unpack::Corrupt)?;
-                let range = usize::try_from(p.start + lo).ok().zip(usize::try_from(p.start + hi).ok());
-                out.extend_from_slice(range.and_then(|(a, b)| map.get(a..b)).ok_or(unpack::Corrupt)?);
-            } else if lo < hi {
+            if lo < hi {
                 let file = src.files.get(p.volume).ok_or(unpack::Corrupt)?;
                 let start = out.len();
                 out.resize(start + (hi - lo) as usize, 0);

@@ -18,6 +18,38 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-23 (07:00): no unmapping on the critical path
+
+Test mode (`t`), best of 3, back to back with 7ab90db; b94eeb2 numbers from the run above.
+Idle PC, Defender off.
+
+| Archive | 7ab90db | b94eeb2 | this |
+|---|---|---|---|
+| one 545 MB file | 0.426 s | 0.354 s | **0.322 s** |
+| 1.1 GB, 2 big + 77 files | 0.733 s | 0.699 s | **0.639 s** |
+| solid 1 GB game | 0.857 s | 0.749 s | **0.704 s** |
+| solid 48k files | 0.788 s | 0.655 s | **0.651 s** |
+| solid game, 256 MB dictionary | 0.955 s | 0.835 s | **0.784 s** |
+| encrypted 545 MB file | 0.423 s | 0.366 s | **0.336 s** |
+| encrypted headers, 4 volumes | 0.891 s | 0.802 s | **0.749 s** |
+| encrypted, 12 volumes | 0.795 s | 0.725 s | **0.681 s** |
+
+Timestamps through the whole run (open, parse, sink, engine, return) showed ~20 ms after the
+engine finished: unmapping the archive, whose pages the header scan had touched (one per
+block, ~27,000). Reading headers with plain positioned reads instead removed it but made the
+scan slow under load (a syscall per block, 3-10 us: it finished just before phase B on the
+solid game). Now the scan maps the archive 64 MB at a time and unmaps each section as it moves
+on, on its own thread; encrypted headers are decrypted from the mapped ciphertext too.
+
+Tried and dropped (phase B, measured):
+- *Writing through a 1 MB staging buffer* (filters split the output; filtered pieces
+  average ~1 KB): the drain thread's cost didn't change. Separately, writes to one file don't
+  scale across threads on Windows (0.18 s for 545 MB with 1, 2, 4 or 8 writers).
+- *Literal runs up to 1 KB copied inline* (not through memcpy): no change.
+- *Prefetching only copies more than 16 KB back*: worse (phase B 1.64 -> 1.69 cyc/B; 48k
+  files 1.58 -> 1.83): near copies benefit too.
+- Parsing the 48k-file archive's headers takes 39 ms (+7 ms unmapping), under 1 us per
+  header; not worth a rework.
 ## 2026-10-23 (05:34): phase B leaner, B-Rar against its own previous build
 
 From now on B-Rar is measured against itself. Baseline = 7ab90db (the installed build), new

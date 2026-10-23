@@ -353,6 +353,7 @@ pub(super) fn phase_a_only(src: &Source, files: &[&Entry]) -> usize {
 /// chunks. Returns the number of blocks.
 fn scan(src: &Source, files: &[&Entry], abort: &AtomicBool, mut chunk: impl FnMut(Chunk)) -> Res<usize> {
     let mut h = Vec::new();
+    let mut views = super::Views::new(src);
     let mut blocks = 0;
     let mut current = Chunk {
         spans: Vec::new(),
@@ -372,7 +373,7 @@ fn scan(src: &Source, files: &[&Entry], abort: &AtomicBool, mut chunk: impl FnMu
             }
             // flags | check | size (1-3 bytes)
             h.clear();
-            e.read(src, at as u64, (at + 5).min(stop) as u64, &mut h)?;
+            e.read_small(&mut views, src, at as u64, (at + 5).min(stop) as u64, &mut h)?;
             let flags = *h.first().ok_or(Corrupt)?;
             let n = usize::from((flags >> 3) & 3) + 1;
             if n == 4 || at + 2 + n > stop {
