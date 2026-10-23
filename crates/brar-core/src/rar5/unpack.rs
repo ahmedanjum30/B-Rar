@@ -68,6 +68,20 @@ impl<'a> Bits<'a> {
         b
     }
 
+    /// A reader starting at bit `bit` of `data` (to resume where another one stopped).
+    pub(super) fn at(data: &'a [u8], packed_len: usize, bit: usize) -> Self {
+        let mut b = Self {
+            data,
+            next: bit / 8,
+            buf: 0,
+            cnt: 0,
+            max_next: packed_len + 32,
+        };
+        b.refill();
+        b.consume((bit % 8) as u32);
+        b
+    }
+
     /// Tops `buf` up to 56..=63 valid bits with one unaligned load, no branches (the
     /// libdeflate technique). Bits below `cnt` that were already there are the same bytes
     /// loaded again, so OR-ing them in is harmless.

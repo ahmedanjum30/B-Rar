@@ -190,32 +190,45 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
         });
         for _ in 0..workers {
             scope.spawn(|| {
-                let mut tables = Tables::new();
-                let mut input = Vec::new();
+                // Chunks i and i + 1 at once, interleaved (see `tokenize2`).
+                let mut tables = [Tables::new(), Tables::new()];
+                let mut inputs = [Vec::new(), Vec::new()];
                 loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let chunk = {
+                    let i = next.fetch_add(2, Ordering::Relaxed);
+                    let pair = {
                         let mut q = queue.lock().unwrap();
                         loop {
-                            if abort.load(Ordering::Relaxed) {
+                            if abort.load(Ordering::Relaxed) || (i >= q.chunks.len() && q.scanned.is_some()) {
                                 break None;
                             }
-                            if i < q.chunks.len() && i < q.consumed + ahead {
-                                break Some(Arc::clone(&q.chunks[i]));
-                            }
-                            if i >= q.chunks.len() && q.scanned.is_some() {
-                                break None; // no such chunk
+                            if i < q.chunks.len() && i + 1 < q.consumed + ahead {
+                                if i + 1 < q.chunks.len() {
+                                    break Some((Arc::clone(&q.chunks[i]), Some(Arc::clone(&q.chunks[i + 1]))));
+                                }
+                                if q.scanned.is_some() {
+                                    break Some((Arc::clone(&q.chunks[i]), None)); // the last one
+                                }
                             }
                             q = space.wait(q).unwrap();
                         }
                     };
-                    let Some(chunk) = chunk else {
+                    let Some((first, second)) = pair else {
                         phase_a.fetch_add(thread_cycles(), Ordering::Relaxed);
                         return;
                     };
                     let k = spare.lock().unwrap().pop().unwrap_or_default();
-                    let tokens = decode_chunk(src, &chunk, files, &mut tables, &mut input, k);
-                    queue.lock().unwrap().slots[i] = Some(tokens);
+                    match second {
+                        None => {
+                            let tokens = decode_chunk(src, &first, files, &mut tables[0], &mut inputs[0], k);
+                            queue.lock().unwrap().slots[i] = Some(tokens);
+                        }
+                        Some(second) => {
+                            let k2 = spare.lock().unwrap().pop().unwrap_or_default();
+                            let [ta, tb] = decode_pair(src, files, &first, &second, &mut tables, &mut inputs, [k, k2]);
+                            let mut q = queue.lock().unwrap();
+                            (q.slots[i], q.slots[i + 1]) = (Some(ta), Some(tb));
+                        }
+                    }
                     ready.notify_one();
                 }
             });
@@ -334,14 +347,23 @@ pub(super) fn phase_a_only(src: &Source, files: &[&Entry]) -> usize {
     let Ok(_) = scan(src, files, &AtomicBool::new(false), |c| chunks.push(c)) else {
         panic!("scan failed")
     };
-    let (mut t, mut input, mut ops) = (Tables::new(), Vec::new(), 0);
-    let mut k = Tokens::default();
-    for c in &chunks {
-        let Ok(tokens) = decode_chunk(src, c, files, &mut t, &mut input, k) else {
-            panic!("chunk failed")
-        };
-        k = tokens;
-        ops += k.ops.len();
+    let (mut t, mut inputs, mut ops) = ([Tables::new(), Tables::new()], [Vec::new(), Vec::new()], 0);
+    let mut ks = [Tokens::default(), Tokens::default()];
+    for pair in chunks.chunks(2) {
+        if let [a, b] = pair {
+            let [Ok(ka), Ok(kb)] = decode_pair(src, files, a, b, &mut t, &mut inputs, ks) else {
+                panic!("chunk failed")
+            };
+            ops += ka.ops.len() + kb.ops.len();
+            ks = [ka, kb];
+        } else {
+            let [k, k2] = ks;
+            let Ok(k) = decode_chunk(src, &pair[0], files, &mut t[0], &mut inputs[0], k) else {
+                panic!("chunk failed")
+            };
+            ops += k.ops.len();
+            ks = [k, k2];
+        }
     }
     ops
 }
@@ -434,66 +456,12 @@ fn dist_codes(e: &Entry) -> usize {
 }
 
 /// Phase A for one chunk, into `k` (a recycled buffer). `input` is the worker's scratch.
-fn decode_chunk(src: &Source, c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
-    k.lits.clear();
-    k.ops.clear();
-    k.slots = [INCOMING, INCOMING | 1, INCOMING | 2, INCOMING | 3];
-    k.last_len = INCOMING;
-    let spans = &c.spans[..];
-    if let Some(s) = c.tables {
-        // This chunk continues with an earlier block's tables: read them from that block.
-        fill(input, src, files[s.file], s.start, s.end)?;
-        let mut bits = Bits::new(input, s.end - s.start);
-        let limit = (s.end - s.start + 16) * 8;
-        if !read_block_header(&mut bits, limit)?.has_tables {
-            return Err(Corrupt);
-        }
-        read_tables(&mut bits, t, dist_codes(files[s.file]), limit)?;
+fn decode_chunk(src: &Source, c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, k: Tokens) -> Res<Tokens> {
+    let mut d = ChunkDec::new(src, files, c, t, input, k)?;
+    while d.ensure_block(src, files)? {
+        d.finish_block()?;
     }
-    let mut mark = 0;
-    let mut b = 0;
-    while b < spans.len() {
-        // The chunk's blocks of one file are contiguous in its packed data.
-        let file = spans[b].file;
-        if b > 0 {
-            k.ops.push(Op {
-                lits: (k.lits.len() - mark) as u32,
-                len: FILE_END << KIND_SHIFT,
-                dist: file as u64,
-            });
-            mark = k.lits.len();
-        }
-        let mut e = b + 1;
-        while e < spans.len() && spans[e].file == file {
-            e += 1;
-        }
-        let (from, to) = (spans[b].start, spans[e - 1].end);
-        fill(input, src, files[file], from, to)?;
-        let mut bits = Bits::new(input, to - from);
-        let limit = (to - from + 16) * 8;
-        let codes = dist_codes(files[file]);
-        for _ in b..e {
-            let block = read_block_header(&mut bits, limit)?;
-            if block.has_tables {
-                read_tables(&mut bits, t, codes, limit)?;
-            }
-            bits = tokenize(t, bits, block.end.min(limit), &mut k, &mut mark);
-            if bits.pos() < block.end {
-                return Err(Corrupt); // stopped at the input limit, not the block end
-            }
-        }
-        b = e;
-    }
-    // Literals after the last op travel as an op with no payload.
-    if k.lits.len() > mark {
-        k.ops.push(Op {
-            lits: (k.lits.len() - mark) as u32,
-            len: TAIL << KIND_SHIFT,
-            dist: 0,
-        });
-    }
-    k.lits.extend_from_slice(&[0; LIT_PAD]);
-    Ok(k)
+    Ok(d.tokens())
 }
 /// Decodes one block's symbols into tokens. Like the single-threaded decoder's hot loop, it
 /// takes the reader by value, so it stays in registers.
@@ -533,65 +501,328 @@ fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark
             }
             e = e1;
         }
-        bits.refill();
         let lits = (k.lits.len() - *mark) as u32;
         *mark = k.lits.len();
-        let op = if e & E_MATCH != 0 {
-            let mut len = (e >> 16) + bits.take_upto((e >> 10) & 15);
-            bits.refill();
-            let dist = read_dist(&mut bits, t) as u64;
-            len += u32::from(dist > 0x100) + u32::from(dist > 0x2000) + u32::from(dist > 0x40000);
-            (s, ll) = ([dist, s[0], s[1], s[2]], u64::from(len));
-            Op { lits, len, dist }
-        } else {
-            match e >> 16 {
-                256 => {
-                    let mut b = bits;
-                    let f = read_filter(&mut b, 0);
-                    bits = b;
-                    Op {
-                        lits,
-                        len: FILTER << KIND_SHIFT | f.kind << 8 | f.channels as u32,
-                        dist: f.start as u64 | (f.len as u64) << 32,
-                    }
-                }
-                // The last match again, same distance and length.
-                257 => Op {
-                    lits,
-                    len: if ll & INCOMING != 0 { COPY_LAST_LEN << KIND_SHIFT } else { ll as u32 },
-                    dist: s[0],
-                },
-                // Recent distance n - 258: it moves to the front.
-                n => {
-                    let slot = t.rep_slot(&mut bits);
-                    let len = slot_to_length(&mut bits, slot) as u32;
-                    let d = match n - 258 {
-                        0 => s[0],
-                        1 => {
-                            let d = s[1];
-                            s[1] = s[0];
-                            d
-                        }
-                        2 => {
-                            let d = s[2];
-                            (s[2], s[1]) = (s[1], s[0]);
-                            d
-                        }
-                        _ => {
-                            let d = s[3];
-                            (s[3], s[2], s[1]) = (s[2], s[1], s[0]);
-                            d
-                        }
-                    };
-                    (s[0], ll) = (d, u64::from(len));
-                    Op { lits, len, dist: d }
-                }
-            }
-        };
-        k.ops.push(op);
+        k.ops.push(op_for(e, t, &mut bits, &mut s, &mut ll, lits));
     }
 }
 
+/// The op for a non-literal symbol `e` (its extra bits are read here), after `lits` literals.
+/// `s` and `ll` are the chunk's recent distances and last length (see [`Tokens::slots`]).
+#[inline(always)]
+fn op_for(e: u32, t: &Tables, bits: &mut Bits, s: &mut [u64; 4], ll: &mut u64, lits: u32) -> Op {
+    bits.refill();
+    if e & E_MATCH != 0 {
+        let mut len = (e >> 16) + bits.take_upto((e >> 10) & 15);
+        bits.refill();
+        let dist = read_dist(bits, t) as u64;
+        len += u32::from(dist > 0x100) + u32::from(dist > 0x2000) + u32::from(dist > 0x40000);
+        (*s, *ll) = ([dist, s[0], s[1], s[2]], u64::from(len));
+        return Op { lits, len, dist };
+    }
+    match e >> 16 {
+        256 => {
+            let f = read_filter(bits, 0);
+            Op {
+                lits,
+                len: FILTER << KIND_SHIFT | f.kind << 8 | f.channels as u32,
+                dist: f.start as u64 | (f.len as u64) << 32,
+            }
+        }
+        // The last match again, same distance and length.
+        257 => Op {
+            lits,
+            len: if *ll & INCOMING != 0 { COPY_LAST_LEN << KIND_SHIFT } else { *ll as u32 },
+            dist: s[0],
+        },
+        // Recent distance n - 258: it moves to the front.
+        n => {
+            let slot = t.rep_slot(bits);
+            let len = slot_to_length(bits, slot) as u32;
+            let d = match n - 258 {
+                0 => s[0],
+                1 => {
+                    let d = s[1];
+                    s[1] = s[0];
+                    d
+                }
+                2 => {
+                    let d = s[2];
+                    (s[2], s[1]) = (s[1], s[0]);
+                    d
+                }
+                _ => {
+                    let d = s[3];
+                    (s[3], s[2], s[1]) = (s[2], s[1], s[0]);
+                    d
+                }
+            };
+            (s[0], *ll) = (d, u64::from(len));
+            Op { lits, len, dist: d }
+        }
+    }
+}
+
+/// Two chunks' blocks at once: one symbol from each per round. Decoding one stream, the core
+/// waits on each table lookup before it knows where the next symbol starts (that chain is most
+/// of phase A); two independent streams give it a second chain to work on meanwhile. Runs
+/// while both are clear of their block ends; the caller finishes each block alone.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn tokenize2<'a, 'b>(
+    ta: &Tables,
+    mut ba: Bits<'a>,
+    fa: usize,
+    ka: &mut Tokens,
+    ma: &mut usize,
+    tb: &Tables,
+    mut bb: Bits<'b>,
+    fb: usize,
+    kb: &mut Tokens,
+    mb: &mut usize,
+) -> (Bits<'a>, Bits<'b>) {
+    let (mut sa, mut la) = (ka.slots, ka.last_len);
+    let (mut sb, mut lb) = (kb.slots, kb.last_len);
+    while ba.pos() < fa && bb.pos() < fb {
+        if ka.lits.capacity() - ka.lits.len() < 3 {
+            ka.lits.reserve(1 << 16);
+        }
+        if kb.lits.capacity() - kb.lits.len() < 3 {
+            kb.lits.reserve(1 << 16);
+        }
+        ba.refill_below(48);
+        bb.refill_below(48);
+        let ea = ta.main_symbol(&mut ba);
+        let eb = tb.main_symbol(&mut bb);
+        // Up to three literals per stream per round (3 x 15 bits fit the 48 just ensured).
+        let ea = if ea & E_LITERAL != 0 {
+            push(&mut ka.lits, (ea >> 16) as u8);
+            let e = ta.main_symbol(&mut ba);
+            if e & E_LITERAL != 0 {
+                push(&mut ka.lits, (e >> 16) as u8);
+                ta.main_symbol(&mut ba)
+            } else {
+                e
+            }
+        } else {
+            ea
+        };
+        let eb = if eb & E_LITERAL != 0 {
+            push(&mut kb.lits, (eb >> 16) as u8);
+            let e = tb.main_symbol(&mut bb);
+            if e & E_LITERAL != 0 {
+                push(&mut kb.lits, (e >> 16) as u8);
+                tb.main_symbol(&mut bb)
+            } else {
+                e
+            }
+        } else {
+            eb
+        };
+        if ea & E_LITERAL != 0 {
+            push(&mut ka.lits, (ea >> 16) as u8);
+        } else {
+            let lits = (ka.lits.len() - *ma) as u32;
+            *ma = ka.lits.len();
+            ka.ops.push(op_for(ea, ta, &mut ba, &mut sa, &mut la, lits));
+        }
+        if eb & E_LITERAL != 0 {
+            push(&mut kb.lits, (eb >> 16) as u8);
+        } else {
+            let lits = (kb.lits.len() - *mb) as u32;
+            *mb = kb.lits.len();
+            kb.ops.push(op_for(eb, tb, &mut bb, &mut sb, &mut lb, lits));
+        }
+    }
+    (ka.slots, ka.last_len) = (sa, la);
+    (kb.slots, kb.last_len) = (sb, lb);
+    (ba, bb)
+}
+
+/// One chunk in phase A, resumable a block at a time, so a worker can interleave two
+/// ([`decode_pair`]).
+struct ChunkDec<'c> {
+    c: &'c Chunk,
+    t: &'c mut Tables,
+    input: &'c mut Vec<u8>,
+    k: Tokens,
+    mark: usize,
+    /// The file segment in `input`: its spans end at `seg_end`; `next_blk` is the next block
+    /// to open; `len` input bytes, `limit` bits readable, its distance alphabet.
+    loaded: bool,
+    seg_end: usize,
+    next_blk: usize,
+    len: usize,
+    limit: usize,
+    codes: usize,
+    /// Bit position in `input`; the open block's end (as stored, and capped by `limit`).
+    pos: usize,
+    block_end: usize,
+    end: usize,
+    open: bool,
+}
+
+impl<'c> ChunkDec<'c> {
+    fn new(src: &Source, files: &[&Entry], c: &'c Chunk, t: &'c mut Tables, input: &'c mut Vec<u8>, mut k: Tokens) -> Res<Self> {
+        k.lits.clear();
+        k.ops.clear();
+        k.slots = [INCOMING, INCOMING | 1, INCOMING | 2, INCOMING | 3];
+        k.last_len = INCOMING;
+        if let Some(s) = c.tables {
+            // This chunk continues with an earlier block's tables: read them from that block.
+            fill(input, src, files[s.file], s.start, s.end)?;
+            let mut bits = Bits::new(input, s.end - s.start);
+            let limit = (s.end - s.start + 16) * 8;
+            if !read_block_header(&mut bits, limit)?.has_tables {
+                return Err(Corrupt);
+            }
+            read_tables(&mut bits, t, dist_codes(files[s.file]), limit)?;
+        }
+        Ok(Self {
+            c,
+            t,
+            input,
+            k,
+            mark: 0,
+            loaded: false,
+            seg_end: 0,
+            next_blk: 0,
+            len: 0,
+            limit: 0,
+            codes: 0,
+            pos: 0,
+            block_end: 0,
+            end: 0,
+            open: false,
+        })
+    }
+
+    /// Opens the next block (reading the next file segment, the header, any tables) unless
+    /// one is open; `false` when the chunk is done.
+    fn ensure_block(&mut self, src: &Source, files: &[&Entry]) -> Res<bool> {
+        if self.open {
+            return Ok(true);
+        }
+        let spans = &self.c.spans[..];
+        if !self.loaded || self.next_blk == self.seg_end {
+            let b = if self.loaded { self.seg_end } else { 0 };
+            if b >= spans.len() {
+                return Ok(false);
+            }
+            // The chunk's blocks of one file are contiguous in its packed data.
+            let file = spans[b].file;
+            if b > 0 {
+                self.k.ops.push(Op {
+                    lits: (self.k.lits.len() - self.mark) as u32,
+                    len: FILE_END << KIND_SHIFT,
+                    dist: file as u64,
+                });
+                self.mark = self.k.lits.len();
+            }
+            let mut e = b + 1;
+            while e < spans.len() && spans[e].file == file {
+                e += 1;
+            }
+            let (from, to) = (spans[b].start, spans[e - 1].end);
+            fill(self.input, src, files[file], from, to)?;
+            (self.loaded, self.seg_end, self.next_blk, self.pos) = (true, e, b, 0);
+            (self.len, self.limit, self.codes) = (to - from, (to - from + 16) * 8, dist_codes(files[file]));
+        }
+        let mut bits = Bits::at(self.input, self.len, self.pos);
+        let block = read_block_header(&mut bits, self.limit)?;
+        if block.has_tables {
+            read_tables(&mut bits, self.t, self.codes, self.limit)?;
+        }
+        (self.pos, self.block_end, self.end) = (bits.pos(), block.end, block.end.min(self.limit));
+        self.next_blk += 1;
+        self.open = true;
+        Ok(true)
+    }
+
+    fn fast_end(&self) -> usize {
+        self.end.saturating_sub(32)
+    }
+
+    /// Decodes the rest of the open block on its own.
+    fn finish_block(&mut self) -> Res<()> {
+        let bits = Bits::at(self.input, self.len, self.pos);
+        let bits = tokenize(self.t, bits, self.end, &mut self.k, &mut self.mark);
+        if bits.pos() < self.block_end {
+            return Err(Corrupt); // stopped at the input limit, not the block end
+        }
+        self.pos = bits.pos();
+        self.open = false;
+        Ok(())
+    }
+
+    /// The tokens, once every block is done.
+    fn tokens(mut self) -> Tokens {
+        // Literals after the last op travel as an op with no payload.
+        if self.k.lits.len() > self.mark {
+            self.k.ops.push(Op {
+                lits: (self.k.lits.len() - self.mark) as u32,
+                len: TAIL << KIND_SHIFT,
+                dist: 0,
+            });
+        }
+        self.k.lits.extend_from_slice(&[0; LIT_PAD]);
+        self.k
+    }
+}
+
+/// Phase A for two chunks on one thread, interleaved ([`tokenize2`]) wherever both are inside
+/// a block.
+fn decode_pair(
+    src: &Source,
+    files: &[&Entry],
+    ca: &Chunk,
+    cb: &Chunk,
+    t: &mut [Tables; 2],
+    inputs: &mut [Vec<u8>; 2],
+    ks: [Tokens; 2],
+) -> [Res<Tokens>; 2] {
+    let [ta, tb] = t;
+    let [ia, ib] = inputs;
+    let [ka, kb] = ks;
+    let (mut a, mut b) = match (ChunkDec::new(src, files, ca, ta, ia, ka), ChunkDec::new(src, files, cb, tb, ib, kb)) {
+        (Ok(a), Ok(b)) => (a, b),
+        // A damaged stream: the engine fails either way.
+        _ => return [Err(Corrupt), Err(Corrupt)],
+    };
+    let (mut ra, mut rb) = (Ok(()), Ok(()));
+    loop {
+        let oa = ra.is_ok() && a.ensure_block(src, files).inspect_err(|_| ra = Err(Corrupt)).unwrap_or(false);
+        let ob = rb.is_ok() && b.ensure_block(src, files).inspect_err(|_| rb = Err(Corrupt)).unwrap_or(false);
+        match (oa, ob) {
+            (true, true) => {
+                let (fa, fb) = (a.fast_end(), b.fast_end());
+                let (xa, xb) = tokenize2(
+                    a.t,
+                    Bits::at(a.input, a.len, a.pos),
+                    fa,
+                    &mut a.k,
+                    &mut a.mark,
+                    b.t,
+                    Bits::at(b.input, b.len, b.pos),
+                    fb,
+                    &mut b.k,
+                    &mut b.mark,
+                );
+                (a.pos, b.pos) = (xa.pos(), xb.pos());
+                if a.pos >= fa {
+                    ra = a.finish_block();
+                }
+                if b.pos >= fb {
+                    rb = b.finish_block();
+                }
+            }
+            (true, false) => ra = a.finish_block(),
+            (false, true) => rb = b.finish_block(),
+            (false, false) => break,
+        }
+    }
+    [ra.map(|()| a.tokens()), rb.map(|()| b.tokens())]
+}
 /// Padding after a chunk's literals, for [`copy_lits`].
 const LIT_PAD: usize = 16;
 

@@ -18,6 +18,39 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-23 (06:47): phase A decodes two chunks at once, less CPU per byte
+
+d820dfc against this commit, back to back, best of 3, idle PC, Defender off. cyc/B = the
+process's CPU cycles over all threads per output byte.
+
+| Archive | extract | extract cyc/B | test cyc/B | phase A cyc/B |
+|---|---|---|---|---|
+| one 545 MB file | 0.416 -> 0.418 s | 15.42 -> **13.25** (-14%) | 13.58 -> **11.61** | 10.85 -> 9.25 |
+| 1.1 GB, 2 big + 77 files | 0.787 -> 0.803 s | 20.23 -> 19.90 | 16.76 -> 15.73 | mixed |
+| solid 1 GB game | 0.923 -> 0.916 s | 15.25 -> **13.43** (-12%) | 13.43 -> **11.45** | 10.90 -> 8.95 |
+| solid 48k files | 6.572 -> 6.573 s | 59.83 -> 60.46 | 5.60 -> 5.31 | 2.90 -> 2.59 |
+| solid game, 256 MB dictionary | 0.957 -> 0.949 s | 15.30 -> **13.57** (-11%) | 13.27 -> **11.35** | 10.48 -> 8.73 |
+| encrypted 545 MB file | 0.433 -> 0.421 s | 16.92 -> **14.82** (-12%) | 14.88 -> **13.27** | 12.30 -> 10.56 |
+| encrypted headers, 4 volumes | 0.936 -> 0.929 s | 16.82 -> **14.97** (-11%) | 14.84 -> **12.93** | 12.22 -> 10.62 |
+| encrypted, 12 volumes | 0.839 -> 0.855 s | 23.84 -> 23.67 | 20.73 -> 20.15 | 16.84/14.77 -> 16.04/14.10 |
+
+Wall times are unchanged (phase B, the serial step, sets the pace); the CPU work is 11-15%
+lower on every archive the engine decodes on its own. The two mixed archives (two big files
+plus many small ones decoded by the single-file decoder, which didn't change) gain little.
+
+Phase A alone, on one thread (`phase_a_bench`), cycles per output byte:
+
+| Loop | 545 MB file | solid game | 48k source files |
+|---|---|---|---|
+| one chunk at a time (before) | 9.7 | 9.7 | 1.92 |
+| two literals decoded branch-free, one branch per pair | 9.7 | 9.7 | 2.5 (wasted decodes after a match) |
+| two chunks, one symbol each per round | 9.8 | 9.8 | 1.76 |
+| two chunks, up to two literals each per round | 8.2 | 8.2 | 1.79 |
+| **two chunks, up to three literals each per round** | **7.6** | **7.6** | 1.92 |
+
+The lookup chain wasn't the limit (two independent streams alone gained nothing on binary
+data): the bookkeeping per symbol was. Two streams with three literals each per round spread
+it over more symbols and keep both chains busy.
 ## 2026-10-23 (07:00): no unmapping on the critical path
 
 Test mode (`t`), best of 3, back to back with 7ab90db; b94eeb2 numbers from the run above.

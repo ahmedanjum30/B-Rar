@@ -729,6 +729,47 @@ mod tests {
             );
         }
     }
+    /// Phase A of the engine alone (scan, then every chunk decoded into tokens on this
+    /// thread), in CPU cycles per output byte, best of 5, for each archive in $BRAR_BENCH_RAR
+    /// (separated by `;`): all files of a solid archive, or the biggest file. Run with
+    /// `cargo test --release -p brar-core --lib phase_a_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn phase_a_bench() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let cycles = || {
+            let mut c = 0u64;
+            // SAFETY: the pseudo-handle of the current thread and a valid out pointer.
+            unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+            c
+        };
+        let paths = std::env::var("BRAR_BENCH_RAR").expect("set BRAR_BENCH_RAR");
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let arc = parse(Path::new(path), None).unwrap().expect("not a RAR5 archive");
+            let src = Source::open(&arc).unwrap();
+            let files: Vec<&Entry> = if arc.solid {
+                arc.entries.iter().filter(|e| !e.is_dir).collect()
+            } else {
+                arc.entries.iter().filter(|e| e.method != 0).max_by_key(|e| e.size).into_iter().collect()
+            };
+            let bytes: u64 = files.iter().map(|e| e.size).sum();
+            let best = (0..5)
+                .map(|_| {
+                    let c0 = cycles();
+                    assert!(parallel::phase_a_only(&src, &files) > 0);
+                    cycles() - c0
+                })
+                .min()
+                .unwrap();
+            let name = Path::new(path).file_name().unwrap().to_string_lossy();
+            println!("{name:<20} phase A {:6.2} cycles/B", best as f64 / bytes as f64);
+        }
+    }
+
     /// Where B-Rar's RAR5 decoder spends its time: a sampling profiler. A second thread pauses
     /// the decoding thread about 2,000 times a second and records its instruction pointer,
     /// while every supported entry of $BRAR_PROFILE_RAR is decoded for $BRAR_PROFILE_SECS
