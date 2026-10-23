@@ -790,9 +790,21 @@ pub(super) unsafe fn copy_match(base: *mut u8, pos: usize, dist: usize, len: usi
                 ptr::copy_nonoverlapping(src.add(i), dst.add(i), 8);
                 i += 8;
             }
+        } else if dist == 1 {
+            ptr::write_bytes(dst, *src, len);
         } else {
-            for i in 0..len {
+            // A short repeating pattern: write it byte by byte until it spans a whole number of
+            // periods that's at least 8 bytes; copying from that far back repeats the same
+            // pattern, 8 bytes at a time (overshooting up to 7 bytes, like the cases above).
+            let step = dist * 8usize.div_ceil(dist);
+            let head = step.min(len);
+            for i in 0..head {
                 *dst.add(i) = *src.add(i);
+            }
+            let mut i = head;
+            while i < len {
+                ptr::copy_nonoverlapping(dst.add(i - step), dst.add(i), 8);
+                i += 8;
             }
         }
     }

@@ -763,7 +763,12 @@ mod tests {
         let mut rounds = 0;
         while start.elapsed() < Duration::from_secs(secs) {
             if use_engine {
-                assert!(parallel::decode(&src, &engine, window, 16, &mut Null).is_ok());
+                // BRAR_PROFILE_ENGINE=A: phase A alone, on this thread.
+                if std::env::var("BRAR_PROFILE_ENGINE").as_deref() == Ok("A") {
+                    assert!(parallel::phase_a_only(&src, &engine) > 0);
+                } else {
+                    assert!(parallel::decode(&src, &engine, window, 16, &mut Null).is_ok());
+                }
                 rounds += 1;
                 continue;
             }

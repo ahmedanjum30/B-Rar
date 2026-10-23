@@ -2,12 +2,13 @@
 //!
 //! Phase A, in parallel: the compressed stream's blocks, grouped into chunks that each start
 //! at a block carrying its own Huffman tables, are decoded into tokens: literal bytes, and
-//! match / repeat / filter instructions with the repeated distances still symbolic. Chunks
-//! don't depend on each other, so any number of threads can work on them.
+//! copy / filter instructions. Repeated distances are resolved within the chunk; those that
+//! refer to before it stay symbolic ("recent distance n as the chunk began"). Chunks don't
+//! depend on each other, so any number of threads can work on them.
 //!
 //! Phase B, in order, on the calling thread: the tokens are applied into a sliding window
-//! (the last `window` bytes of output, as far back as a match can reach), which resolves the
-//! repeated distances, and finished bytes are streamed out. Filters are applied to a copy at
+//! (the last `window` bytes of output, as far back as a match can reach), which fills in the
+//! symbolic distances, and finished bytes are streamed out. Filters are applied to a copy at
 //! that point: later matches still read the unfiltered window.
 //!
 //! The stream runs over one file (a big file of a normal archive) or over every file of a
@@ -25,8 +26,8 @@ use std::{
 use super::{
     Entry, Source,
     unpack::{
-        self, Bits, Corrupt, DCB, DCX, E_LITERAL, E_MATCH, Filter, INPUT_PADDING, MAX_MATCH, Recent, Res, Tables, filter_block, read_block_header,
-        read_dist, read_filter, read_tables, slot_to_length,
+        self, Bits, Corrupt, DCB, DCX, E_LITERAL, E_MATCH, Filter, INPUT_PADDING, MAX_MATCH, Res, Tables, filter_block, read_block_header, read_dist,
+        read_filter, read_tables, slot_to_length,
     },
 };
 
@@ -95,6 +96,10 @@ struct Chunk {
 struct Tokens {
     lits: Vec<u8>,
     ops: Vec<Op>,
+    /// The four recent distances and the last length at the chunk's end: values, or (with
+    /// [`INCOMING`]) the chunk's incoming ones, which phase B knows.
+    slots: [u64; 4],
+    last_len: u64,
 }
 
 /// One non-literal symbol, after `lits` literals. `len`'s top 4 bits hold the kind.
@@ -106,11 +111,14 @@ struct Op {
 }
 
 const KIND_SHIFT: u32 = 28;
-const MATCH: u32 = 0;
-/// REPEAT + n: reuse recent distance n (0..=3).
-const REPEAT: u32 = 1;
-/// Repeat the last match exactly (symbol 257).
-const LAST: u32 = 5;
+/// Copy `len` bytes from `dist` back. Phase A resolves RAR's repeated distances itself
+/// (keeping the four recent ones per chunk), so phase B keeps no state per op: a `dist` with
+/// [`INCOMING`] set is recent distance number `dist & 3` as it was before the chunk.
+const COPY: u32 = 0;
+/// [`COPY`] with the length of the last match before the chunk (symbol 257 before any match
+/// in it).
+const COPY_LAST_LEN: u32 = 5;
+const INCOMING: u64 = 1 << 63;
 /// `dist` = start (relative to the output position) | length << 32; `len` low bits =
 /// channels, bits 8..: filter type.
 const FILTER: u32 = 6;
@@ -125,10 +133,11 @@ const FILE_END: u32 = 8;
 pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usize, out: &mut (dyn Output + Send)) -> Result<(), Failure> {
     let t0 = std::time::Instant::now();
     let total: usize = files.iter().map(|e| e.size as usize).sum();
-    // Phase A needs only a few cores to keep ahead of phase B (the serial step), and more
-    // workers share physical cores with phase B and the drain thread, slowing them down:
-    // measured best at about half the logical CPUs.
-    let workers = if threads >= 8 { threads / 2 } else { threads.max(1) };
+    // Phase A costs ~6x phase B per byte, so ~7 workers keep it ahead of phase B (the serial
+    // step); more share physical cores with phase B and the drain thread, slowing them down
+    // (measured: 8 of 16 logical CPUs beat 16). With fewer threads (several big files at
+    // once share the CPUs), all but the two for phase B and the drain.
+    let workers = if threads >= 8 { (threads - 2).min(8) } else { threads.max(1) };
     // Chunks decoded ahead of phase B, which bounds the tokens held in memory.
     let ahead = 2 * workers + 2;
 
@@ -230,6 +239,7 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
         };
         let out = &mut out;
         let w = &mut w;
+        w.prefault();
         let result = (|| -> Result<(), Failure> {
             let mut current = FileState::new(files, 0, 0);
             out.start(0, &files[0].check)?;
@@ -316,6 +326,26 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
     }
     result
 }
+/// Phase A alone, on this thread: every chunk of `files` decoded into tokens and dropped
+/// (for profiling it). Returns the number of ops.
+#[cfg(test)]
+pub(super) fn phase_a_only(src: &Source, files: &[&Entry]) -> usize {
+    let mut chunks = Vec::new();
+    let Ok(_) = scan(src, files, &AtomicBool::new(false), |c| chunks.push(c)) else {
+        panic!("scan failed")
+    };
+    let (mut t, mut input, mut ops) = (Tables::new(), Vec::new(), 0);
+    let mut k = Tokens::default();
+    for c in &chunks {
+        let Ok(tokens) = decode_chunk(src, c, files, &mut t, &mut input, k) else {
+            panic!("chunk failed")
+        };
+        k = tokens;
+        ops += k.ops.len();
+    }
+    ops
+}
+
 /// Reads the block headers of every file's packed data (each header gives its block's size,
 /// so nothing is decoded here) and groups the blocks into chunks of about [`CHUNK_PACKED`],
 /// each starting at a block with tables where possible, handing each to `chunk` as soon as
@@ -406,6 +436,8 @@ fn dist_codes(e: &Entry) -> usize {
 fn decode_chunk(src: &Source, c: &Chunk, files: &[&Entry], t: &mut Tables, input: &mut Vec<u8>, mut k: Tokens) -> Res<Tokens> {
     k.lits.clear();
     k.ops.clear();
+    k.slots = [INCOMING, INCOMING | 1, INCOMING | 2, INCOMING | 3];
+    k.last_len = INCOMING;
     let spans = &c.spans[..];
     if let Some(s) = c.tables {
         // This chunk continues with an earlier block's tables: read them from that block.
@@ -467,6 +499,7 @@ fn decode_chunk(src: &Source, c: &Chunk, files: &[&Entry], t: &mut Tables, input
 #[inline(never)]
 fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark: &mut usize) -> Bits<'a> {
     let fast_end = end.saturating_sub(32);
+    let (mut s, mut ll) = (k.slots, k.last_len);
     loop {
         if k.lits.capacity() - k.lits.len() < 2 {
             k.lits.reserve(1 << 16);
@@ -488,6 +521,7 @@ fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark
             }
         } else {
             if bits.pos() >= end {
+                (k.slots, k.last_len) = (s, ll);
                 return bits;
             }
             bits.refill_below(32);
@@ -506,6 +540,7 @@ fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark
             bits.refill();
             let dist = read_dist(&mut bits, t) as u64;
             len += u32::from(dist > 0x100) + u32::from(dist > 0x2000) + u32::from(dist > 0x40000);
+            (s, ll) = ([dist, s[0], s[1], s[2]], u64::from(len));
             Op { lits, len, dist }
         } else {
             match e >> 16 {
@@ -519,19 +554,36 @@ fn tokenize<'a>(t: &Tables, mut bits: Bits<'a>, end: usize, k: &mut Tokens, mark
                         dist: f.start as u64 | (f.len as u64) << 32,
                     }
                 }
+                // The last match again, same distance and length.
                 257 => Op {
                     lits,
-                    len: LAST << KIND_SHIFT,
-                    dist: 0,
+                    len: if ll & INCOMING != 0 { COPY_LAST_LEN << KIND_SHIFT } else { ll as u32 },
+                    dist: s[0],
                 },
+                // Recent distance n - 258: it moves to the front.
                 n => {
                     let slot = t.rep_slot(&mut bits);
                     let len = slot_to_length(&mut bits, slot) as u32;
-                    Op {
-                        lits,
-                        len: (REPEAT + n - 258) << KIND_SHIFT | len,
-                        dist: 0,
-                    }
+                    let d = match n - 258 {
+                        0 => s[0],
+                        1 => {
+                            let d = s[1];
+                            s[1] = s[0];
+                            d
+                        }
+                        2 => {
+                            let d = s[2];
+                            (s[2], s[1]) = (s[1], s[0]);
+                            d
+                        }
+                        _ => {
+                            let d = s[3];
+                            (s[3], s[2], s[1]) = (s[2], s[1], s[0]);
+                            d
+                        }
+                    };
+                    (s[0], ll) = (d, u64::from(len));
+                    Op { lits, len, dist: d }
                 }
             }
         };
@@ -745,7 +797,9 @@ struct Window {
     emitted: usize,
     /// How far back matches may reach (the dictionary size).
     keep: usize,
-    recent: Recent,
+    /// Recent distances and the last match length, as of the chunk being applied.
+    slots: [usize; 4],
+    last_len: usize,
     /// Filters waiting for their block to be complete, in stream order.
     filters: VecDeque<Filter>,
     filtered: Vec<u8>,
@@ -760,60 +814,30 @@ struct Window {
 /// on their way from memory by the time they're copied.
 const PREFETCH: usize = 16;
 
-/// Phase B's look-ahead: follows the ops with the same distance bookkeeping, without copying,
-/// and prefetches each copy's source.
+/// Phase B's look-ahead: follows the ops' positions without copying, and prefetches each
+/// copy's source.
 struct Ahead {
     i: usize,
     pos: usize,
-    r: Recent,
 }
 
 impl Ahead {
     #[inline(always)]
-    fn run(&mut self, ops: &[Op], until: usize, buf: &[u8], base: usize) {
+    fn run(&mut self, ops: &[Op], until: usize, buf: &[u8], base: usize, slots: &[usize; 4], last_len: usize) {
         while self.i < until.min(ops.len()) {
             let op = ops[self.i];
             self.i += 1;
             self.pos += op.lits as usize;
-            let len = (op.len & ((1 << KIND_SHIFT) - 1)) as usize;
-            let r = &mut self.r;
-            let dist = match op.len >> KIND_SHIFT {
-                MATCH => {
-                    *r = Recent {
-                        d0: op.dist as usize,
-                        d1: r.d0,
-                        d2: r.d1,
-                        d3: r.d2,
-                        len,
-                    };
-                    r.d0
-                }
-                LAST => r.d0,
-                n @ REPEAT..LAST => {
-                    let d = match n - REPEAT {
-                        0 => r.d0,
-                        1 => {
-                            let d = r.d1;
-                            r.d1 = r.d0;
-                            d
-                        }
-                        2 => {
-                            let d = r.d2;
-                            (r.d2, r.d1) = (r.d1, r.d0);
-                            d
-                        }
-                        _ => {
-                            let d = r.d3;
-                            (r.d3, r.d2, r.d1) = (r.d2, r.d1, r.d0);
-                            d
-                        }
-                    };
-                    (r.d0, r.len) = (d, len);
-                    d
-                }
+            let len = match op.len >> KIND_SHIFT {
+                COPY => (op.len & ((1 << KIND_SHIFT) - 1)) as usize,
+                COPY_LAST_LEN => last_len,
                 _ => continue,
             };
-            let len = if op.len >> KIND_SHIFT == LAST { r.len } else { len };
+            let dist = if op.dist & INCOMING != 0 {
+                slots[(op.dist & 3) as usize]
+            } else {
+                op.dist as usize
+            };
             // An estimate (files ending mid-chunk, a slide in between): a wrong guess only
             // costs a useless prefetch.
             if let Some(at) = self.pos.checked_sub(dist).and_then(|s| s.checked_sub(base))
@@ -826,7 +850,6 @@ impl Ahead {
         }
     }
 }
-
 impl Window {
     fn new(keep: usize, total: usize) -> Self {
         let slide = keep.clamp(SLIDE_ROOM, MAX_ROOM);
@@ -837,7 +860,8 @@ impl Window {
             pos: 0,
             emitted: 0,
             keep,
-            recent: Recent::default(),
+            slots: [0; 4],
+            last_len: 0,
             filters: VecDeque::new(),
             filtered: Vec::new(),
             scratch: Vec::new(),
@@ -846,12 +870,39 @@ impl Window {
         }
     }
 
+    /// Touches every page of the (freshly allocated, still unmapped) window on a few threads,
+    /// while phase A is starting: otherwise phase B would take the page faults, and the
+    /// kernel's zeroing of each page, one by one (~24,000 of them for a 96 MB window).
+    fn prefault(&mut self) {
+        const THREADS: usize = 4;
+        let part = self.buf.len().div_ceil(THREADS).max(1);
+        std::thread::scope(|s| {
+            for piece in self.buf.chunks_mut(part) {
+                s.spawn(move || {
+                    for i in (0..piece.len()).step_by(4096) {
+                        // SAFETY: in bounds; volatile, so the store of a zero into memory
+                        // that's already zero isn't optimized away.
+                        unsafe { std::ptr::write_volatile(piece.as_mut_ptr().add(i), 0) };
+                    }
+                });
+            }
+        });
+    }
+
     /// Makes room for `need` more bytes: sends what's finished, then drops what no match can
     /// reach any more.
+    #[inline(always)]
     fn room(&mut self, need: usize, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         if self.pos - self.base + need <= self.buf.len() {
             return Ok(());
         }
+        self.slide(need, f, out)
+    }
+
+    /// [`Window::room`]'s rare case, kept out of the hot loop.
+    #[cold]
+    #[inline(never)]
+    fn slide(&mut self, need: usize, f: &mut FileState, out: &mut Drain) -> Result<(), Failure> {
         self.emit(f, out)?;
         // The drain thread reads sent bytes in place: let it finish before they move.
         out.settle();
@@ -867,14 +918,13 @@ impl Window {
 
     /// Phase B for one chunk's tokens.
     fn apply(&mut self, k: &Tokens, f: &mut FileState, files: &[&Entry], out: &mut Drain) -> Result<(), Failure> {
+        // The recent distances and last length before this chunk, which its ops may refer to.
+        let (slots, last_len) = (self.slots, self.last_len);
+        let resolve = |d: u64| if d & INCOMING != 0 { slots[(d & 3) as usize] } else { d as usize };
         let mut lp = 0;
-        let mut ahead = Ahead {
-            i: 0,
-            pos: self.pos,
-            r: self.recent,
-        };
+        let mut ahead = Ahead { i: 0, pos: self.pos };
         for (oi, op) in k.ops.iter().enumerate() {
-            ahead.run(&k.ops, oi + PREFETCH, &self.buf, self.base);
+            ahead.run(&k.ops, oi + PREFETCH, &self.buf, self.base, &slots, last_len);
             if self.pos >= self.emit_at {
                 self.emit(f, out)?;
                 self.emit_at = self.pos + EMIT_EVERY;
@@ -901,27 +951,14 @@ impl Window {
                 continue; // the file is complete; the rest of its data is discarded
             }
             let len = (op.len & ((1 << KIND_SHIFT) - 1)) as usize;
-            let r = &mut self.recent;
-            let dist = match kind {
-                MATCH => {
-                    let dist = op.dist as usize;
-                    *r = Recent {
-                        d0: dist,
-                        d1: r.d0,
-                        d2: r.d1,
-                        d3: r.d2,
-                        len,
-                    };
-                    dist
-                }
-                TAIL => continue,
-                LAST => {
-                    if r.len != 0 {
-                        let (d, l) = (r.d0, r.len);
-                        self.copy(d, l, f, out)?;
+            match kind {
+                COPY => self.copy(resolve(op.dist), len, f, out)?,
+                COPY_LAST_LEN => {
+                    if last_len != 0 {
+                        self.copy(resolve(op.dist), last_len, f, out)?;
                     }
-                    continue;
                 }
+                TAIL => {}
                 FILTER => {
                     let start = self.pos + (op.dist as u32) as usize;
                     let flen = (op.dist >> 32) as usize;
@@ -937,37 +974,15 @@ impl Window {
                         kind: (op.len >> 8) & 0xff,
                         channels: (op.len & 0xff) as usize,
                     });
-                    continue;
                 }
-                n => {
-                    let dist = match n - REPEAT {
-                        0 => r.d0,
-                        1 => {
-                            let d = r.d1;
-                            r.d1 = r.d0;
-                            d
-                        }
-                        2 => {
-                            let d = r.d2;
-                            (r.d2, r.d1) = (r.d1, r.d0);
-                            d
-                        }
-                        _ => {
-                            let d = r.d3;
-                            (r.d3, r.d2, r.d1) = (r.d2, r.d1, r.d0);
-                            d
-                        }
-                    };
-                    r.d0 = dist;
-                    r.len = len;
-                    dist
-                }
-            };
-            self.copy(dist, len, f, out)?;
+                _ => return Err(Failure::Corrupt),
+            }
         }
+        // The state after the chunk, for the next one.
+        self.slots = k.slots.map(resolve);
+        self.last_len = if k.last_len & INCOMING != 0 { last_len } else { k.last_len as usize };
         Ok(())
     }
-
     /// Ends the current file and moves on to file `next` (files in between are empty).
     fn switch(&mut self, f: &mut FileState, next: usize, files: &[&Entry], out: &mut Drain) -> Result<(), Failure> {
         if next <= f.index || next >= files.len() {

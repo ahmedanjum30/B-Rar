@@ -18,6 +18,41 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-23 (05:34): phase B leaner, B-Rar against its own previous build
+
+From now on B-Rar is measured against itself. Baseline = 7ab90db (the installed build), new
+= this commit, back to back per archive, idle PC, Defender off, best of 3. "cyc/B" = the
+process's CPU cycles (all threads) per output byte. Phase B = the engine's serial step.
+
+| Archive | extract, baseline -> new | test, baseline -> new | phase B cyc/B |
+|---|---|---|---|
+| one 545 MB file | 0.473 -> **0.426 s** (-10%) | 0.428 -> **0.354 s** (-17%) | 2.06 -> 1.64 |
+| 1.1 GB, 2 big + 77 files | 0.824 -> **0.811 s** (-2%) | 0.735 -> **0.699 s** (-5%) | 2.75 -> 2.45 |
+| solid 1 GB game | 0.995 -> **0.934 s** (-6%) | 0.862 -> **0.749 s** (-13%) | 1.80 -> 1.45 |
+| solid 48k files | 6.415 -> 6.535 s (file creation) | 0.799 -> **0.655 s** (-18%) | 2.07 -> 1.59 |
+| solid game, 256 MB dictionary | 1.108 -> **0.983 s** (-11%) | 0.953 -> **0.835 s** (-12%) | 2.05 -> 1.65 |
+| encrypted 545 MB file | 0.494 -> **0.443 s** (-10%) | 0.435 -> **0.366 s** (-16%) | 2.08 -> 1.61 |
+| encrypted headers, 4 volumes | 1.022 -> **0.949 s** (-7%) | 0.903 -> **0.802 s** (-11%) | 1.83 -> 1.46 |
+| encrypted, 12 volumes | 0.890 -> **0.867 s** (-3%) | 0.788 -> **0.725 s** (-8%) | 2.99 -> 2.38 |
+
+Total CPU work per byte is unchanged (~15 cycles/B on the big archives): phase A now does a
+little more (10.2 -> 10.7) so the serial phase B can do less, which is what shortens the
+wall time. What changed, each measured on its own (test mode):
+1. *Phase B fine-tuning*: copies with a distance under 8 double the pattern up to 8 bytes,
+   then copy 8 at a time (was byte by byte); the window-slide path is out of line. Big file
+   0.419 -> 0.378 s.
+2. *Phase A resolves repeated distances*: each chunk tracks the four recent distances itself,
+   so phase B gets plain copies (explicit distance, or "recent distance n as the chunk
+   began") and keeps no state per op. 0.378 -> 0.358 s; solid 48k 0.732 -> 0.652 s.
+3. *Window pre-faulted* on 4 threads while phase A starts (it was ~24,000 page faults on
+   phase B's thread). 0.358 -> 0.342 s.
+4. *Phase A*: a profile of phase A alone (`BRAR_PROFILE_ENGINE=A`) puts 64% in the Huffman
+   table lookup, a chain of dependent loads, near the floor for one stream; larger or
+   two-symbol tables were already measured slower. What did help: engines decoding two big
+   files at once had only 4 workers each and waited on phase A; workers are now
+   `threads - 2` (at most 8). 1.1 GB set 0.734 -> 0.681 s, 12-volume set 0.795 -> 0.712 s
+   (quick A/B). Left: one worker decoding two chunks interleaved (two lookup chains at once),
+   a big rewrite of the hot loop, for perhaps 10-20% of phase A.
 ## 2026-10-22 (02:08): full RAR benchmark, idle PC, Defender off and on
 
 Every RAR5 archive in bench-data, all cores, best of 2, 5 s apart, competitors first.
