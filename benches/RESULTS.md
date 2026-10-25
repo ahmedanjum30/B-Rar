@@ -18,6 +18,65 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-25: ZIP gets B-Rar's own Deflate decoder (parallel, and single-core vs libdeflate)
+
+ZIP entries of 64 MB and up are now decoded on all cores by B-Rar's own Deflate decoder
+(one stream cut into 2 MB pieces, each decoded without the 32 KB before it, then resolved
+and written in order). Smaller entries still use libdeflate. Defender real-time protection
+off for all runs below. CPU: AMD Ryzen 7 5800H (8 cores, 16 threads).
+
+Archives: `single.zip` (one 545 MB entry, 460 MB packed), `italian.zip` (82 entries,
+1.25 GB), `corpus.zip` (55,695 small files, 976 MB; 45,089 Deflate entries).
+
+### Decoder only, B-Rar vs libdeflate itself
+
+Both decode the same compressed bytes from memory; only decoding is timed. libdeflate via
+the `libdeflater` crate (libdeflate 1.26). Cycles per output byte, one core, best of 3
+(`inflate_bench`):
+
+| Data | B-Rar | libdeflate | |
+|---|---|---|---|
+| `single.zip` (545 MB entry) | **6.02** | 6.42 | 6% faster |
+| `italian.zip` (79 entries) | **4.35** | 4.64 | 6% faster |
+| `corpus.zip` (45,089 small entries) | 2.59 | **2.39** | 8% slower |
+
+B-Rar on all 16 threads against libdeflate on one core, one stream at a time
+(`parallel_bench`, two runs):
+
+| Data | libdeflate, 1 core | B-Rar, 16 threads | |
+|---|---|---|---|
+| `single.zip` | 1.15 s | **0.320–0.328 s** | 3.5–3.6x |
+| `italian.zip` (545 MB of entries) | 1.08 s | **0.245–0.254 s** | 4.2–4.4x |
+
+What made the single-core decoder faster than libdeflate on these: one table lookup gives a
+symbol's whole value (length or distance with its extra bits); the bit reader lives in
+registers and shifts by the table entry as it is; tables built by doubling, with four
+independent counting/sorting chains; code lengths read without branches; fixed tables kept
+between blocks. Tried and dropped: BMI2 chosen at run time (no gain on Zen 3), two literals
+per lookup (almost no table entries qualify on real data, and it slowed the loop), copying
+libdeflate's loop layout exactly (better on text, 9% worse on large files). Where libdeflate
+still wins: match-heavy text, about 3 cycles per match; per-block table cost is equal
+(~1,500 cycles each, measured with the same data in 1 KB and 64 KB blocks).
+
+### End to end (B-Rar.exe), best of 3
+
+| Archive | Build | Extract | Test |
+|---|---|---|---|
+| one 545 MB entry | before (libdeflate only) | 1.610 s | 1.422 s |
+| | parallel decoder | 0.586 s | 0.439 s |
+| | + fast loop in the pieces | **0.582 s** | **0.424 s** |
+| 82 entries, 1.25 GB | before | 1.585 s | 1.360 s |
+| | parallel decoder | 0.859 s | 0.663 s |
+| | + fast loop in the pieces | **0.857 s** | **0.637 s** |
+| 55,695 small files | before | 6.550 s | 0.653 s |
+| | now | 6.015 s | 0.644 s |
+
+The fast loop cut CPU time per byte 6–9% but not wall time: the limit is now outside the
+decoder (ordered output, checksum, file writing). The small-files archive is unchanged
+(libdeflate, and file creation dominates).
+
+---
+
 ## 2026-10-23 (15:36): two files at once in the single-file decoder: tried, dropped
 
 The same trick as phase A's (two streams per thread, up to three literals each per round),
