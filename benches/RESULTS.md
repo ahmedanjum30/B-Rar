@@ -32,10 +32,10 @@ total size).
 | 82 entries, 1.25 GB | **0.85 s** | 3.20 s | 9.24 s | 13.01 s |
 | 55,695 small files | **8.2 s** ¹ | 16.2 s ² | 751.7 s | stopped after >12 min |
 
-¹ The installed (MSIX, Store) build, 1.0.0.0: with Defender on, files created by an
-unpackaged B-Rar.exe are scanned one by one (44.1 s here for the development build). The
-installed build predates the own Deflate decoder, which doesn't matter here: the time is in
-creating the files.
+¹ The installed MSIX, 1.0.0.0 (the sideloaded package, the same build as the Store's): with
+Defender on, files created by an unpackaged B-Rar.exe are scanned one by one (44.1 s here for
+the development build). The installed build predates the own Deflate decoder, which doesn't
+matter here: the time is in creating the files.
 ² One file short (47,013 of 47,014, 100 bytes missing).
 
 ---

@@ -47,6 +47,9 @@ One run per tool on the same PC (16 threads, NVMe SSD), extracting to the same d
 **Microsoft Store:** coming soon. It's the full app with the right-click menu, and it updates itself. Once it's in the Store, `winget install B-Rar` installs it too.
 
 **Portable:** `B-Rar-<version>-portable-x64.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` (the window) with nothing to install, and no right-click menu. Run `B-Rar-GUI.exe archive.zip` to browse an archive. The zip is built by this repository's [release workflow](.github/workflows/release.yml) from the source you see here; to check yours, compare its SHA-256 (`Get-FileHash <file>` in PowerShell) with `SHA256SUMS.txt` on the same release.
+
+**Updates:** the Store version updates itself. The portable version (and the `-x64.msix` signed with B-Rar's own certificate) checks GitHub when its window opens and says when a new version is out; nothing is downloaded until you click **Update**. The download is checked against the release's `SHA256SUMS.txt`, then the portable files are replaced in place (the window reopens) or the package opens in App Installer.
+
 ## Command line
 
 ```text

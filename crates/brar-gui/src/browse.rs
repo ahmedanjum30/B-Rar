@@ -9,7 +9,10 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Instant, SystemTime},
 };
 
@@ -24,6 +27,7 @@ use crate::{
     app::{LOGO_PNG, human},
     shell,
     style::{self, Icon, palette, semibold},
+    update::{self, Release},
 };
 
 /// Opens the browser on `archive`, or on the home page (opened from the Start menu).
@@ -222,6 +226,25 @@ enum Action {
     Test,
 }
 
+/// Where this window is with updates (see [`update`]).
+enum Updates {
+    Idle,
+    Checking {
+        manual: bool,
+    },
+    /// Only after a check that was asked for.
+    UpToDate,
+    Available(Release),
+    Downloading {
+        release: Release,
+        done: Arc<AtomicU64>,
+        total: Arc<AtomicU64>,
+    },
+    Failed(String),
+    /// Closed by the user: not shown again in this window.
+    Dismissed,
+}
+
 #[derive(Default)]
 struct Inbox {
     listing: Option<brar_core::Result<Vec<EntryInfo>>>,
@@ -257,6 +280,9 @@ struct Browser {
     hwnd: isize,
     temp: PathBuf,
     jobs: u32,
+    /// How this copy updates (or doesn't: the Store's, a development build).
+    update_kind: update::Kind,
+    updates: Arc<Mutex<Updates>>,
 }
 
 impl Browser {
@@ -290,11 +316,66 @@ impl Browser {
             hwnd: 0,
             temp: std::env::temp_dir().join("B-Rar").join(std::process::id().to_string()),
             jobs: 0,
+            update_kind: update::kind(),
+            updates: Arc::new(Mutex::new(Updates::Idle)),
         };
         if let Some(archive) = archive {
             b.open_archive(ctx, archive);
         }
+        b.check_for_updates(ctx, false);
         b
+    }
+
+    fn updatable(&self) -> bool {
+        matches!(self.update_kind, update::Kind::Portable | update::Kind::Sideloaded)
+    }
+
+    /// Looks for a newer release in the background. A check that wasn't asked for fails
+    /// quietly (offline, say) and says nothing when there's no update.
+    fn check_for_updates(&mut self, ctx: &egui::Context, manual: bool) {
+        if !self.updatable() {
+            return;
+        }
+        let mut state = self.updates.lock().unwrap();
+        if matches!(*state, Updates::Checking { .. } | Updates::Downloading { .. }) {
+            return;
+        }
+        *state = Updates::Checking { manual };
+        drop(state);
+        let (updates, ctx, kind) = (Arc::clone(&self.updates), ctx.clone(), self.update_kind);
+        std::thread::spawn(move || {
+            let result = update::check(kind);
+            *updates.lock().unwrap() = match result {
+                Ok(Some(release)) => Updates::Available(release),
+                Ok(None) if manual => Updates::UpToDate,
+                Err(e) if manual => Updates::Failed(e),
+                Ok(None) | Err(_) => Updates::Idle,
+            };
+            ctx.request_repaint();
+        });
+    }
+
+    /// Downloads the available update, checks it and installs it; closes the window once the
+    /// installer (or the new B-Rar) has started.
+    fn start_update(&mut self, ctx: &egui::Context) {
+        let mut state = self.updates.lock().unwrap();
+        let Updates::Available(release) = &*state else { return };
+        let (release, done, total) = (release.clone(), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        *state = Updates::Downloading {
+            release: release.clone(),
+            done: Arc::clone(&done),
+            total: Arc::clone(&total),
+        };
+        drop(state);
+        let (updates, ctx, kind) = (Arc::clone(&self.updates), ctx.clone(), self.update_kind);
+        std::thread::spawn(move || {
+            let result = update::download(&release, &done, &total).and_then(|file| update::install(kind, &file));
+            match result {
+                Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
+                Err(e) => *updates.lock().unwrap() = Updates::Failed(e),
+            }
+            ctx.request_repaint();
+        });
     }
 
     /// Shows `archive` in this window (from the home page, a drop, or Ctrl+O).
@@ -649,6 +730,7 @@ impl eframe::App for Browser {
             self.hwnd = w.hwnd.get();
         }
         let pal = palette(ui);
+        self.update_bar(ui);
         match &self.page {
             Page::Home => centered(ui, pal.bg, |ui| self.home_page(ui)),
             Page::Ready => self.browser_page(ui),
@@ -730,7 +812,77 @@ impl Browser {
                 ui.add_space(10.0);
                 ui.label(RichText::new(message).color(pal.error));
             }
+            ui.add_space(18.0);
+            ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(pal.weak));
+            if self.updatable() && ui.link(RichText::new("Check for updates").small()).clicked() {
+                self.check_for_updates(ui.ctx(), true);
+            }
         });
+    }
+
+    /// A bar across the top while there's something to say about updates.
+    fn update_bar(&mut self, ui: &mut Ui) {
+        let pal = palette(ui);
+        let (text, color) = match &*self.updates.lock().unwrap() {
+            Updates::Idle | Updates::Dismissed | Updates::Checking { manual: false } => return,
+            Updates::Checking { manual: true } => ("Checking for updates...".to_owned(), pal.text),
+            Updates::UpToDate => (format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")), pal.text),
+            Updates::Available(r) => (format!("B-Rar {} is available.", r.version), pal.text),
+            Updates::Downloading { release, done, total } => {
+                let (done, total) = (done.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
+                let percent = (done * 100).checked_div(total).unwrap_or(0);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                (format!("Downloading B-Rar {}... {percent}%", release.version), pal.text)
+            }
+            Updates::Failed(e) => (format!("Update failed: {e}"), pal.error),
+        };
+        let mut action = None;
+        egui::Panel::top("update")
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.accent.gamma_multiply(0.15))
+                    .inner_margin(egui::Margin::symmetric(16, 6)),
+            )
+            .show(ui, |ui| {
+                // One row: buttons first, from the right; the message gets what's left.
+                let row = vec2(ui.available_width(), 32.0);
+                ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
+                    {
+                        let state = self.updates.lock().unwrap();
+                        let closable = !matches!(*state, Updates::Downloading { .. } | Updates::Checking { .. });
+                        if closable && ui.button("Close").clicked() {
+                            action = Some("close");
+                        }
+                        match &*state {
+                            Updates::Available(_) => {
+                                if ui.link("What's new").clicked() {
+                                    action = Some("notes");
+                                }
+                                if style::primary_button(ui, "Update", true).clicked() {
+                                    action = Some("update");
+                                }
+                            }
+                            Updates::Failed(_) if ui.button("Try again").clicked() => action = Some("retry"),
+                            _ => {}
+                        }
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+                    });
+                });
+            });
+        let ctx = ui.ctx().clone();
+        match action {
+            Some("close") => *self.updates.lock().unwrap() = Updates::Dismissed,
+            Some("update") => self.start_update(&ctx),
+            Some("notes") => {
+                if let Updates::Available(r) = &*self.updates.lock().unwrap() {
+                    shell::open_path(Path::new(&r.page));
+                }
+            }
+            Some("retry") => self.check_for_updates(&ctx, true),
+            _ => {}
+        }
     }
 
     fn password_page(&mut self, ui: &mut Ui, wrong: bool, retry: Retry) {

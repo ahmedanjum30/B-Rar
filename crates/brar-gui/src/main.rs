@@ -19,6 +19,7 @@ mod app;
 mod browse;
 mod shell;
 mod style;
+mod update;
 
 use std::{
     env,
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
     // SAFETY: no other threads exist yet.
     unsafe { env::remove_var(PASSWORD_VAR) };
     shell::init_com();
+    update::clean_up();
     match run(password) {
         Ok(code) => code,
         Err(msg) => {

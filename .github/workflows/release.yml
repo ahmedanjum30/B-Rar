@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a v* tag builds the Microsoft Store package (a workflow artifact, uploaded to Partner
-# Center by hand; Microsoft signs it) and publishes the portable zip as a GitHub release.
+# Center by hand; Microsoft signs it) and publishes the portable zip, and the MSIX signed with
+# B-Rar's own certificate, as a GitHub release. Copies outside the Store update from these.
 on:
   push:
     tags: ["v*"]
@@ -21,6 +22,11 @@ jobs:
 
   build:
     runs-on: windows-latest
+    env:
+      # B-Rar's signing certificate (installer\new-cert.ps1), exported as a .pfx in base64,
+      # and its password. Without them the signed package is left out.
+      MSIX_CERT_PFX: ${{ secrets.MSIX_CERT_PFX }}
+      MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -29,6 +35,20 @@ jobs:
       - name: Build the Store package
         shell: pwsh
         run: ./installer/build.ps1 -Store
+
+      # The sideloaded package: the certificate goes into the runner's store, where build.ps1
+      # looks for it (by subject and friendly name).
+      - name: Build the signed package
+        if: env.MSIX_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'brar.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:MSIX_CERT_PFX))
+          $password = ConvertTo-SecureString $env:MSIX_CERT_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $cert.FriendlyName = 'B-Rar MSIX signing'
+          ./installer/build.ps1
 
       - name: Package
         shell: pwsh
@@ -39,7 +59,7 @@ jobs:
           Copy-Item target\release\B-Rar.exe, target\release\B-Rar-GUI.exe, README.md, LICENSE, installer\unrar-license.txt "dist\$name"
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Remove-Item -Recurse "dist\$name"
-          Get-ChildItem dist -File -Filter *.zip | ForEach-Object {
+          Get-ChildItem dist -File | Where-Object { $_.Name -like '*.zip' -or $_.Name -like '*-x64.msix' } | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist\SHA256SUMS.txt
 
@@ -48,6 +68,7 @@ jobs:
           name: release-files
           path: |
             dist/B-Rar-*-portable-x64.zip
+            dist/B-Rar-*-x64.msix
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -77,4 +98,6 @@ jobs:
             Get B-Rar from the **Microsoft Store** for the full app with the right-click menu and automatic updates (or `winget install B-Rar`).
 
             **The `-portable-x64.zip`** below has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` with nothing to install, and no right-click menu. It's built by this repository's release workflow; check it against `SHA256SUMS.txt`.
+
+            Copies outside the Store (the portable files, and the `-x64.msix` signed with B-Rar's own certificate) say when a new version is out, and update from here when you click **Update**.
           generate_release_notes: true
