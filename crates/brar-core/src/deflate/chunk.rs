@@ -118,14 +118,23 @@ struct Values {
 }
 
 impl Output for Values {
+    type Elem = u16;
+
     #[inline(always)]
-    unsafe fn literal(&mut self, pos: usize, byte: u8) {
-        // SAFETY: the caller's.
-        unsafe { *self.base.add(pos) = u16::from(byte) };
+    fn base(&self) -> *mut u16 {
+        self.base
     }
 
     #[inline(always)]
-    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool {
+    unsafe fn literal(at: *mut u16, byte: u8) {
+        // SAFETY: the caller's.
+        unsafe { *at = u16::from(byte) };
+    }
+
+    #[inline(always)]
+    unsafe fn copy(&mut self, at: *mut u16, back: usize, n: usize) -> bool {
+        // SAFETY: at is within the buffer.
+        let pos = unsafe { at.offset_from(self.base) } as usize;
         if back > pos + WINDOW {
             return false;
         }
@@ -211,15 +220,15 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
         let (mut e, mut v) = lit.decode(&mut bits);
         // SAFETY (stores and copies): ROUND values after pos.
         if e & LITERAL != 0 {
-            unsafe { values.literal(pos, (e >> 16) as u8) };
+            unsafe { Values::literal(values.base.add(pos), (e >> 16) as u8) };
             pos += 1;
             (e, v) = lit.decode(&mut bits);
             if e & LITERAL != 0 {
-                unsafe { values.literal(pos, (e >> 16) as u8) };
+                unsafe { Values::literal(values.base.add(pos), (e >> 16) as u8) };
                 pos += 1;
                 (e, v) = lit.decode(&mut bits);
                 if e & LITERAL != 0 {
-                    unsafe { values.literal(pos, (e >> 16) as u8) };
+                    unsafe { Values::literal(values.base.add(pos), (e >> 16) as u8) };
                     pos += 1;
                     continue;
                 }
@@ -231,7 +240,7 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
         bits.refill();
         let n = v;
         let (d, back) = dist.decode(&mut bits);
-        if d & INVALID != 0 || pos + n > max_out || !unsafe { values.copy(pos, back, n) } {
+        if d & INVALID != 0 || pos + n > max_out || !unsafe { values.copy(values.base.add(pos), back, n) } {
             break Err(Bad);
         }
         pos += n;

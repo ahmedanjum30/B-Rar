@@ -118,24 +118,39 @@ const DIST_EXTRA: [u8; 30] = [
 /// Order the code-length code's lengths are stored in.
 const PRECODE_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
+/// A table's entries: its part of the one allocation [`Tables`] holds.
+struct Entries {
+    ptr: *mut u32,
+    len: usize,
+}
+
+impl std::ops::Deref for Entries {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        // SAFETY: a part of Tables' allocation, which outlives its tables; parts don't overlap.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl std::ops::DerefMut for Entries {
+    fn deref_mut(&mut self) -> &mut [u32] {
+        // SAFETY: as deref; &mut self makes it the only access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
 /// A Huffman code's decoding table: entries for `bits`-bit lookups, then subtables.
 pub(crate) struct Table {
-    entries: Vec<u32>,
+    entries: Entries,
     bits: u32,
 }
 
 impl Table {
-    fn new(size: usize, bits: u32) -> Self {
-        Self {
-            entries: vec![INVALID; size],
-            bits,
-        }
-    }
-
     /// Builds the table for code lengths `lens` (0 = unused); `value(symbol)` gives the entry's
     /// flags and value (bits 12..) and its extra bit count (bits 0..8). Over-subscribed codes
     /// are rejected; incomplete ones are allowed (Deflate permits a lone distance code), their
     /// gaps decode as invalid.
+    #[inline(always)]
     fn build(&mut self, lens: &[u8], value: impl Fn(usize) -> u32) -> Res<bool> {
         // The lengths in four quarters (zero-padded), each with its own counters: counting
         // and sorting run as four independent chains (runs of equal lengths would otherwise
@@ -246,6 +261,7 @@ impl Table {
     /// length needs, the table doubled (copied onto its upper half) at each longer length.
     /// Codes longer than the main table's bits go to subtables, one per shared prefix.
     /// `padded` and `counts`: the lengths in quarters of `q`, and each quarter's counts.
+    #[inline(always)]
     fn build_complete(&mut self, padded: &[u8; 320], q: usize, counts: &[[u16; 16]; 4], count: &[u32; 16], value: impl Fn(usize) -> u32) {
         // Symbols sorted by code length (stable: canonical order within a length).
         let mut offset = [0u16; 17];
@@ -373,6 +389,18 @@ impl Table {
     }
 }
 
+/// Whether literal codes take most of the code space: [`LITERAL_HEAVY`] of 2^15. Worked out
+/// from the other codes' share (`other_lens`: end of block and lengths, ~30 symbols, not
+/// 256), the code being complete.
+#[inline(always)]
+fn literal_heavy(other_lens: &[u8]) -> bool {
+    let other: u32 = other_lens.iter().map(|&l| if l == 0 { 0 } else { (1u32 << 15) >> l }).sum();
+    (1u32 << 15).saturating_sub(other) >= LITERAL_HEAVY
+}
+
+/// The share of code space (of 2^15) from which a block counts as literal-heavy.
+const LITERAL_HEAVY: u32 = 26_000;
+
 /// The entry for a symbol whose code has `code` bits in its table: `v` from the value
 /// function (flags and value, extra bit count in the low byte).
 #[inline(always)]
@@ -442,22 +470,60 @@ fn dist_value(sym: usize) -> u32 {
 }
 
 /// The two tables of a block, and the code-length code's (built for every dynamic block).
+/// One allocation for all three, the distance table right after the litlen table: the
+/// decoding loop reaches both from one register.
 pub(crate) struct Tables {
     pub(super) litlen: Table,
     pub(super) dist: Table,
     pre: Table,
     /// The tables hold the fixed codes: another fixed block needs no build.
     fixed: bool,
+    /// Most symbols the litlen code describes are literals (by its code lengths: a code of
+    /// L bits stands for a share of about 2^-L), which picks the decoding loop.
+    pub(super) literal_heavy: bool,
+    store: *mut [u32],
 }
+
+/// Where the distance table starts, from the litlen table's start.
+pub(super) const DIST_AT: usize = LITLEN_SIZE;
+const PRE_SIZE: usize = 1 << 7;
+
+// SAFETY: Tables owns its allocation; nothing else points into it.
+unsafe impl Send for Tables {}
 
 impl Default for Tables {
     fn default() -> Self {
+        let store = Box::into_raw(vec![INVALID; LITLEN_SIZE + DIST_SIZE + PRE_SIZE].into_boxed_slice());
+        let base = store as *mut u32;
+        // SAFETY: the parts are within the allocation and don't overlap.
+        let part = |at: usize, len: usize| Entries {
+            ptr: unsafe { base.add(at) },
+            len,
+        };
         Self {
-            litlen: Table::new(LITLEN_SIZE, LITLEN_BITS),
-            dist: Table::new(DIST_SIZE, DIST_BITS),
-            pre: Table::new(1 << 7, 7),
+            litlen: Table {
+                entries: part(0, LITLEN_SIZE),
+                bits: LITLEN_BITS,
+            },
+            dist: Table {
+                entries: part(DIST_AT, DIST_SIZE),
+                bits: DIST_BITS,
+            },
+            pre: Table {
+                entries: part(DIST_AT + DIST_SIZE, PRE_SIZE),
+                bits: 7,
+            },
             fixed: false,
+            literal_heavy: false,
+            store,
         }
+    }
+}
+
+impl Drop for Tables {
+    fn drop(&mut self) {
+        // SAFETY: from Box::into_raw in default, dropped once.
+        drop(unsafe { Box::from_raw(self.store) });
     }
 }
 
@@ -473,6 +539,7 @@ impl Tables {
         lens[280..].fill(8);
         self.litlen.build(&lens, litlen_value)?;
         self.dist.build(&[5; 32], dist_value)?;
+        self.literal_heavy = literal_heavy(&lens[256..]);
         self.fixed = true;
         Ok(())
     }
@@ -480,6 +547,23 @@ impl Tables {
     /// A dynamic block's header: the code-length code, then both codes' lengths. `strict`
     /// (for finding block starts by trial) also requires complete codes, as encoders write.
     pub(super) fn dynamic(&mut self, bits: &mut Bits, strict: bool) -> Res<()> {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("bmi2") {
+            // SAFETY: the CPU has BMI2.
+            return unsafe { self.dynamic_bmi2(bits, strict) };
+        }
+        self.dynamic_any(bits, strict)
+    }
+
+    /// [`Tables::dynamic`] compiled for BMI2 (variable shifts and masks in one instruction).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "bmi2")]
+    unsafe fn dynamic_bmi2(&mut self, bits: &mut Bits, strict: bool) -> Res<()> {
+        self.dynamic_any(bits, strict)
+    }
+
+    #[inline(always)]
+    fn dynamic_any(&mut self, bits: &mut Bits, strict: bool) -> Res<()> {
         // Whatever happens below, the tables no longer hold the fixed codes.
         self.fixed = false;
         bits.refill();
@@ -519,7 +603,14 @@ impl Tables {
                 let count = ((e >> 16) & 0xff) as usize + extra as usize;
                 let len = if e & PREV_LENGTH != 0 { prev } else { e >> 24 };
                 // SAFETY: i < n, and lens has 16 bytes past any n.
-                unsafe { (lens.as_mut_ptr().add(i) as *mut u128).write_unaligned(u128::from(len) * (u128::MAX / 255)) };
+                // (Two 8-byte stores: a 16-byte splat by multiplication would take a 128-bit
+                // multiply.)
+                let splat = u64::from(len) * 0x0101_0101_0101_0101;
+                unsafe {
+                    let at = lens.as_mut_ptr().add(i) as *mut u64;
+                    at.write_unaligned(splat);
+                    at.add(1).write_unaligned(splat);
+                }
                 prev = len;
                 i += count;
                 if i >= n {
@@ -534,6 +625,7 @@ impl Tables {
             return Err(Bad); // no end-of-block code
         }
         let lit_complete = self.litlen.build(&lens[..nlit], litlen_value)?;
+        self.literal_heavy = literal_heavy(&lens[256..nlit]);
         let dist_complete = self.dist.build(&lens[nlit..n], dist_value)?;
         // A lone distance code (length 1) is the one incomplete code encoders write.
         let lone_dist = lens[nlit..n].iter().filter(|&&l| l != 0).count() <= 1;
@@ -713,44 +805,102 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
 /// # Safety
 /// `out` must have room for `fast_end + 258 +` [`OUTPUT_SLACK`] bytes; matches copy from
 /// anywhere in `out[..pos]`.
-/// Where [`fast`] puts what it decodes.
+/// Where [`fast`] puts what it decodes: through a pointer to the next element (one register
+/// for the output position, the buffer's start needed only for the distance check).
 pub(super) trait Output {
-    /// Stores a literal at `pos`.
+    type Elem;
+    /// The buffer's start.
+    fn base(&self) -> *mut Self::Elem;
+    /// Stores a literal at `at`.
     ///
     /// # Safety
-    /// `pos` is in bounds.
-    unsafe fn literal(&mut self, pos: usize, byte: u8);
-    /// Copies a match of `n` bytes from `back` before `pos`; false if that's out of reach.
+    /// `at` is in bounds.
+    unsafe fn literal(at: *mut Self::Elem, byte: u8);
+    /// Copies a match of `n` bytes from `back` before `at`; false if that's out of reach.
     ///
     /// # Safety
-    /// `pos + n` and the copy's overshoot are in bounds.
-    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool;
+    /// `at + n` and the copy's overshoot are in bounds.
+    unsafe fn copy(&mut self, at: *mut Self::Elem, back: usize, n: usize) -> bool;
 }
 
 /// Plain bytes, copying from earlier in the same buffer.
 pub(super) struct Bytes(pub *mut u8);
 
 impl Output for Bytes {
+    type Elem = u8;
+
     #[inline(always)]
-    unsafe fn literal(&mut self, pos: usize, byte: u8) {
-        // SAFETY: the caller's.
-        unsafe { *self.0.add(pos) = byte };
+    fn base(&self) -> *mut u8 {
+        self.0
     }
 
     #[inline(always)]
-    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool {
-        if back > pos {
+    unsafe fn literal(at: *mut u8, byte: u8) {
+        // SAFETY: the caller's.
+        unsafe { *at = byte };
+    }
+
+    #[inline(always)]
+    unsafe fn copy(&mut self, at: *mut u8, back: usize, n: usize) -> bool {
+        // SAFETY: at is within the buffer.
+        if back > unsafe { at.offset_from(self.0) } as usize {
             return false;
         }
-        // SAFETY: back <= pos, and the caller's room.
-        unsafe { copy_match(self.0, pos, back, n) };
+        // SAFETY: back is within what's written, and the caller's room.
+        unsafe { copy_match(at, 0, back, n) };
         true
     }
 }
-
 #[inline(always)]
 pub(super) unsafe fn fast<O: Output>(t: &Tables, bits: &mut Bits, out: &mut O, pos_out: &mut usize, fast_end: usize) -> Option<Res<()>> {
-    let mut pos = *pos_out;
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("bmi2") {
+        // SAFETY: the CPU has BMI2; the rest is the caller's.
+        return unsafe {
+            if t.literal_heavy {
+                fast_bmi2::<O, true>(t, bits, out, pos_out, fast_end)
+            } else {
+                fast_bmi2::<O, false>(t, bits, out, pos_out, fast_end)
+            }
+        };
+    }
+    // SAFETY: the caller's.
+    unsafe {
+        if t.literal_heavy {
+            fast_any::<O, true>(t, bits, out, pos_out, fast_end)
+        } else {
+            fast_any::<O, false>(t, bits, out, pos_out, fast_end)
+        }
+    }
+}
+
+/// [`fast`] compiled for BMI2: extracting a value's extra bits takes `bzhi` and `shrx`, two
+/// instructions instead of seven.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi2")]
+unsafe fn fast_bmi2<O: Output, const LITERALS: bool>(
+    t: &Tables,
+    bits: &mut Bits,
+    out: &mut O,
+    pos_out: &mut usize,
+    fast_end: usize,
+) -> Option<Res<()>> {
+    // SAFETY: the caller's.
+    unsafe { fast_any::<O, LITERALS>(t, bits, out, pos_out, fast_end) }
+}
+
+#[inline(always)]
+/// `LITERALS`: the loop for literal-heavy blocks (four literals per refill; a literal run's
+/// next entry goes round the loop again), else the one for match-heavy blocks (entries
+/// consumed before they're looked at, a literal run going straight into its match).
+unsafe fn fast_any<O: Output, const LITERALS: bool>(
+    t: &Tables,
+    bits: &mut Bits,
+    out: &mut O,
+    pos_out: &mut usize,
+    fast_end: usize,
+) -> Option<Res<()>> {
+    let pos = *pos_out;
     let lit = t.litlen.entries.as_ptr();
     let (lit_mask, dist_mask) = ((1u64 << LITLEN_BITS) - 1, (1u64 << DIST_BITS) - 1);
     // SAFETY (all table reads): main-table indexes are masked to the main table's size, and
@@ -769,11 +919,18 @@ pub(super) unsafe fn fast<O: Output>(t: &Tables, bits: &mut Bits, out: &mut O, p
     let in_end = bits.max_next.saturating_sub(14);
     if pos < fast_end && bits.next < in_end {
         let data = bits.data.as_ptr();
-        let dist = t.dist.entries.as_ptr();
+        // At a fixed distance from the litlen table: no register of its own.
+        debug_assert!(std::ptr::eq(t.dist.entries.ptr, unsafe { t.litlen.entries.ptr.add(DIST_AT) }));
+        // SAFETY: the distance table is part of the same allocation, at DIST_AT.
+        let dist = unsafe { lit.add(DIST_AT) };
         // The input as a pointer (one register, not a base and an index).
         // SAFETY: next and in_end are within the padded input.
         let (mut inp, in_stop) = unsafe { (data.add(bits.next), data.add(in_end)) };
         let (mut buf, mut cnt) = (bits.buf, bits.cnt);
+        // The output as a pointer, too.
+        let base = out.base();
+        // SAFETY: pos and fast_end are within the output (the caller's).
+        let (mut dst, dst_end) = unsafe { (base.add(pos), base.add(fast_end)) };
         // `cnt` counts in its low byte only: consuming subtracts a whole entry (its low byte is
         // the bit count), and shifts take the entry as it is (x86 masks the count to 6 bits).
         // One instruction less between a table lookup and the next.
@@ -797,93 +954,188 @@ pub(super) unsafe fn fast<O: Output>(t: &Tables, bits: &mut Bits, out: &mut O, p
                 (buf & ((1u64 << $n) - 1)) as usize
             };
         }
+        // Each round consumes its preloaded entry first, then looks at what it was (as
+        // libdeflate does): a literal run that ends in a length code goes straight on to the
+        // match, refilling before the distance only if the bits ran low.
         refill!();
         let mut e = main!(buf);
-        let result = loop {
-            if e & LITERAL != 0 {
-                // Literal entries of the main table take at most 11 bits: four of them, and
-                // the next lookup's 11, fit in 56.
-                consume!(e);
-                // SAFETY (stores): pos < fast_end, with 258 bytes of room after.
-                unsafe { out.literal(pos, (e >> 16) as u8) };
-                e = main!(buf);
+        let result = if LITERALS {
+            loop {
                 if e & LITERAL != 0 {
+                    // Literal entries of the main table take at most 11 bits: four of them,
+                    // and the next lookup's 11, fit in 56.
                     consume!(e);
-                    unsafe { out.literal(pos + 1, (e >> 16) as u8) };
+                    // SAFETY (stores): dst < dst_end, with 258 bytes of room after.
+                    unsafe { O::literal(dst, (e >> 16) as u8) };
                     e = main!(buf);
+                    let mut k = 1;
                     if e & LITERAL != 0 {
                         consume!(e);
-                        unsafe { out.literal(pos + 2, (e >> 16) as u8) };
+                        unsafe { O::literal(dst.add(1), (e >> 16) as u8) };
                         e = main!(buf);
+                        k = 2;
                         if e & LITERAL != 0 {
                             consume!(e);
-                            unsafe { out.literal(pos + 3, (e >> 16) as u8) };
+                            unsafe { O::literal(dst.add(2), (e >> 16) as u8) };
                             e = main!(buf);
-                            pos += 1;
+                            k = 3;
+                            if e & LITERAL != 0 {
+                                consume!(e);
+                                unsafe { O::literal(dst.add(3), (e >> 16) as u8) };
+                                e = main!(buf);
+                                k = 4;
+                            }
                         }
-                        pos += 1;
                     }
-                    pos += 1;
+                    dst = unsafe { dst.add(k) };
+                    if dst >= dst_end || inp >= in_stop {
+                        break None;
+                    }
+                    refill!();
+                    continue;
                 }
-                pos += 1;
-                if pos >= fast_end || inp >= in_stop {
+                if e & (SUBTABLE | END | INVALID) != 0 {
+                    // The rare entries, behind one test.
+                    if e & SUBTABLE != 0 {
+                        consume!(e);
+                        let i = (e >> 16) as usize + peek!((e >> 8) & 0xf);
+                        e = unsafe { *lit.add(i) };
+                        if e & LITERAL != 0 {
+                            consume!(e);
+                            unsafe { O::literal(dst, (e >> 16) as u8) };
+                            dst = unsafe { dst.add(1) };
+                            refill!();
+                            e = main!(buf);
+                            if dst >= dst_end || inp >= in_stop {
+                                break None;
+                            }
+                            continue;
+                        }
+                    }
+                    if e & (END | INVALID) != 0 {
+                        consume!(e);
+                        break Some(if e & INVALID != 0 { Err(Bad) } else { Ok(()) });
+                    }
+                }
+                // A match: the length code and its extra bits (20 bits at most), then the
+                // distance code and its extra bits (28 at most): 48 of the 56.
+                let saved = buf;
+                consume!(e);
+                let n = value(e, saved);
+                let mut d = unsafe { *dist.add((buf & dist_mask) as usize) };
+                if d & SUBTABLE != 0 {
+                    consume!(d);
+                    let i = (d >> 16) as usize + peek!((d >> 8) & 0xf);
+                    d = unsafe { *dist.add(i) };
+                }
+                let saved = buf;
+                consume!(d);
+                let back = value(d, saved);
+                refill!();
+                e = main!(buf);
+                // SAFETY: dst + 258 + OUTPUT_SLACK is within out.
+                if d & INVALID != 0 || !unsafe { out.copy(dst, back, n) } {
+                    break Some(Err(Bad));
+                }
+                dst = unsafe { dst.add(n) };
+                if dst >= dst_end || inp >= in_stop {
                     break None;
                 }
-                refill!();
-                continue;
             }
-            if e & (SUBTABLE | END | INVALID) != 0 {
-                // The rare entries, behind one test.
-                if e & SUBTABLE != 0 {
+        } else {
+            loop {
+                let mut saved = buf;
+                consume!(e);
+                if e & LITERAL != 0 {
+                    // Three more literals at most (11 bits each in the main table): after three,
+                    // a length code with its extra bits (16, or a subtable pointer and 4 + 5) still
+                    // fits in the 56.
+                    // SAFETY (stores): pos < fast_end, with 258 bytes of room after.
+                    unsafe { O::literal(dst, (e >> 16) as u8) };
+                    dst = unsafe { dst.add(1) };
+                    e = main!(buf);
+                    saved = buf;
                     consume!(e);
-                    let i = (e >> 16) as usize + peek!((e >> 8) & 0xf);
-                    e = unsafe { *lit.add(i) };
                     if e & LITERAL != 0 {
-                        consume!(e);
-                        unsafe { out.literal(pos, (e >> 16) as u8) };
-                        pos += 1;
-                        refill!();
+                        unsafe { O::literal(dst, (e >> 16) as u8) };
+                        dst = unsafe { dst.add(1) };
                         e = main!(buf);
-                        if pos >= fast_end || inp >= in_stop {
-                            break None;
+                        saved = buf;
+                        consume!(e);
+                        if e & LITERAL != 0 {
+                            unsafe { O::literal(dst, (e >> 16) as u8) };
+                            dst = unsafe { dst.add(1) };
+                            e = main!(buf);
+                            saved = buf;
+                            consume!(e);
+                            if e & LITERAL != 0 {
+                                unsafe { O::literal(dst, (e >> 16) as u8) };
+                                dst = unsafe { dst.add(1) };
+                                e = main!(buf);
+                                refill!();
+                                if dst >= dst_end || inp >= in_stop {
+                                    break None;
+                                }
+                                continue;
+                            }
                         }
-                        continue;
                     }
                 }
-                if e & (END | INVALID) != 0 {
-                    consume!(e);
-                    break Some(if e & INVALID != 0 { Err(Bad) } else { Ok(()) });
+                if e & (SUBTABLE | END | INVALID) != 0 {
+                    // The rare entries, behind one test.
+                    if e & SUBTABLE != 0 {
+                        // The pointer's bits are consumed; now the subtable's entry.
+                        let i = (e >> 16) as usize + peek!((e >> 8) & 0xf);
+                        e = unsafe { *lit.add(i) };
+                        saved = buf;
+                        consume!(e);
+                        if e & LITERAL != 0 {
+                            unsafe { O::literal(dst, (e >> 16) as u8) };
+                            dst = unsafe { dst.add(1) };
+                            refill!();
+                            e = main!(buf);
+                            if dst >= dst_end || inp >= in_stop {
+                                break None;
+                            }
+                            continue;
+                        }
+                    }
+                    if e & (END | INVALID) != 0 {
+                        break Some(if e & INVALID != 0 { Err(Bad) } else { Ok(()) });
+                    }
                 }
-            }
-            // A match: the length code and its extra bits (20 bits at most), then the distance
-            // code and its extra bits (28 at most): 48 of the 56.
-            let saved = buf;
-            consume!(e);
-            let n = value(e, saved);
-            let mut d = unsafe { *dist.add((buf & dist_mask) as usize) };
-            if d & SUBTABLE != 0 {
+                // A match: the length is in the consumed entry and the bits it saved. The distance
+                // needs up to 28 bits (15 + 13): refill first if fewer are left.
+                let n = value(e, saved);
+                if (cnt as u8) < 28 {
+                    refill!();
+                }
+                let mut d = unsafe { *dist.add((buf & dist_mask) as usize) };
+                if d & SUBTABLE != 0 {
+                    consume!(d);
+                    let i = (d >> 16) as usize + peek!((d >> 8) & 0xf);
+                    d = unsafe { *dist.add(i) };
+                }
+                let saved = buf;
                 consume!(d);
-                let i = (d >> 16) as usize + peek!((d >> 8) & 0xf);
-                d = unsafe { *dist.add(i) };
-            }
-            let saved = buf;
-            consume!(d);
-            let back = value(d, saved);
-            refill!();
-            e = main!(buf);
-            // SAFETY: pos + 258 + OUTPUT_SLACK is within out.
-            if d & INVALID != 0 || !unsafe { out.copy(pos, back, n) } {
-                break Some(Err(Bad));
-            }
-            pos += n;
-            if pos >= fast_end || inp >= in_stop {
-                break None;
+                let back = value(d, saved);
+                refill!();
+                e = main!(buf);
+                // SAFETY: pos + 258 + OUTPUT_SLACK is within out.
+                if d & INVALID != 0 || !unsafe { out.copy(dst, back, n) } {
+                    break Some(Err(Bad));
+                }
+                dst = unsafe { dst.add(n) };
+                if dst >= dst_end || inp >= in_stop {
+                    break None;
+                }
             }
         };
         // SAFETY: inp is within the input.
         let next = unsafe { inp.offset_from(data) } as usize;
         (bits.buf, bits.cnt, bits.next) = (buf, cnt & 0xff, next);
-        *pos_out = pos;
+        // SAFETY: dst is within the output.
+        *pos_out = unsafe { dst.offset_from(base) } as usize;
         return result;
     }
     None
@@ -1062,6 +1314,99 @@ mod tests {
             (times[0].1 - times[1].1) / blocks,
             (times[0].2 - times[1].2) / blocks
         );
+    }
+
+    /// Where the time goes, instruction by instruction: a thread decodes $BRAR_BLOCK_DATA
+    /// (64 KB blocks) over and over with $BRAR_PROFILE (`ours` or `libdeflate`) while this one
+    /// samples its instruction pointer (suspend, read the context, resume). Prints the image
+    /// base and the most frequent addresses, to look up in `objdump -d` of the test binary.
+    #[test]
+    #[ignore]
+    fn profile_loop() {
+        #[repr(C, align(16))]
+        struct Context([u8; 1232]);
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SuspendThread(thread: isize) -> u32;
+            fn ResumeThread(thread: isize) -> u32;
+            fn GetThreadContext(thread: isize, context: *mut Context) -> i32;
+            fn GetModuleHandleW(name: *const u16) -> isize;
+        }
+        use std::os::windows::io::AsRawHandle;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let data = std::fs::read(std::env::var("BRAR_BLOCK_DATA").unwrap()).unwrap();
+        let data = data[..data.len().min(16 << 20)].to_vec();
+        let _ = &data;
+        let mut c = flate2::Compress::new(flate2::Compression::new(6), false);
+        let mut input = Vec::with_capacity(data.len());
+        for piece in data.chunks(65536) {
+            input.reserve(piece.len() + 1024);
+            c.compress_vec(piece, &mut input, flate2::FlushCompress::Sync).unwrap();
+        }
+        input.reserve(1024);
+        c.compress_vec(&[], &mut input, flate2::FlushCompress::Finish).unwrap();
+        let len = input.len();
+        input.resize(len + INPUT_PADDING, 0);
+        let ours = std::env::var("BRAR_PROFILE").as_deref() != Ok("libdeflate");
+        // $BRAR_PROFILE_ZIP: every Deflate entry of that ZIP instead.
+        let mut streams = vec![(input, len, data.len())];
+        if let Ok(path) = std::env::var("BRAR_PROFILE_ZIP") {
+            streams.clear();
+            let file = std::fs::File::open(path).unwrap();
+            let mut archive = ::zip::ZipArchive::new(&file).unwrap();
+            for i in 0..archive.len() {
+                let f = archive.by_index_raw(i).unwrap();
+                if f.compression() == ::zip::CompressionMethod::Deflated && f.size() > 0 {
+                    let mut input = vec![0u8; f.compressed_size() as usize + INPUT_PADDING];
+                    crate::whole::read_at(&file, f.data_start().unwrap(), &mut input[..f.compressed_size() as usize]).unwrap();
+                    streams.push((input, f.compressed_size() as usize, f.size() as usize));
+                }
+            }
+        }
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let worker = std::thread::spawn(move || {
+            let mut t = Tables::default();
+            let mut d = libdeflater::Decompressor::new();
+            let most = streams.iter().map(|s| s.2).max().unwrap();
+            let mut out = vec![0u8; most + OUTPUT_SLACK];
+            while !STOP.load(Ordering::Relaxed) {
+                for (input, len, size) in &streams {
+                    if ours {
+                        inflate(&mut t, input, *len, &mut out, *size).unwrap();
+                    } else {
+                        d.deflate_decompress(&input[..*len], &mut out[..*size]).unwrap();
+                    }
+                }
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let h = worker.as_raw_handle() as isize;
+        let mut hist = std::collections::HashMap::<u64, u32>::new();
+        let mut ctx = Context([0; 1232]);
+        for _ in 0..40_000 {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+            ctx.0[0x30..0x34].copy_from_slice(&0x0010_0001u32.to_le_bytes()); // CONTEXT_CONTROL
+            // SAFETY: a live thread's handle and an aligned CONTEXT.
+            unsafe {
+                SuspendThread(h);
+                if GetThreadContext(h, &mut ctx) != 0 {
+                    let rip = u64::from_le_bytes(ctx.0[0xf8..0x100].try_into().unwrap());
+                    *hist.entry(rip).or_default() += 1;
+                }
+                ResumeThread(h);
+            }
+        }
+        STOP.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        // SAFETY: the running executable's handle.
+        let base = unsafe { GetModuleHandleW(std::ptr::null()) } as u64;
+        let total: u32 = hist.values().sum();
+        let mut v: Vec<_> = hist.into_iter().collect();
+        v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        println!("base {base:#x}, {total} samples");
+        for (rip, n) in v.iter().take(5000) {
+            println!("{:#x} {:5} {:.2}%", rip - base, n, *n as f64 * 100.0 / total as f64);
+        }
     }
 
     #[test]
