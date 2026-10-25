@@ -18,6 +18,28 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-25 (21:16): ZIP against Windows' built-in extraction
+
+B-Rar against the three ways Windows extracts a ZIP by itself: `tar.exe` (bsdtar, in
+System32), PowerShell's `Expand-Archive`, and File Explorer's "Extract All" (the zipfldr shell
+extension, driven through `Shell.Application`). Wall time; B-Rar and tar best of 2, the others
+once. Defender real-time protection **on**. Output checked against B-Rar's (file count and
+total size).
+
+| Archive | B-Rar | tar.exe | Expand-Archive | Explorer "Extract All" |
+|---|---|---|---|---|
+| one 545 MB entry | **0.57 s** | 1.78 s | 5.69 s | 6.93 s |
+| 82 entries, 1.25 GB | **0.85 s** | 3.20 s | 9.24 s | 13.01 s |
+| 55,695 small files | **8.2 s** ¹ | 16.2 s ² | 751.7 s | stopped after >12 min |
+
+¹ The installed (MSIX, Store) build, 1.0.0.0: with Defender on, files created by an
+unpackaged B-Rar.exe are scanned one by one (44.1 s here for the development build). The
+installed build predates the own Deflate decoder, which doesn't matter here: the time is in
+creating the files.
+² One file short (47,013 of 47,014, 100 bytes missing).
+
+---
+
 ## 2026-10-25 (21:01): libdeflate removed: every ZIP Deflate entry uses B-Rar's own decoder
 
 Later the same day the single-core decoder caught up with libdeflate on small text too, and
