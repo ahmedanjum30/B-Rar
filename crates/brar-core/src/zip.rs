@@ -1,7 +1,9 @@
 //! ZIP: every entry is independently compressed, so all of them decode in parallel.
 //!
 //! Fast path (plain Deflate or stored entries, unencrypted): read the compressed bytes with
-//! positioned reads, decode in one libdeflate call, check the CRC, write in 1 MiB blocks.
+//! positioned reads, decode in one libdeflate call, check the CRC, write in 1 MiB blocks. A
+//! Deflate entry of [`PARALLEL_MIN`] or more decodes on all cores instead
+//! ([`crate::deflate::parallel`]), written as it decodes; libdeflate is its fallback.
 //! Measured on one core for a 545 MB entry: 1.33 s, against 2.36 s through the zip crate's
 //! reader over a memory map (page faults on the map cost 0.5 s, zlib-rs vs libdeflate 0.37 s,
 //! the reader layers 0.16 s). Everything else goes through the zip crate.
@@ -22,7 +24,12 @@ use zip::{
 };
 
 use crate::{
-    EntryInfo, Error, IoContext, Options, Result, mmap,
+    EntryInfo, Error, IoContext, Options, Result,
+    deflate::{
+        inflate::INPUT_PADDING,
+        parallel::{Failure, inflate_parallel},
+    },
+    mmap,
     sink::{SMALL_FILE, Sink},
     time,
     volumes::Input,
@@ -76,6 +83,9 @@ fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
     }
 }
 
+/// Deflate entries this big decode on all cores; smaller ones on one, through libdeflate.
+const PARALLEL_MIN: u64 = 64 << 20;
+
 /// What the fast path needs to know about an entry, taken from the central directory.
 struct Plain {
     name: String,
@@ -97,13 +107,21 @@ pub(crate) fn extract(input: &Input, sink: &Sink, opts: &Options) -> Result<()> 
         None => {
             let map = mmap(&input.first)?;
             let file = File::open(&input.first).at(&input.first)?;
-            extract_from(Cursor::new(&map[..]), &|offset, buf| read_at(&file, offset, buf), sink, opts)
+            extract_from(
+                Cursor::new(&map[..]),
+                &|offset, buf| read_at(&file, offset, buf),
+                Some(&map[..]),
+                sink,
+                opts,
+            )
         }
-        Some(parts) => extract_from(parts.clone(), &|offset, buf| parts.read_at(offset, buf), sink, opts),
+        Some(parts) => extract_from(parts.clone(), &|offset, buf| parts.read_at(offset, buf), None, sink, opts),
     }
 }
 
-fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt, sink: &Sink, opts: &Options) -> Result<()> {
+/// `map`: the whole archive in memory (a single-file archive), which big entries decode from
+/// directly.
+fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt, map: Option<&[u8]>, sink: &Sink, opts: &Options) -> Result<()> {
     let archive = open(reader)?;
 
     let mut jobs = Vec::with_capacity(archive.len());
@@ -148,6 +166,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
     // entries of an archive run back to back on one thread.)
     let password = opts.password.as_deref().map(str::as_bytes);
     let budget = Budget::new(FAST_PATH_BUDGET);
+    let threads = opts.thread_count();
     let failure = Mutex::new(None);
     opts.pool()?.scope_fifo(|s| {
         for (_, job) in &jobs {
@@ -157,7 +176,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
                     return;
                 }
                 let result = match job {
-                    Job::Fast(entry) => extract_fast(read_at, entry, sink, budget),
+                    Job::Fast(entry) => extract_fast(read_at, map, entry, sink, budget, threads),
                     Job::Fallback(i) => extract_entry(archive.clone(), *i, password, sink),
                 };
                 if let Err(e) = result {
@@ -169,13 +188,29 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
     failure.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
-fn extract_fast(read_at: ReadAt, e: &Plain, sink: &Sink, budget: &Budget) -> Result<()> {
+fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, threads: usize) -> Result<()> {
     sink.check()?;
     sink.start(&e.name);
+    let parallel = !e.stored && e.size >= PARALLEL_MIN && threads >= 4;
+    if parallel {
+        // Straight from the archive's memory map: no serial read of the whole entry first, the
+        // workers fault in their own pieces. The decoder reads up to INPUT_PADDING bytes past
+        // the data; a ZIP always has its central directory after it.
+        let (start, len) = (e.data_start as usize, e.packed as usize);
+        if let Some(input) = map.and_then(|m| m.get(start..start + len + INPUT_PADDING))
+            && extract_parallel(input, e, sink, threads)?
+        {
+            return Ok(());
+        }
+    }
     let _lease = budget.take(e.packed + if e.stored { 0 } else { e.size });
-
-    let mut packed = vec![0u8; e.packed as usize];
-    read_at(e.data_start, &mut packed).map_err(|_| Error::Damaged(e.name.clone()))?;
+    // The parallel decoder reads past the end in 8-byte loads: padding for it.
+    let mut packed = vec![0u8; e.packed as usize + if parallel { INPUT_PADDING } else { 0 }];
+    read_at(e.data_start, &mut packed[..e.packed as usize]).map_err(|_| Error::Damaged(e.name.clone()))?;
+    if parallel && extract_parallel(&packed, e, sink, threads)? {
+        return Ok(());
+    }
+    packed.truncate(e.packed as usize);
     let data = if e.stored {
         packed
     } else {
@@ -195,6 +230,32 @@ fn extract_fast(read_at: ReadAt, e: &Plain, sink: &Sink, budget: &Budget) -> Res
         sink.file_owned(&e.name, e.modified, data)
     } else {
         sink.file_bytes(&e.name, e.modified, &data)
+    }
+}
+
+/// A big Deflate entry on all cores, written as it decodes. `Ok(false)`: the parallel decoder
+/// gave up or the CRC didn't match (the partial file is removed); libdeflate takes over, and
+/// reports real damage.
+fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, threads: usize) -> Result<bool> {
+    let mut file = sink.begin_file(&e.name, Some(e.size), e.modified)?;
+    let mut crc = crc32fast::Hasher::new();
+    let result = inflate_parallel(packed, e.packed as usize, threads, &mut |b: &[u8]| {
+        crc.update(b);
+        file.write(b)
+    });
+    match result {
+        Ok(total) if total == e.size && crc.finalize() == e.crc => {
+            file.finish();
+            Ok(true)
+        }
+        Ok(_) | Err(Failure::Bad) => {
+            file.discard();
+            Ok(false)
+        }
+        Err(Failure::Stop(err)) => {
+            file.discard();
+            Err(err)
+        }
     }
 }
 
