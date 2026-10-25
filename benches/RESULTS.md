@@ -18,6 +18,51 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-25 (21:01): libdeflate removed: every ZIP Deflate entry uses B-Rar's own decoder
+
+Later the same day the single-core decoder caught up with libdeflate on small text too, and
+replaced it: ZIP entries under 64 MB (and the parallel decoder's fallback) now use B-Rar's
+decoder; libdeflate stays only as a benchmark yardstick (a dev-dependency, not in B-Rar.exe).
+
+### Decoder only, one core (CPU cycles per output byte, best of 3)
+
+| Data | B-Rar (earlier today) | B-Rar now | libdeflate | |
+|---|---|---|---|---|
+| `single.zip` (545 MB entry) | 6.02 | **5.97** | 6.41 | 7% faster |
+| `italian.zip` (79 entries) | 4.35 | **4.31** | 4.62 | 7% faster |
+| `corpus.zip` (45,089 small entries) | 2.59 | 2.41 | **2.38** | 1.3% slower |
+| table build + block header, per block | ~1,500 | **1,390** | 1,535 | 10% cheaper |
+
+What got it there: each block picks one of two loops from its code lengths (literal-heavy
+blocks: four literals per refill; match-heavy: each entry consumed before it's tested, a
+literal run going straight into its match); both loops, the header decoding and the table
+builds compiled for BMI2 and chosen at run time; all tables in one allocation (one base
+register in the loop). Found with a sampling profiler built into the tests (suspend the
+decoding thread, read its instruction pointer; no admin rights) and libdeflate's own
+disassembly.
+
+Tried and dropped: decoding in two passes (symbols to a token list, then the output: the
+first pass alone was slower than the whole one-pass decoder, 22 vs ~21 cycles per symbol);
+two streams interleaved on one thread (corpus 2.40 -> 2.50, 82 entries 4.31 -> 4.29: the
+decoder is limited by instructions and mispredicted branches, not by its dependency chain);
+a speculative distance lookup, 8-byte or partial match copies, 9/10-bit distance tables,
+running the fast loop to the very end of the stream, SIMD length counting.
+
+### End to end (B-Rar.exe), best of 3, Defender off
+
+| Archive | libdeflate for small entries | own decoder only |
+|---|---|---|
+| one 545 MB entry, extract / test | 0.585 s / 0.414 s | 0.581 s / 0.422 s |
+| 82 entries, 1.25 GB | 0.841 s / 0.623 s | 0.841 s / 0.626 s |
+| 55,695 small files | 6.191 s / 0.627 s | 5.989 s / 0.635 s |
+
+The same within noise: the extraction time is in file creation and the ordered output, not
+the decoder. B-Rar.exe: 4,338,688 -> 4,366,336 bytes (the decoder is built in several
+variants: two loops, with and without BMI2, for bytes and for the parallel decoder's
+16-bit output).
+
+---
+
 ## 2026-10-25: ZIP gets B-Rar's own Deflate decoder (parallel, and single-core vs libdeflate)
 
 ZIP entries of 64 MB and up are now decoded on all cores by B-Rar's own Deflate decoder

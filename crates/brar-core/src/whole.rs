@@ -1,4 +1,4 @@
-//! Helpers for the "whole file in memory" fast paths (ZIP via libdeflate, RAR5 via B-Rar's
+//! Helpers for the "whole file in memory" fast paths (ZIP and RAR5 via B-Rar's
 //! own decoder): positioned reads and a cap on how many bytes those paths hold at once.
 
 use std::{

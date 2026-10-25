@@ -1,12 +1,11 @@
 //! ZIP: every entry is independently compressed, so all of them decode in parallel.
 //!
 //! Fast path (plain Deflate or stored entries, unencrypted): read the compressed bytes with
-//! positioned reads, decode in one libdeflate call, check the CRC, write in 1 MiB blocks. A
-//! Deflate entry of [`PARALLEL_MIN`] or more decodes on all cores instead
-//! ([`crate::deflate::parallel`]), written as it decodes; libdeflate is its fallback.
-//! Measured on one core for a 545 MB entry: 1.33 s, against 2.36 s through the zip crate's
-//! reader over a memory map (page faults on the map cost 0.5 s, zlib-rs vs libdeflate 0.37 s,
-//! the reader layers 0.16 s). Everything else goes through the zip crate.
+//! positioned reads, decode them in one call to B-Rar's Deflate decoder
+//! ([`crate::deflate::inflate`]), check the CRC, write in 1 MiB blocks. A Deflate entry of
+//! [`PARALLEL_MIN`] or more decodes on all cores instead ([`crate::deflate::parallel`]),
+//! written as it decodes, with the single-core decoder as its fallback. Everything else
+//! (encryption, split archives, other methods) goes through the zip crate.
 
 use std::{
     cell::RefCell,
@@ -16,7 +15,6 @@ use std::{
     time::SystemTime,
 };
 
-use libdeflater::Decompressor;
 use zip::{
     CompressionMethod, ZipArchive,
     extra_fields::ExtraField,
@@ -26,7 +24,7 @@ use zip::{
 use crate::{
     EntryInfo, Error, IoContext, Options, Result,
     deflate::{
-        inflate::INPUT_PADDING,
+        inflate::{INPUT_PADDING, OUTPUT_SLACK, Tables, inflate},
         parallel::{Failure, inflate_parallel},
     },
     mmap,
@@ -37,7 +35,8 @@ use crate::{
 };
 
 thread_local! {
-    static DECOMPRESSOR: RefCell<Decompressor> = RefCell::new(Decompressor::new());
+    /// Each worker's Deflate decoding tables (built per block, reused across entries).
+    static TABLES: RefCell<Tables> = RefCell::new(Tables::default());
 }
 
 /// Positioned read of the archive's bytes (one file, or all parts of a split archive).
@@ -83,7 +82,7 @@ fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
     }
 }
 
-/// Deflate entries this big decode on all cores; smaller ones on one, through libdeflate.
+/// Deflate entries this big decode on all cores; smaller ones on one.
 const PARALLEL_MIN: u64 = 64 << 20;
 
 /// What the fast path needs to know about an entry, taken from the central directory.
@@ -204,23 +203,23 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
         }
     }
     let _lease = budget.take(e.packed + if e.stored { 0 } else { e.size });
-    // The parallel decoder reads past the end in 8-byte loads: padding for it.
-    let mut packed = vec![0u8; e.packed as usize + if parallel { INPUT_PADDING } else { 0 }];
-    read_at(e.data_start, &mut packed[..e.packed as usize]).map_err(|_| Error::Damaged(e.name.clone()))?;
+    // The decoders read past the end in 8-byte loads: padding for them.
+    let len = e.packed as usize;
+    let mut packed = vec![0u8; len + if e.stored { 0 } else { INPUT_PADDING }];
+    read_at(e.data_start, &mut packed[..len]).map_err(|_| Error::Damaged(e.name.clone()))?;
     if parallel && extract_parallel(&packed, e, sink, threads)? {
         return Ok(());
     }
-    packed.truncate(e.packed as usize);
     let data = if e.stored {
         packed
     } else {
-        let mut out = vec![0u8; e.size as usize];
-        let n = DECOMPRESSOR
-            .with_borrow_mut(|d| d.deflate_decompress(&packed, &mut out))
+        // Room for the decoder's overshoot past the end (see OUTPUT_SLACK), cut off after.
+        let size = e.size as usize;
+        let mut out = vec![0u8; size + OUTPUT_SLACK];
+        TABLES
+            .with_borrow_mut(|t| inflate(t, &packed, len, &mut out, size))
             .map_err(|_| Error::Damaged(e.name.clone()))?;
-        if n as u64 != e.size {
-            return Err(Error::Damaged(e.name.clone()));
-        }
+        out.truncate(size);
         out
     };
     if crc32fast::hash(&data) != e.crc {
@@ -234,8 +233,8 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
 }
 
 /// A big Deflate entry on all cores, written as it decodes. `Ok(false)`: the parallel decoder
-/// gave up or the CRC didn't match (the partial file is removed); libdeflate takes over, and
-/// reports real damage.
+/// gave up or the CRC didn't match (the partial file is removed); the single-core decoder
+/// takes over, and reports real damage.
 fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, threads: usize) -> Result<bool> {
     let mut file = sink.begin_file(&e.name, Some(e.size), e.modified)?;
     let mut crc = crc32fast::Hasher::new();

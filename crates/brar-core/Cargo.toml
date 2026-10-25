@@ -14,7 +14,6 @@ crc32fast = "1.5.3"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 hmac = "0.13.0"
 jiff = "0.2"
-libdeflater = "1.26.1"
 liblzma = { version = "0.4.9", default-features = false, features = ["parallel", "static"] }
 memmap2 = "0.9.11"
 rayon = "1.12.0"
@@ -27,4 +26,6 @@ zip = { version = "9.0.5", default-features = false, features = ["aes-crypto", "
 zstd = "0.14.3"
 
 [dev-dependencies]
+# Only to benchmark B-Rar's Deflate decoder against.
+libdeflater = "1.26.1"
 cbc = "0.2.1"

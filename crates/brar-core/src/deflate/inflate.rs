@@ -689,18 +689,13 @@ pub(super) unsafe fn copy_match(out: *mut u8, pos: usize, dist: usize, len: usiz
         }
     }
 }
-/// (Not used outside tests yet: ZIP entries below the parallel decoder's size still go to
-/// libdeflate, which this matches or beats except on small, match-heavy streams.)
-///
 /// Decodes a whole Deflate stream: `input` is the stream (`len` bytes) followed by
 /// [`INPUT_PADDING`] zeros; the output must be exactly `size` bytes, written to `out`, which
 /// has [`OUTPUT_SLACK`] more. Returns the bit position after the final block.
-#[cfg(test)]
 pub(crate) fn inflate(t: &mut Tables, input: &[u8], len: usize, out: &mut [u8], size: usize) -> Res<usize> {
     inflate_recording(t, input, len, out, size, None)
 }
 
-#[cfg(test)]
 /// [`inflate`], also listing where each block starts: (bit position, output position).
 pub(crate) fn inflate_recording(
     t: &mut Tables,
@@ -763,7 +758,6 @@ pub(crate) fn inflate_recording(
 /// One Huffman-coded block, up to its end-of-block code. The reader and position come in and
 /// go out by value, so they stay in registers. Every code either writes output or ends the
 /// block, so damaged input (or the zero padding past it) stops at `size` at the latest.
-#[cfg(test)]
 #[inline(never)]
 fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size: usize) -> Res<(Bits<'a>, usize)> {
     // SAFETY: out has size + OUTPUT_SLACK bytes; fast stops 258 short of size.
