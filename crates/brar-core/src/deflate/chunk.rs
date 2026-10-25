@@ -125,16 +125,16 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
         }
         let base = out.as_mut_ptr();
         bits.refill();
-        let mut e = lit.decode(&mut bits);
+        let (mut e, mut v) = lit.decode(&mut bits);
         // SAFETY (stores and copies): the reserve above left ROUND values after pos.
         if e & LITERAL != 0 {
             unsafe { *base.add(pos) = (e >> 16) as u16 };
             pos += 1;
-            e = lit.decode(&mut bits);
+            (e, v) = lit.decode(&mut bits);
             if e & LITERAL != 0 {
                 unsafe { *base.add(pos) = (e >> 16) as u16 };
                 pos += 1;
-                e = lit.decode(&mut bits);
+                (e, v) = lit.decode(&mut bits);
                 if e & LITERAL != 0 {
                     unsafe { *base.add(pos) = (e >> 16) as u16 };
                     pos += 1;
@@ -146,12 +146,11 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
             break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
         }
         bits.refill();
-        let n = (e >> 16) as usize + bits.take((e >> 8) & 0xf) as usize;
-        let d = dist.decode(&mut bits);
+        let n = v;
+        let (d, back) = dist.decode(&mut bits);
         if d & INVALID != 0 {
             break Err(Bad);
         }
-        let back = (d >> 16) as usize + bits.take((d >> 8) & 0xf) as usize;
         if pos + n > max_out || back > pos + WINDOW {
             break Err(Bad);
         }
@@ -221,16 +220,16 @@ fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max
         }
         let base = out.as_mut_ptr();
         bits.refill();
-        let mut e = lit.decode(&mut bits);
+        let (mut e, mut v) = lit.decode(&mut bits);
         // SAFETY (stores and copies): the reserve above left ROUND bytes after pos.
         if e & LITERAL != 0 {
             unsafe { *base.add(pos) = (e >> 16) as u8 };
             pos += 1;
-            e = lit.decode(&mut bits);
+            (e, v) = lit.decode(&mut bits);
             if e & LITERAL != 0 {
                 unsafe { *base.add(pos) = (e >> 16) as u8 };
                 pos += 1;
-                e = lit.decode(&mut bits);
+                (e, v) = lit.decode(&mut bits);
                 if e & LITERAL != 0 {
                     unsafe { *base.add(pos) = (e >> 16) as u8 };
                     pos += 1;
@@ -242,12 +241,11 @@ fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max
             break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
         }
         bits.refill();
-        let n = (e >> 16) as usize + bits.take((e >> 8) & 0xf) as usize;
-        let d = dist.decode(&mut bits);
+        let n = v;
+        let (d, back) = dist.decode(&mut bits);
         if d & INVALID != 0 {
             break Err(Bad);
         }
-        let back = (d >> 16) as usize + bits.take((d >> 8) & 0xf) as usize;
         if back > pos || pos + n > max_out {
             break Err(Bad);
         }

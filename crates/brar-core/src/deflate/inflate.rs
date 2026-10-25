@@ -88,9 +88,12 @@ impl<'a> Bits<'a> {
     }
 }
 
-// Table entries (u32): bits 0..8 = bits to consume; bits 8..12 = extra bits after the code;
-// bit 12 = literal; bit 13 = end of block; bit 14 = subtable pointer; bit 15 = invalid code;
-// bits 16.. = the literal byte, the length or distance base, or the subtable's first index.
+// Table entries (u32): bits 0..6 = bits to consume, the code and its extra bits together;
+// bits 8..12 = the code's own bits (the extra bits sit above them); bit 12 = literal;
+// bit 13 = end of block; bit 14 = subtable pointer; bit 15 = invalid code; bits 16.. = the
+// literal byte, the length or distance base, or the subtable's first index. A subtable
+// pointer consumes the main table's bits and keeps the subtable's index bits in 8..12.
+// Bits 6..8 stay zero, so an entry can be a shift count as it is.
 pub(super) const LITERAL: u32 = 1 << 12;
 pub(super) const END: u32 = 1 << 13;
 const SUBTABLE: u32 = 1 << 14;
@@ -129,21 +132,39 @@ impl Table {
         }
     }
 
-    /// Builds the table for code lengths `lens` (0 = unused); `value(symbol)` gives the entry
-    /// bits above the code length. Over-subscribed codes are rejected; incomplete ones are
-    /// allowed (Deflate permits a lone distance code), their gaps decode as invalid.
+    /// Builds the table for code lengths `lens` (0 = unused); `value(symbol)` gives the entry's
+    /// flags and value (bits 12..) and its extra bit count (bits 0..8). Over-subscribed codes
+    /// are rejected; incomplete ones are allowed (Deflate permits a lone distance code), their
+    /// gaps decode as invalid.
     fn build(&mut self, lens: &[u8], value: impl Fn(usize) -> u32) -> Res<bool> {
-        let mut count = [0u32; 16];
-        for &l in lens {
-            count[usize::from(l)] += 1;
+        // The lengths in four quarters (zero-padded), each with its own counters: counting
+        // and sorting run as four independent chains (runs of equal lengths would otherwise
+        // make each update wait for the previous one's store).
+        let mut padded = [0u8; 320];
+        padded[..lens.len()].copy_from_slice(lens);
+        let q = lens.len().div_ceil(4);
+        let mut counts = [[0u16; 16]; 4];
+        for j in 0..q {
+            for (k, c) in counts.iter_mut().enumerate() {
+                c[usize::from(padded[k * q + j] & 15)] += 1;
+            }
         }
-        count[0] = 0;
+        let mut count = [0u32; 16];
+        for (l, c) in count.iter_mut().enumerate().skip(1) {
+            *c = u32::from(counts[0][l] + counts[1][l] + counts[2][l] + counts[3][l]);
+        }
         let mut left = 1i32;
         for c in &count[1..] {
             left = (left << 1) - *c as i32;
             if left < 0 {
                 return Err(Bad); // over-subscribed
             }
+        }
+        // A complete code covers every entry; only an incomplete one leaves gaps to mark.
+        let complete = left == 0;
+        if complete {
+            self.build_complete(&padded, q, &counts, &count, value);
+            return Ok(true);
         }
         // First canonical code of each length.
         let mut next = [0u32; 16];
@@ -153,8 +174,6 @@ impl Table {
             next[l] = code;
         }
         let bits = self.bits;
-        // A complete code covers every entry; only an incomplete one leaves gaps to mark.
-        let complete = left == 0;
         if !complete {
             self.entries[..1 << bits].fill(INVALID);
         }
@@ -200,8 +219,9 @@ impl Table {
             let l = u32::from(l);
             let rev = assigned[sym];
             let v = value(sym);
+            let entry = |code: u32| compose(v, code);
             if l <= bits {
-                let e = v | l;
+                let e = entry(l);
                 let mut i = rev as usize;
                 while i < 1 << bits {
                     self.entries[i] = e;
@@ -210,7 +230,7 @@ impl Table {
             } else {
                 let p = (rev & ((1 << bits) - 1)) as usize;
                 let sb = u32::from(sub_bits[p]);
-                let e = v | (l - bits);
+                let e = entry(l - bits);
                 let mut i = (rev >> bits) as usize;
                 while i < 1 << sb {
                     self.entries[sub_start[p] as usize + i] = e;
@@ -221,36 +241,204 @@ impl Table {
         Ok(complete)
     }
 
-    /// The entry for the next code, its code bits consumed (extra bits not yet).
+    /// [`Table::build`] for a complete code (what encoders write, so nearly every table): codes
+    /// in canonical order, shortest first, each written once into a table only as big as its
+    /// length needs, the table doubled (copied onto its upper half) at each longer length.
+    /// Codes longer than the main table's bits go to subtables, one per shared prefix.
+    /// `padded` and `counts`: the lengths in quarters of `q`, and each quarter's counts.
+    fn build_complete(&mut self, padded: &[u8; 320], q: usize, counts: &[[u16; 16]; 4], count: &[u32; 16], value: impl Fn(usize) -> u32) {
+        // Symbols sorted by code length (stable: canonical order within a length).
+        let mut offset = [0u16; 17];
+        for l in 1..16 {
+            offset[l + 1] = offset[l] + count[l] as u16;
+        }
+        // Each quarter's place for its symbols of each length, after the earlier quarters';
+        // unused symbols (length 0) go past the end, without a branch.
+        let mut place = [[0u16; 16]; 4];
+        for l in 1..16 {
+            let mut o = offset[l];
+            for k in 0..4 {
+                place[k][l] = o;
+                o += counts[k][l];
+            }
+        }
+        for (k, p) in place.iter_mut().enumerate() {
+            p[0] = 288 + 80 * k as u16;
+        }
+        let mut sorted = [0u16; 288 + 4 * 80];
+        for j in 0..q {
+            for (k, p) in place.iter_mut().enumerate() {
+                let sym = k * q + j;
+                let o = &mut p[usize::from(padded[sym] & 15)];
+                sorted[usize::from(*o)] = sym as u16;
+                *o += 1;
+            }
+        }
+        let entry = |sym: u16, code: u32| compose(value(usize::from(sym)), code);
+        let bits = self.bits as usize;
+
+        let t = &mut self.entries;
+        let mut syms = sorted.iter();
+        // The code being assigned, bit-reversed (as the table indexes it): the next one in
+        // canonical order is a reversed increment.
+        let mut code = 0usize;
+        let mut len = 1;
+        while count[len] == 0 {
+            len += 1;
+        }
+        let mut left = count[len];
+        let mut end = 1usize << len;
+        while len <= bits {
+            loop {
+                t[code] = entry(*syms.next().unwrap(), len as u32);
+                if code == end - 1 {
+                    // The last code (all ones): the table is full at this length.
+                    while end < 1 << bits {
+                        t.copy_within(..end, end);
+                        end <<= 1;
+                    }
+                    return;
+                }
+                let bit = 1 << (usize::BITS - 1 - (code ^ (end - 1)).leading_zeros());
+                code = (code & (bit - 1)) | bit;
+                left -= 1;
+                if left == 0 {
+                    break;
+                }
+            }
+            loop {
+                len += 1;
+                if len <= bits {
+                    t.copy_within(..end, end);
+                    end <<= 1;
+                }
+                left = count[len];
+                if left != 0 {
+                    break;
+                }
+            }
+        }
+        // Longer codes: the main table is complete up to here; subtables follow it.
+        let mask = (1 << bits) - 1;
+        let mut end = 1usize << bits;
+        let (mut prefix, mut start) = (usize::MAX, 0);
+        loop {
+            if code & mask != prefix {
+                // A new prefix: its subtable is as big as its longest code needs.
+                prefix = code & mask;
+                start = end;
+                let mut sub = len - bits;
+                let mut used = left;
+                while used < 1 << sub {
+                    sub += 1;
+                    used = (used << 1) + count[bits + sub];
+                }
+                end = start + (1 << sub);
+                t[prefix] = SUBTABLE | (start as u32) << 16 | (sub as u32) << 8 | bits as u32;
+            }
+            let e = entry(*syms.next().unwrap(), (len - bits) as u32);
+            let mut i = start + (code >> bits);
+            while i < end {
+                t[i] = e;
+                i += 1 << (len - bits);
+            }
+            if code == (1 << len) - 1 {
+                return;
+            }
+            let bit = 1 << (usize::BITS - 1 - (code ^ ((1 << len) - 1)).leading_zeros());
+            code = (code & (bit - 1)) | bit;
+            left -= 1;
+            while left == 0 {
+                len += 1;
+                left = count[len];
+            }
+        }
+    }
+
+    /// The next code's entry and its value (the literal byte, the length or the distance, extra
+    /// bits included), all its bits consumed.
     #[inline(always)]
-    pub(super) fn decode(&self, bits: &mut Bits) -> u32 {
+    pub(super) fn decode(&self, bits: &mut Bits) -> (u32, usize) {
         // SAFETY: the index is below 2^self.bits, the main table's size.
         let mut e = unsafe { *self.entries.get_unchecked(bits.peek(self.bits) as usize) };
         if e & SUBTABLE != 0 {
-            bits.consume(e & 0xff);
+            bits.consume(e & 0x3f);
             let i = (e >> 16) + bits.peek((e >> 8) & 0xf);
             // SAFETY: subtables were sized for every index of their bit count.
             e = unsafe { *self.entries.get_unchecked(i as usize) };
         }
-        bits.consume(e & 0xff);
-        e
+        let saved = bits.buf;
+        bits.consume(e & 0x3f);
+        (e, value(e, saved))
     }
 }
 
-fn litlen_value(sym: usize) -> u32 {
-    match sym {
-        0..=255 => LITERAL | (sym as u32) << 16,
-        256 => END,
-        257..=285 => u32::from(LENGTH_BASE[sym - 257]) << 16 | u32::from(LENGTH_EXTRA[sym - 257]) << 8,
-        _ => INVALID,
+/// The entry for a symbol whose code has `code` bits in its table: `v` from the value
+/// function (flags and value, extra bit count in the low byte).
+#[inline(always)]
+fn compose(v: u32, code: u32) -> u32 {
+    // Arithmetic, not a branch on the kind: v + code (bit count, after the extra bits'), plus
+    // code << 8 unless a literal.
+    let not_literal = ((v >> 12) & 1) ^ 1;
+    v + code * (1 + (not_literal << 8))
+}
+
+/// An entry's value (not for literals, whose byte is `e >> 16`): its base plus the extra bits that followed its code in `saved` (the bit
+/// buffer before the entry was consumed).
+#[inline(always)]
+fn value(e: u32, saved: u64) -> usize {
+    let extra = (saved & ((1u64 << (e & 0x3f)) - 1)) >> ((e >> 8) & 0xf);
+    (e >> 16) as usize + extra as usize
+}
+
+/// Each litlen symbol's flags, value and extra bit count, for [`Table::build`] (a lookup:
+/// symbols come sorted by code length, so a `match` on them would mispredict).
+const LITLEN_VALUES: [u32; 288] = {
+    let mut v = [INVALID; 288];
+    let mut s = 0;
+    while s < 286 {
+        v[s] = match s {
+            0..=255 => LITERAL | (s as u32) << 16,
+            256 => END,
+            _ => (LENGTH_BASE[s - 257] as u32) << 16 | LENGTH_EXTRA[s - 257] as u32,
+        };
+        s += 1;
     }
+    v
+};
+
+const DIST_VALUES: [u32; 32] = {
+    let mut v = [INVALID; 32];
+    let mut s = 0;
+    while s < 30 {
+        v[s] = (DIST_BASE[s] as u32) << 16 | DIST_EXTRA[s] as u32;
+        s += 1;
+    }
+    v
+};
+
+/// The code-length code's symbols: the length to write (bits 24..), how many times (bits
+/// 16..24, plus the extra bits), PREV_LENGTH for "the previous length" (16).
+const PRE_VALUES: [u32; 19] = {
+    let mut v = [0; 19];
+    let mut s = 0;
+    while s < 16 {
+        v[s] = (s as u32) << 24 | 1 << 16;
+        s += 1;
+    }
+    v[16] = PREV_LENGTH | 3 << 16 | 2;
+    v[17] = 3 << 16 | 3;
+    v[18] = 11 << 16 | 7;
+    v
+};
+const PREV_LENGTH: u32 = END;
+
+fn litlen_value(sym: usize) -> u32 {
+    LITLEN_VALUES[sym]
 }
 
 fn dist_value(sym: usize) -> u32 {
-    match sym {
-        0..=29 => u32::from(DIST_BASE[sym]) << 16 | u32::from(DIST_EXTRA[sym]) << 8,
-        _ => INVALID,
-    }
+    DIST_VALUES[sym]
 }
 
 /// The two tables of a block, and the code-length code's (built for every dynamic block).
@@ -258,6 +446,8 @@ pub(crate) struct Tables {
     pub(super) litlen: Table,
     pub(super) dist: Table,
     pre: Table,
+    /// The tables hold the fixed codes: another fixed block needs no build.
+    fixed: bool,
 }
 
 impl Default for Tables {
@@ -266,12 +456,16 @@ impl Default for Tables {
             litlen: Table::new(LITLEN_SIZE, LITLEN_BITS),
             dist: Table::new(DIST_SIZE, DIST_BITS),
             pre: Table::new(1 << 7, 7),
+            fixed: false,
         }
     }
 }
 
 impl Tables {
     pub(super) fn fixed(&mut self) -> Res<()> {
+        if self.fixed {
+            return Ok(());
+        }
         let mut lens = [0u8; 288];
         lens[..144].fill(8);
         lens[144..256].fill(9);
@@ -279,12 +473,15 @@ impl Tables {
         lens[280..].fill(8);
         self.litlen.build(&lens, litlen_value)?;
         self.dist.build(&[5; 32], dist_value)?;
+        self.fixed = true;
         Ok(())
     }
 
     /// A dynamic block's header: the code-length code, then both codes' lengths. `strict`
     /// (for finding block starts by trial) also requires complete codes, as encoders write.
     pub(super) fn dynamic(&mut self, bits: &mut Bits, strict: bool) -> Res<()> {
+        // Whatever happens below, the tables no longer hold the fixed codes.
+        self.fixed = false;
         bits.refill();
         let nlit = bits.take(5) as usize + 257;
         let ndist = bits.take(5) as usize + 1;
@@ -298,43 +495,40 @@ impl Tables {
             clens[i] = bits.take(3) as u8;
         }
         let pre = &mut self.pre;
-        if !pre.build(&clens, |s| (s as u32) << 16)? && strict {
+        if !pre.build(&clens, |s| PRE_VALUES[s])? && strict {
             return Err(Bad);
         }
-        let mut lens = [0u8; 286 + 30];
+        // Every symbol the same way, no branch on which: 16 copies of its length stored (runs
+        // over 16 are zeros, which the array already holds past the last store), then the
+        // position moved by its count.
+        let mut lens = [0u8; 286 + 30 + 16];
         let n = nlit + ndist;
-        let mut i = 0;
-        while i < n {
+        let (mut i, mut prev) = (0, 0u32);
+        // Three symbols per refill (14 bits each at most: a 7-bit code and 7 extra bits).
+        'symbols: while i < n {
             bits.refill();
-            let e = pre.decode(bits);
-            if e & INVALID != 0 {
-                return Err(Bad);
-            }
-            match e >> 16 {
-                l @ 0..=15 => {
-                    lens[i] = l as u8;
-                    i += 1;
+            for _ in 0..3 {
+                // SAFETY: masked to the precode table's 7 bits; its codes are 7 bits at most.
+                let e = unsafe { *pre.entries.get_unchecked(bits.peek(7) as usize) };
+                let saved = bits.buf;
+                bits.consume(e & 0x3f);
+                if e & INVALID != 0 || (e & PREV_LENGTH != 0 && i == 0) {
+                    return Err(Bad);
                 }
-                16 => {
-                    if i == 0 {
-                        return Err(Bad);
-                    }
-                    let r = 3 + bits.take(2) as usize;
-                    if i + r > n {
-                        return Err(Bad);
-                    }
-                    let prev = lens[i - 1];
-                    lens[i..i + r].fill(prev);
-                    i += r;
-                }
-                s => {
-                    let r = if s == 17 { 3 + bits.take(3) } else { 11 + bits.take(7) } as usize;
-                    if i + r > n {
-                        return Err(Bad);
-                    }
-                    i += r; // zeros already
+                let extra = (saved & ((1u64 << (e & 0x3f)) - 1)) >> ((e >> 8) & 0xf);
+                let count = ((e >> 16) & 0xff) as usize + extra as usize;
+                let len = if e & PREV_LENGTH != 0 { prev } else { e >> 24 };
+                // SAFETY: i < n, and lens has 16 bytes past any n.
+                unsafe { (lens.as_mut_ptr().add(i) as *mut u128).write_unaligned(u128::from(len) * (u128::MAX / 255)) };
+                prev = len;
+                i += count;
+                if i >= n {
+                    break 'symbols;
                 }
             }
+        }
+        if i > n {
+            return Err(Bad);
         }
         if lens[256] == 0 {
             return Err(Bad); // no end-of-block code
@@ -350,41 +544,61 @@ impl Tables {
     }
 }
 
-/// Copies `len` bytes from `dist` back to `out[pos..]`; may write up to 7 bytes past
-/// (`dist` >= 8) or do a pattern copy (`dist` < 8). Needs dist <= pos and slack after.
+/// Copies `len` (3..=258) bytes from `dist` back to `out[pos..]`; may write up to 48 bytes
+/// past the match's end. Needs dist <= pos and [`OUTPUT_SLACK`] bytes of room after.
 #[inline(always)]
 pub(super) unsafe fn copy_match(out: *mut u8, pos: usize, dist: usize, len: usize) {
     // SAFETY: the caller guarantees 1 <= dist <= pos and len + OUTPUT_SLACK bytes of room.
     unsafe {
         let dst = out.add(pos);
         let src = dst.sub(dist);
-        if dist >= 8 {
+        if dist >= 16 {
+            // 16 bytes at a time (whole vectors: nothing left for the compiler to vectorize,
+            // with the alias checks and registers that would take). Most matches are short:
+            // 48 bytes without a loop branch.
+            let chunk = |i: usize| (dst.add(i) as *mut u128).write_unaligned((src.add(i) as *const u128).read_unaligned());
+            chunk(0);
+            chunk(16);
+            chunk(32);
+            let mut i = 48;
+            while i < len {
+                chunk(i);
+                i += 16;
+            }
+        } else if dist >= 8 {
+            let word = |i: usize| (dst.add(i) as *mut u64).write_unaligned((src.add(i) as *const u64).read_unaligned());
             let mut i = 0;
             while i < len {
-                std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), 8);
+                word(i);
                 i += 8;
             }
         } else if dist == 1 {
-            std::ptr::write_bytes(dst, *src, len);
+            let v = u64::from(*src) * 0x0101_0101_0101_0101;
+            let mut i = 0;
+            while i < len {
+                (dst.add(i) as *mut u64).write_unaligned(v);
+                i += 8;
+            }
         } else {
             // A short repeating pattern: byte by byte until it spans a whole number of periods
             // that's at least 8 bytes, then 8 at a time from that far back.
-            let step = dist * 8usize.div_ceil(dist);
+            // dist * ceil(8 / dist), from a table (a division costs more than the copy).
+            const STEP: [u8; 8] = [0, 8, 8, 9, 8, 10, 12, 14];
+            let step = usize::from(STEP[dist]);
             let head = step.min(len);
             for i in 0..head {
                 *dst.add(i) = *src.add(i);
             }
             let mut i = head;
             while i < len {
-                std::ptr::copy_nonoverlapping(dst.add(i - step), dst.add(i), 8);
+                (dst.add(i) as *mut u64).write_unaligned((dst.add(i - step) as *const u64).read_unaligned());
                 i += 8;
             }
         }
     }
 }
-
-/// (The parallel decoder decodes pieces with its own block functions; this whole-stream
-/// decoder is the reference its tests compare against.)
+/// (Not used outside tests yet: ZIP entries below the parallel decoder's size still go to
+/// libdeflate, which this matches or beats except on small, match-heavy streams.)
 ///
 /// Decodes a whole Deflate stream: `input` is the stream (`len` bytes) followed by
 /// [`INPUT_PADDING`] zeros; the output must be exactly `size` bytes, written to `out`, which
@@ -394,8 +608,8 @@ pub(crate) fn inflate(t: &mut Tables, input: &[u8], len: usize, out: &mut [u8], 
     inflate_recording(t, input, len, out, size, None)
 }
 
-/// [`inflate`], also listing where each block starts: (bit position, output position).
 #[cfg(test)]
+/// [`inflate`], also listing where each block starts: (bit position, output position).
 pub(crate) fn inflate_recording(
     t: &mut Tables,
     input: &[u8],
@@ -433,11 +647,11 @@ pub(crate) fn inflate_recording(
             }
             1 => {
                 t.fixed()?;
-                (bits, pos) = block(t, bits, len, out.as_mut_ptr(), pos, size)?;
+                (bits, pos) = block(t, bits, out.as_mut_ptr(), pos, size)?;
             }
             2 => {
                 t.dynamic(&mut bits, false)?;
-                (bits, pos) = block(t, bits, len, out.as_mut_ptr(), pos, size)?;
+                (bits, pos) = block(t, bits, out.as_mut_ptr(), pos, size)?;
             }
             _ => return Err(Bad),
         }
@@ -455,34 +669,154 @@ pub(crate) fn inflate_recording(
 }
 
 /// One Huffman-coded block, up to its end-of-block code. The reader and position come in and
-/// go out by value, so they stay in registers.
+/// go out by value, so they stay in registers. Every code either writes output or ends the
+/// block, so damaged input (or the zero padding past it) stops at `size` at the latest.
 #[cfg(test)]
 #[inline(never)]
-fn block<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: *mut u8, mut pos: usize, size: usize) -> Res<(Bits<'a>, usize)> {
-    let (lit, dist) = (&t.litlen, &t.dist);
-    // Away from the output's end: a match (258) and three literals always fit.
-    let fast_end = size.saturating_sub(258 + 3);
-    loop {
-        // 56+ bits: three literal codes (3 x 15), or a length code with its extra bits and a
-        // distance code with its extra bits (15 + 5 + 15 + 13 = 48).
-        bits.refill();
-        let mut e = lit.decode(&mut bits);
-        if e & LITERAL != 0 && pos < fast_end {
-            // SAFETY (stores): pos + 3 <= fast_end + 3 <= size.
-            unsafe { *out.add(pos) = (e >> 16) as u8 };
-            pos += 1;
-            e = lit.decode(&mut bits);
+fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size: usize) -> Res<(Bits<'a>, usize)> {
+    let lit = t.litlen.entries.as_ptr();
+    let (lit_mask, dist_mask) = ((1u64 << LITLEN_BITS) - 1, (1u64 << DIST_BITS) - 1);
+    // SAFETY (all table reads): main-table indexes are masked to the main table's size, and
+    // subtable indexes stay inside the subtables `build` sized for them.
+    macro_rules! main {
+        ($buf:expr) => {
+            unsafe { *lit.add(($buf & lit_mask) as usize) }
+        };
+    }
+
+    // The fast loop: a whole match (258 bytes) always fits before `size`, so no output checks,
+    // and the input has room for a round's refills (two, of up to 7 bytes each), so no clamp.
+    // The reader's state lives in locals (registers) until the loop ends. Each round starts
+    // with the bit buffer at 56+ bits and the next litlen entry already looked up
+    // ("preloaded", overlapping the lookup with the previous round's stores).
+    let fast_end = size.saturating_sub(258);
+    let in_end = bits.max_next.saturating_sub(14);
+    if pos < fast_end && bits.next < in_end {
+        let data = bits.data.as_ptr();
+        let dist = t.dist.entries.as_ptr();
+        // The input as a pointer (one register, not a base and an index).
+        // SAFETY: next and in_end are within the padded input.
+        let (mut inp, in_stop) = unsafe { (data.add(bits.next), data.add(in_end)) };
+        let (mut buf, mut cnt) = (bits.buf, bits.cnt);
+        // `cnt` counts in its low byte only: consuming subtracts a whole entry (its low byte is
+        // the bit count), and shifts take the entry as it is (x86 masks the count to 6 bits).
+        // One instruction less between a table lookup and the next.
+        macro_rules! refill {
+            () => {
+                // SAFETY: inp < max_next (see in_end), and the input has 8 bytes past that.
+                let w = unsafe { (inp as *const u64).read_unaligned() };
+                buf |= u64::from_le(w) << (cnt as u8);
+                inp = unsafe { inp.add(((63 - cnt as u8) >> 3) as usize) };
+                cnt |= 56;
+            };
+        }
+        macro_rules! consume {
+            ($e:expr) => {
+                buf = buf.wrapping_shr($e);
+                cnt = cnt.wrapping_sub($e);
+            };
+        }
+        macro_rules! peek {
+            ($n:expr) => {
+                (buf & ((1u64 << $n) - 1)) as usize
+            };
+        }
+        refill!();
+        let mut e = main!(buf);
+        let result = loop {
             if e & LITERAL != 0 {
+                // Literal entries of the main table take at most 11 bits: four of them, and
+                // the next lookup's 11, fit in 56.
+                consume!(e);
+                // SAFETY (stores): pos + 4 <= fast_end, 258 below size.
                 unsafe { *out.add(pos) = (e >> 16) as u8 };
-                pos += 1;
-                e = lit.decode(&mut bits);
+                e = main!(buf);
                 if e & LITERAL != 0 {
-                    unsafe { *out.add(pos) = (e >> 16) as u8 };
+                    consume!(e);
+                    unsafe { *out.add(pos + 1) = (e >> 16) as u8 };
+                    e = main!(buf);
+                    if e & LITERAL != 0 {
+                        consume!(e);
+                        unsafe { *out.add(pos + 2) = (e >> 16) as u8 };
+                        e = main!(buf);
+                        if e & LITERAL != 0 {
+                            consume!(e);
+                            unsafe { *out.add(pos + 3) = (e >> 16) as u8 };
+                            e = main!(buf);
+                            pos += 1;
+                        }
+                        pos += 1;
+                    }
                     pos += 1;
-                    continue;
+                }
+                pos += 1;
+                if pos >= fast_end || inp >= in_stop {
+                    break None;
+                }
+                refill!();
+                continue;
+            }
+            if e & (SUBTABLE | END | INVALID) != 0 {
+                // The rare entries, behind one test.
+                if e & SUBTABLE != 0 {
+                    consume!(e);
+                    let i = (e >> 16) as usize + peek!((e >> 8) & 0xf);
+                    e = unsafe { *lit.add(i) };
+                    if e & LITERAL != 0 {
+                        consume!(e);
+                        unsafe { *out.add(pos) = (e >> 16) as u8 };
+                        pos += 1;
+                        refill!();
+                        e = main!(buf);
+                        if pos >= fast_end || inp >= in_stop {
+                            break None;
+                        }
+                        continue;
+                    }
+                }
+                if e & (END | INVALID) != 0 {
+                    consume!(e);
+                    break Some(if e & INVALID != 0 { Err(Bad) } else { Ok(()) });
                 }
             }
+            // A match: the length code and its extra bits (20 bits at most), then the distance
+            // code and its extra bits (28 at most): 48 of the 56.
+            let saved = buf;
+            consume!(e);
+            let n = value(e, saved);
+            let mut d = unsafe { *dist.add((buf & dist_mask) as usize) };
+            if d & SUBTABLE != 0 {
+                consume!(d);
+                let i = (d >> 16) as usize + peek!((d >> 8) & 0xf);
+                d = unsafe { *dist.add(i) };
+            }
+            let saved = buf;
+            consume!(d);
+            let back = value(d, saved);
+            refill!();
+            e = main!(buf);
+            if d & INVALID != 0 || back > pos {
+                break Some(Err(Bad));
+            }
+            // SAFETY: back <= pos, and pos + 258 <= size with OUTPUT_SLACK after.
+            unsafe { copy_match(out, pos, back, n) };
+            pos += n;
+            if pos >= fast_end || inp >= in_stop {
+                break None;
+            }
+        };
+        // SAFETY: inp is within the input.
+        let next = unsafe { inp.offset_from(data) } as usize;
+        (bits.buf, bits.cnt, bits.next) = (buf, cnt & 0xff, next);
+        if let Some(r) = result {
+            return r.map(|()| (bits, pos));
         }
+    }
+    // Near the end of the output: every store checked.
+    let (lit, dist) = (&t.litlen, &t.dist);
+    loop {
+        bits.refill();
+        let (e, v) = lit.decode(&mut bits);
         if e & LITERAL != 0 {
             if pos >= size {
                 return Err(Bad);
@@ -493,31 +827,17 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: *mut u8, mut pos: 
             continue;
         }
         if e & (END | INVALID) != 0 {
-            if e & INVALID != 0 {
-                return Err(Bad);
-            }
-            return Ok((bits, pos));
+            return if e & INVALID != 0 { Err(Bad) } else { Ok((bits, pos)) };
         }
-        // A match: length (base + extra), then the distance.
-        bits.refill();
-        let n = (e >> 16) as usize + bits.take((e >> 8) & 0xf) as usize;
-        let d = dist.decode(&mut bits);
-        if d & INVALID != 0 {
+        let (d, back) = dist.decode(&mut bits);
+        if d & INVALID != 0 || back > pos || pos + v > size {
             return Err(Bad);
         }
-        let back = (d >> 16) as usize + bits.take((d >> 8) & 0xf) as usize;
-        if back > pos || pos + n > size {
-            return Err(Bad);
-        }
-        // SAFETY: back <= pos, pos + n <= size, and out has OUTPUT_SLACK after size.
-        unsafe { copy_match(out, pos, back, n) };
-        pos += n;
-        if bits.overrun(len) {
-            return Err(Bad);
-        }
+        // SAFETY: back <= pos, pos + v <= size, and out has OUTPUT_SLACK after size.
+        unsafe { copy_match(out, pos, back, v) };
+        pos += v;
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,6 +945,72 @@ mod tests {
                 theirs_c as f64 / bytes as f64
             );
         }
+    }
+
+    /// Cost per block, ours and libdeflate's: the same data ($BRAR_BLOCK_DATA, a file)
+    /// compressed into ~1 KB blocks and into ~64 KB blocks (sync flushes); the time difference
+    /// over the block count difference.
+    #[test]
+    #[ignore]
+    fn block_cost() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let cycles = || {
+            let mut c = 0u64;
+            // SAFETY: the pseudo-handle of the current thread and a valid out pointer.
+            unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+            c
+        };
+        let data = std::fs::read(std::env::var("BRAR_BLOCK_DATA").unwrap()).unwrap();
+        let data = &data[..data.len().min(16 << 20)];
+        let stream = |every: usize| {
+            let mut c = flate2::Compress::new(flate2::Compression::new(6), false);
+            let mut out = Vec::with_capacity(data.len());
+            for piece in data.chunks(every) {
+                out.reserve(piece.len() + 1024);
+                c.compress_vec(piece, &mut out, flate2::FlushCompress::Sync).unwrap();
+            }
+            out.reserve(1024);
+            c.compress_vec(&[], &mut out, flate2::FlushCompress::Finish).unwrap();
+            out
+        };
+        let mut t = Tables::default();
+        let mut d = libdeflater::Decompressor::new();
+        let mut out = vec![0u8; data.len() + OUTPUT_SLACK];
+        let mut times = Vec::new();
+        for every in [1024, 65536] {
+            let mut input = stream(every);
+            let len = input.len();
+            input.resize(len + INPUT_PADDING, 0);
+            let mut starts = Vec::new();
+            inflate_recording(&mut t, &input, len, &mut out, data.len(), Some(&mut starts)).unwrap();
+            assert!(out[..data.len()] == *data);
+            let (mut ours, mut theirs) = (u64::MAX, u64::MAX);
+            for _ in 0..5 {
+                let c0 = cycles();
+                inflate(&mut t, &input, len, &mut out, data.len()).unwrap();
+                ours = ours.min(cycles() - c0);
+                let c0 = cycles();
+                d.deflate_decompress(&input[..len], &mut out[..data.len()]).unwrap();
+                theirs = theirs.min(cycles() - c0);
+            }
+            println!(
+                "blocks every {every}: {} blocks, B-Rar {:.2} cycles/B, libdeflate {:.2}",
+                starts.len(),
+                ours as f64 / data.len() as f64,
+                theirs as f64 / data.len() as f64
+            );
+            times.push((starts.len() as f64, ours as f64, theirs as f64));
+        }
+        let blocks = times[0].0 - times[1].0;
+        println!(
+            "per block: B-Rar {:.0} cycles, libdeflate {:.0}",
+            (times[0].1 - times[1].1) / blocks,
+            (times[0].2 - times[1].2) / blocks
+        );
     }
 
     #[test]
