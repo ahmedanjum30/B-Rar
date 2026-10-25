@@ -8,7 +8,7 @@
 //! bytes, and markers for bytes a match copied from the 32 KB before the piece, unknown at the
 //! time. Once the previous piece is complete, [`resolve`] replaces the markers.
 
-use super::inflate::{Bad, Bits, END, INVALID, LITERAL, Res, Tables};
+use super::inflate::{Bad, Bits, Bytes, END, INVALID, LITERAL, Output, Res, Tables, fast};
 
 /// How far back a match can reach.
 pub(crate) const WINDOW: usize = 32768;
@@ -109,52 +109,30 @@ pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usiz
     }
 }
 
-/// One Huffman-coded block into 16-bit values; copies from before the piece leave markers.
+/// 16-bit values for [`fast`] and [`block16`]: copies from before the piece leave markers, and
 /// `marked` follows where the last marker written ends (conservatively: a copy that may have
 /// carried one counts as a marker up to its end, which only delays the switch to plain bytes).
-fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, marked: &mut usize, max_out: usize) -> Res<Bits<'a>> {
-    let (lit, dist) = (&t.litlen, &t.dist);
-    // Room for one round (a match, or three literals) plus the copies' overshoot (in values).
-    const ROUND: usize = 258 + 3 + 32;
-    let mut pos = out.len();
-    let result = loop {
-        if out.capacity() - pos < ROUND {
-            // SAFETY: values below pos were written.
-            unsafe { out.set_len(pos) };
-            out.reserve(out.capacity().max(1 << 20));
+struct Values {
+    base: *mut u16,
+    marked: usize,
+}
+
+impl Output for Values {
+    #[inline(always)]
+    unsafe fn literal(&mut self, pos: usize, byte: u8) {
+        // SAFETY: the caller's.
+        unsafe { *self.base.add(pos) = u16::from(byte) };
+    }
+
+    #[inline(always)]
+    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool {
+        if back > pos + WINDOW {
+            return false;
         }
-        let base = out.as_mut_ptr();
-        bits.refill();
-        let (mut e, mut v) = lit.decode(&mut bits);
-        // SAFETY (stores and copies): the reserve above left ROUND values after pos.
-        if e & LITERAL != 0 {
-            unsafe { *base.add(pos) = (e >> 16) as u16 };
-            pos += 1;
-            (e, v) = lit.decode(&mut bits);
-            if e & LITERAL != 0 {
-                unsafe { *base.add(pos) = (e >> 16) as u16 };
-                pos += 1;
-                (e, v) = lit.decode(&mut bits);
-                if e & LITERAL != 0 {
-                    unsafe { *base.add(pos) = (e >> 16) as u16 };
-                    pos += 1;
-                    continue;
-                }
-            }
-        }
-        if e & (END | INVALID) != 0 {
-            break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
-        }
-        bits.refill();
-        let n = v;
-        let (d, back) = dist.decode(&mut bits);
-        if d & INVALID != 0 {
-            break Err(Bad);
-        }
-        if pos + n > max_out || back > pos + WINDOW {
-            break Err(Bad);
-        }
+        // SAFETY: the caller's room for pos + n (and 3 values past it); sources at or after
+        // pos - back >= 0 when back <= pos.
         unsafe {
+            let base = self.base;
             let dst = base.add(pos);
             if back > pos {
                 // Partly (or wholly) from before the piece: markers for that part.
@@ -166,7 +144,7 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
                         *base.add(src - back)
                     };
                 }
-                *marked = pos + n;
+                self.marked = pos + n;
             } else if back >= 4 {
                 // Four values (8 bytes) at a time, noting whether any was a marker: only the
                 // match's own values count (the last word may run past it, into values that
@@ -182,7 +160,7 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
                     j += 4;
                 }
                 if any & 0x8000_8000_8000_8000 != 0 {
-                    *marked = pos + n;
+                    self.marked = pos + n;
                 }
             } else {
                 let src = dst.sub(back);
@@ -193,15 +171,75 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
                     any |= v;
                 }
                 if any >= MARKER {
-                    *marked = pos + n;
+                    self.marked = pos + n;
                 }
             }
+        }
+        true
+    }
+}
+
+/// One Huffman-coded block into 16-bit values (see [`Values`]).
+fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, marked: &mut usize, max_out: usize) -> Res<Bits<'a>> {
+    let (lit, dist) = (&t.litlen, &t.dist);
+    // Room for one round (a match, or three literals) plus the copies' overshoot (in values).
+    const ROUND: usize = 258 + 3 + 32;
+    let mut pos = out.len();
+    let mut values = Values {
+        base: out.as_mut_ptr(),
+        marked: *marked,
+    };
+    let result = loop {
+        if out.capacity() - pos < 1 << 16 {
+            // SAFETY: values below pos were written.
+            unsafe { out.set_len(pos) };
+            out.reserve(out.capacity().max(1 << 20));
+        }
+        values.base = out.as_mut_ptr();
+        // The unchecked loop while a whole match and the copies' overshoot fit (in the
+        // capacity and under max_out); single checked rounds only near those ends.
+        let fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        // SAFETY: fast_end + 258 and the overshoot are within the capacity.
+        if let Some(r) = unsafe { fast(t, &mut bits, &mut values, &mut pos, fast_end) } {
+            break r.map(|()| bits);
+        }
+        if out.capacity() - pos < ROUND {
+            // The fast loop ran up to the capacity's end: more room first.
+            continue;
+        }
+        bits.refill();
+        let (mut e, mut v) = lit.decode(&mut bits);
+        // SAFETY (stores and copies): ROUND values after pos.
+        if e & LITERAL != 0 {
+            unsafe { values.literal(pos, (e >> 16) as u8) };
+            pos += 1;
+            (e, v) = lit.decode(&mut bits);
+            if e & LITERAL != 0 {
+                unsafe { values.literal(pos, (e >> 16) as u8) };
+                pos += 1;
+                (e, v) = lit.decode(&mut bits);
+                if e & LITERAL != 0 {
+                    unsafe { values.literal(pos, (e >> 16) as u8) };
+                    pos += 1;
+                    continue;
+                }
+            }
+        }
+        if e & (END | INVALID) != 0 {
+            break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
+        }
+        bits.refill();
+        let n = v;
+        let (d, back) = dist.decode(&mut bits);
+        if d & INVALID != 0 || pos + n > max_out || !unsafe { values.copy(pos, back, n) } {
+            break Err(Bad);
         }
         pos += n;
         if bits.overrun(len) {
             break Err(Bad);
         }
     };
+    *marked = values.marked;
     // SAFETY: values below pos were written.
     unsafe { out.set_len(pos) };
     result
@@ -213,12 +251,24 @@ fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max
     const ROUND: usize = 258 + 3 + super::inflate::OUTPUT_SLACK;
     let mut pos = out.len();
     let result = loop {
-        if out.capacity() - pos < ROUND {
+        if out.capacity() - pos < 1 << 16 {
             // SAFETY: bytes below pos were written.
             unsafe { out.set_len(pos) };
             out.reserve(out.capacity().max(1 << 20));
         }
         let base = out.as_mut_ptr();
+        // The unchecked loop while a whole match and the copies' overshoot fit (in the
+        // capacity and under max_out); single checked rounds only near those ends.
+        let fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        // SAFETY: fast_end + 258 + OUTPUT_SLACK <= capacity.
+        if let Some(r) = unsafe { fast(t, &mut bits, &mut Bytes(base), &mut pos, fast_end) } {
+            break r.map(|()| bits);
+        }
+        if out.capacity() - pos < ROUND {
+            // The fast loop ran up to the capacity's end (it stops up to a match past
+            // fast_end): more room first.
+            continue;
+        }
         bits.refill();
         let (mut e, mut v) = lit.decode(&mut bits);
         // SAFETY (stores and copies): the reserve above left ROUND bytes after pos.

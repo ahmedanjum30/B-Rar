@@ -674,6 +674,83 @@ pub(crate) fn inflate_recording(
 #[cfg(test)]
 #[inline(never)]
 fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size: usize) -> Res<(Bits<'a>, usize)> {
+    // SAFETY: out has size + OUTPUT_SLACK bytes; fast stops 258 short of size.
+    if let Some(r) = unsafe { fast(t, &mut bits, &mut Bytes(out), &mut pos, size.saturating_sub(258)) } {
+        return r.map(|()| (bits, pos));
+    }
+    // Near the end of the output: every store checked.
+    let (lit, dist) = (&t.litlen, &t.dist);
+    loop {
+        bits.refill();
+        let (e, v) = lit.decode(&mut bits);
+        if e & LITERAL != 0 {
+            if pos >= size {
+                return Err(Bad);
+            }
+            // SAFETY: pos < size.
+            unsafe { *out.add(pos) = (e >> 16) as u8 };
+            pos += 1;
+            continue;
+        }
+        if e & (END | INVALID) != 0 {
+            return if e & INVALID != 0 { Err(Bad) } else { Ok((bits, pos)) };
+        }
+        let (d, back) = dist.decode(&mut bits);
+        if d & INVALID != 0 || back > pos || pos + v > size {
+            return Err(Bad);
+        }
+        // SAFETY: back <= pos, pos + v <= size, and out has OUTPUT_SLACK after size.
+        unsafe { copy_match(out, pos, back, v) };
+        pos += v;
+    }
+}
+
+/// Decodes a Huffman-coded block's symbols into `out` from `pos` while `pos` is below
+/// `fast_end`: Some at the block's end (or damage), None once `pos` reaches `fast_end` or the
+/// input nears its end (the caller goes on with checked decoding). Nothing to do (None) if it
+/// starts there.
+///
+/// # Safety
+/// `out` must have room for `fast_end + 258 +` [`OUTPUT_SLACK`] bytes; matches copy from
+/// anywhere in `out[..pos]`.
+/// Where [`fast`] puts what it decodes.
+pub(super) trait Output {
+    /// Stores a literal at `pos`.
+    ///
+    /// # Safety
+    /// `pos` is in bounds.
+    unsafe fn literal(&mut self, pos: usize, byte: u8);
+    /// Copies a match of `n` bytes from `back` before `pos`; false if that's out of reach.
+    ///
+    /// # Safety
+    /// `pos + n` and the copy's overshoot are in bounds.
+    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool;
+}
+
+/// Plain bytes, copying from earlier in the same buffer.
+pub(super) struct Bytes(pub *mut u8);
+
+impl Output for Bytes {
+    #[inline(always)]
+    unsafe fn literal(&mut self, pos: usize, byte: u8) {
+        // SAFETY: the caller's.
+        unsafe { *self.0.add(pos) = byte };
+    }
+
+    #[inline(always)]
+    unsafe fn copy(&mut self, pos: usize, back: usize, n: usize) -> bool {
+        if back > pos {
+            return false;
+        }
+        // SAFETY: back <= pos, and the caller's room.
+        unsafe { copy_match(self.0, pos, back, n) };
+        true
+    }
+}
+
+#[inline(always)]
+pub(super) unsafe fn fast<O: Output>(t: &Tables, bits: &mut Bits, out: &mut O, pos_out: &mut usize, fast_end: usize) -> Option<Res<()>> {
+    let mut pos = *pos_out;
     let lit = t.litlen.entries.as_ptr();
     let (lit_mask, dist_mask) = ((1u64 << LITLEN_BITS) - 1, (1u64 << DIST_BITS) - 1);
     // SAFETY (all table reads): main-table indexes are masked to the main table's size, and
@@ -684,12 +761,11 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
         };
     }
 
-    // The fast loop: a whole match (258 bytes) always fits before `size`, so no output checks,
+    // A whole match (258 bytes) always fits before `fast_end` plus 258, so no output checks,
     // and the input has room for a round's refills (two, of up to 7 bytes each), so no clamp.
     // The reader's state lives in locals (registers) until the loop ends. Each round starts
     // with the bit buffer at 56+ bits and the next litlen entry already looked up
     // ("preloaded", overlapping the lookup with the previous round's stores).
-    let fast_end = size.saturating_sub(258);
     let in_end = bits.max_next.saturating_sub(14);
     if pos < fast_end && bits.next < in_end {
         let data = bits.data.as_ptr();
@@ -728,20 +804,20 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
                 // Literal entries of the main table take at most 11 bits: four of them, and
                 // the next lookup's 11, fit in 56.
                 consume!(e);
-                // SAFETY (stores): pos + 4 <= fast_end, 258 below size.
-                unsafe { *out.add(pos) = (e >> 16) as u8 };
+                // SAFETY (stores): pos < fast_end, with 258 bytes of room after.
+                unsafe { out.literal(pos, (e >> 16) as u8) };
                 e = main!(buf);
                 if e & LITERAL != 0 {
                     consume!(e);
-                    unsafe { *out.add(pos + 1) = (e >> 16) as u8 };
+                    unsafe { out.literal(pos + 1, (e >> 16) as u8) };
                     e = main!(buf);
                     if e & LITERAL != 0 {
                         consume!(e);
-                        unsafe { *out.add(pos + 2) = (e >> 16) as u8 };
+                        unsafe { out.literal(pos + 2, (e >> 16) as u8) };
                         e = main!(buf);
                         if e & LITERAL != 0 {
                             consume!(e);
-                            unsafe { *out.add(pos + 3) = (e >> 16) as u8 };
+                            unsafe { out.literal(pos + 3, (e >> 16) as u8) };
                             e = main!(buf);
                             pos += 1;
                         }
@@ -764,7 +840,7 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
                     e = unsafe { *lit.add(i) };
                     if e & LITERAL != 0 {
                         consume!(e);
-                        unsafe { *out.add(pos) = (e >> 16) as u8 };
+                        unsafe { out.literal(pos, (e >> 16) as u8) };
                         pos += 1;
                         refill!();
                         e = main!(buf);
@@ -795,11 +871,10 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
             let back = value(d, saved);
             refill!();
             e = main!(buf);
-            if d & INVALID != 0 || back > pos {
+            // SAFETY: pos + 258 + OUTPUT_SLACK is within out.
+            if d & INVALID != 0 || !unsafe { out.copy(pos, back, n) } {
                 break Some(Err(Bad));
             }
-            // SAFETY: back <= pos, and pos + 258 <= size with OUTPUT_SLACK after.
-            unsafe { copy_match(out, pos, back, n) };
             pos += n;
             if pos >= fast_end || inp >= in_stop {
                 break None;
@@ -808,36 +883,12 @@ fn block<'a>(t: &Tables, mut bits: Bits<'a>, out: *mut u8, mut pos: usize, size:
         // SAFETY: inp is within the input.
         let next = unsafe { inp.offset_from(data) } as usize;
         (bits.buf, bits.cnt, bits.next) = (buf, cnt & 0xff, next);
-        if let Some(r) = result {
-            return r.map(|()| (bits, pos));
-        }
+        *pos_out = pos;
+        return result;
     }
-    // Near the end of the output: every store checked.
-    let (lit, dist) = (&t.litlen, &t.dist);
-    loop {
-        bits.refill();
-        let (e, v) = lit.decode(&mut bits);
-        if e & LITERAL != 0 {
-            if pos >= size {
-                return Err(Bad);
-            }
-            // SAFETY: pos < size.
-            unsafe { *out.add(pos) = (e >> 16) as u8 };
-            pos += 1;
-            continue;
-        }
-        if e & (END | INVALID) != 0 {
-            return if e & INVALID != 0 { Err(Bad) } else { Ok((bits, pos)) };
-        }
-        let (d, back) = dist.decode(&mut bits);
-        if d & INVALID != 0 || back > pos || pos + v > size {
-            return Err(Bad);
-        }
-        // SAFETY: back <= pos, pos + v <= size, and out has OUTPUT_SLACK after size.
-        unsafe { copy_match(out, pos, back, v) };
-        pos += v;
-    }
+    None
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
