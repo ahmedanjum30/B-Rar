@@ -18,6 +18,51 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-28 (04:17): 7z without sevenz-rust2; the match path in assembly
+
+**sevenz-rust2 removed.** B-Rar reads every 7z archive itself (it stays a dev-dependency, for
+tests that compare B-Rar's reading with it):
+
+- Blocks the fast path doesn't take decode as a chain of readers, one per coder, wired as the
+  block's bind pairs say (`crates/brar-core/src/sevenz/coders.rs`): LZMA and LZMA2 (B-Rar's,
+  as readers), AES-256 (7z's key derivation, AES-CBC shared with RAR5's), BCJ2 (after the LZMA
+  SDK), the BCJ filters for x86, ARM, ARM Thumb, ARM64, PowerPC, SPARC, IA-64 and RISC-V and
+  Delta (`bcj.rs`, after xz's code, checked against liblzma's encoders), and PPMd, BZip2,
+  Deflate, Deflate64, Zstandard, LZ4 and Brotli through their crates (LZ4 and Brotli in the
+  7-Zip zstd fork's framing).
+- Split archives (`.7z.001`): the header and blocks are read across the parts; LZMA2 written on
+  several threads is found in parts from the chunk headers, and each worker reads its part.
+- Checked: B-Rar's extraction against 7-Zip's (SHA-256 of every file) for sevenz-rust2's 18
+  sample archives, the benchmark archives, and 7-Zip archives split into 20 MB parts, with a
+  password, with an encrypted header, PPMd and BZip2; all identical (the two in the zstd fork's
+  LZ4 and Brotli, which 7-Zip itself can't open, extracted with their CRCs right). A missing or
+  wrong password gives "password required" or "wrong password", for both encrypted data and
+  encrypted headers.
+
+**One core.** The length and distance-slot trees of matches now use a bit tree in assembly too
+(the literal tree's, looping, the last level without loading children).
+
+| Stream (one core, decoding only, best of 3) | B-Rar | before (03:37) | liblzma |
+|---|---|---|---|
+| `st.7z` (LZMA2, game data, 1.22 GiB) | 20.82 s | 20.95 s | 20.13 s |
+| `progs-lzma1.7z` (LZMA, programs, 1.08 GiB) | 9.44 s | 9.90 s | 9.02 s |
+
+Tried and dropped: matched literals with both next probabilities loaded ahead (as the plain
+tree does): it needs 16 registers at once, one more than x86-64 has.
+
+**Extraction**, best of 2 (same method as before; Defender off; the previous build is 7c4cdc4,
+which still read split archives with sevenz-rust2). `split-mt.7z`: the game files with 7-Zip's
+defaults (`-md=32m -mx=5`) in 200 MB parts (6).
+
+| Archive | B-Rar | previous build | 7-Zip 26.05 |
+|---|---|---|---|
+| `mt.7z` (LZMA2, 10 parts) | **3.81 s** | 3.98 s | 3.91 s |
+| `split-mt.7z.001` (the same, in 6 files) | **3.75 s** | 5.74 s | 3.97 s |
+| `progs.7z` (BCJ + LZMA2) | **2.43 s** | 2.44 s | 2.62 s |
+| `progs-lzma1.7z` (BCJ + LZMA, one stream) | 10.43 s | 10.76 s | **10.24 s** |
+
+---
+
 ## 2026-10-28 (03:37): 7z: faster matches, and B-Rar's own 7z header reader
 
 - **Matches on one core.** Literals after a match (decoded against the byte at the last

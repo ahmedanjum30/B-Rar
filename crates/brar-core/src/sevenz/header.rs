@@ -1,13 +1,12 @@
-//! B-Rar's own reader of 7z headers (after 7-Zip's `7zFormat.txt`): the packed streams, the
+//! B-Rar's reader of 7z headers (after 7-Zip's `7zFormat.txt`): the packed streams, the
 //! folders (solid blocks) and their coders, and the files. Headers that are themselves packed
-//! (7-Zip's default) are decoded with B-Rar's own decoders. Anything it doesn't take (an
-//! encrypted header, an unknown coder in it, damage) is an error, and sevenz-rust2 reads the
-//! archive instead.
+//! (7-Zip's default), and encrypted, are decoded like any block ([`super::coders`]).
 
-use std::{borrow::Cow, time::SystemTime};
+use std::{io::Read, time::SystemTime};
 
+use super::coders::{Keys, Source, folder_reader};
 use crate::{
-    bcj,
+    Error,
     deflate::inflate::{Bad, Res},
     lzma, time,
 };
@@ -18,35 +17,44 @@ pub(crate) const COPY: &[u8] = &[0];
 pub(crate) const LZMA: &[u8] = &[3, 1, 1];
 pub(crate) const LZMA2: &[u8] = &[0x21];
 pub(crate) const BCJ_X86: &[u8] = &[3, 3, 1, 3];
+pub(crate) const AES: &[u8] = &[6, 0xf1, 7, 1];
 
 /// One coder of a folder.
 pub(crate) struct Coder {
     pub(crate) id: Vec<u8>,
     pub(crate) props: Vec<u8>,
-    ins: usize,
-    outs: usize,
+    pub(super) ins: usize,
+    pub(super) outs: usize,
 }
 
 /// A folder (a solid block): its coders, how they connect, and its output.
 pub(crate) struct Folder {
     pub(crate) coders: Vec<Coder>,
     /// (in stream, out stream) pairs: the out stream feeds the in stream.
-    binds: Vec<(usize, usize)>,
+    pub(super) binds: Vec<(usize, usize)>,
     /// The in streams fed by packed streams, in order.
-    packed: Vec<usize>,
+    pub(super) packed: Vec<usize>,
     /// Every coder's out stream sizes, in order.
-    sizes: Vec<u64>,
+    pub(super) sizes: Vec<u64>,
     pub(crate) crc: Option<u32>,
     /// Its first packed stream, in [`Archive::packs`].
-    first_pack: usize,
+    pub(super) first_pack: usize,
 }
 
 impl Folder {
-    /// The size of the folder's output (the out stream no coder takes in).
+    /// The out stream no coder takes in: the folder's output.
+    pub(super) fn main_out(&self) -> Option<usize> {
+        (0..self.sizes.len()).find(|o| !self.binds.iter().any(|b| b.1 == *o))
+    }
+
+    /// The size of the folder's output.
     pub(crate) fn size(&self) -> u64 {
-        (0..self.sizes.len())
-            .find(|o| !self.binds.iter().any(|b| b.1 == *o))
-            .map_or(0, |o| self.sizes[o])
+        self.main_out().map_or(0, |o| self.sizes[o])
+    }
+
+    /// Whether it's encrypted.
+    pub(crate) fn encrypted(&self) -> bool {
+        self.coders.iter().any(|c| c.id == AES)
     }
 
     /// The method: one LZMA/LZMA2/copy coder, maybe behind x86 BCJ. `None` for anything else.
@@ -103,26 +111,32 @@ pub(crate) struct Entry {
 
 pub(crate) struct Archive {
     /// Each packed stream: where it is in the archive, and its size.
-    packs: Vec<(u64, u64)>,
+    pub(super) packs: Vec<(u64, u64)>,
     pub(crate) folders: Vec<Folder>,
     pub(crate) entries: Vec<Entry>,
 }
 
 impl Archive {
-    /// Reads the header of the 7z archive `map`.
-    pub(crate) fn read(map: &[u8]) -> Res<Self> {
-        let start = map.get(..32).ok_or(Bad)?;
+    /// Reads the header of the 7z archive in `src` (`keys` for an encrypted one).
+    pub(crate) fn read(src: Source, keys: &Keys) -> crate::Result<Self> {
+        let damaged = || Error::Unsupported("damaged or unknown 7z header");
+        let mut start = [0u8; 32];
+        src.read_at(0, &mut start).map_err(|_| damaged())?;
         if start[..6] != SIGNATURE || crc(&start[12..32]) != u32::from_le_bytes(start[8..12].try_into().unwrap()) {
-            return Err(Bad);
+            return Err(damaged());
         }
         let offset = u64::from_le_bytes(start[12..20].try_into().unwrap());
         let size = u64::from_le_bytes(start[20..28].try_into().unwrap());
-        let at = usize::try_from(offset.checked_add(32).ok_or(Bad)?).map_err(|_| Bad)?;
-        let header = map.get(at..).and_then(|h| h.get(..usize::try_from(size).ok()?)).ok_or(Bad)?;
-        if crc(header) != u32::from_le_bytes(start[28..32].try_into().unwrap()) {
-            return Err(Bad);
+        let at = offset.checked_add(32).ok_or_else(damaged)?;
+        if size > src.len().saturating_sub(at) {
+            return Err(damaged());
         }
-        if header.is_empty() {
+        let mut data = vec![0u8; size as usize];
+        src.read_at(at, &mut data).map_err(|_| damaged())?;
+        if crc(&data) != u32::from_le_bytes(start[28..32].try_into().unwrap()) {
+            return Err(damaged());
+        }
+        if data.is_empty() {
             // An empty archive.
             return Ok(Self {
                 packs: Vec::new(),
@@ -130,71 +144,31 @@ impl Archive {
                 entries: Vec::new(),
             });
         }
-        let mut data = Cow::Borrowed(header);
         // A packed header unpacks to the real one (or, in principle, to another packed one).
         for _ in 0..4 {
             let mut r = Reader { b: &data, at: 0 };
-            match r.byte()? {
-                0x01 => return header_body(&mut r),
+            match r.byte().map_err(|_| damaged())? {
+                0x01 => return header_body(&mut r).map_err(|_| damaged()),
                 0x17 => {
-                    let s = streams(&mut r)?;
-                    let f = s.folders.first().ok_or(Bad)?;
-                    let unpacked = unpack(map, &s.packs, f)?;
-                    data = Cow::Owned(unpacked);
+                    let s = streams(&mut r).map_err(|_| damaged())?;
+                    let f = s.folders.first().ok_or_else(damaged)?;
+                    let encrypted = f.encrypted();
+                    let mut unpacked = Vec::new();
+                    let read = folder_reader(src, &s.packs, f, keys).and_then(|mut r| Ok(r.read_to_end(&mut unpacked)?));
+                    let ok = read.is_ok() && unpacked.len() as u64 == f.size() && f.crc.is_none_or(|c| c == crc(&unpacked));
+                    match read {
+                        Err(e @ (Error::PasswordRequired | Error::Unsupported(_))) => return Err(e),
+                        _ if ok => {}
+                        _ if encrypted => return Err(Error::WrongPassword),
+                        _ => return Err(damaged()),
+                    }
+                    data = unpacked;
                 }
-                _ => return Err(Bad),
+                _ => return Err(damaged()),
             }
         }
-        Err(Bad)
+        Err(damaged())
     }
-
-    /// The packed bytes of folder `f`.
-    pub(crate) fn packed<'m>(&self, map: &'m [u8], f: &Folder) -> Res<&'m [u8]> {
-        packed(map, &self.packs, f)
-    }
-}
-
-fn packed<'m>(map: &'m [u8], packs: &[(u64, u64)], f: &Folder) -> Res<&'m [u8]> {
-    let &(at, size) = packs.get(f.first_pack).ok_or(Bad)?;
-    let at = usize::try_from(at).map_err(|_| Bad)?;
-    map.get(at..).and_then(|m| m.get(..usize::try_from(size).ok()?)).ok_or(Bad)
-}
-
-/// Unpacks a folder into memory (for packed headers).
-fn unpack(map: &[u8], packs: &[(u64, u64)], f: &Folder) -> Res<Vec<u8>> {
-    let m = f.method().ok_or(Bad)?;
-    let input = packed(map, packs, f)?;
-    let size = f.size();
-    let mut data = Vec::with_capacity(usize::try_from(size).map_err(|_| Bad)?.min(input.len() * 64));
-    let mut filter = m.bcj.then(bcj::X86::new);
-    let mut out = |b: &[u8]| -> Result<(), ()> {
-        match &mut filter {
-            Some(x) => x.write(b, &mut |d| {
-                data.extend_from_slice(d);
-                Ok(())
-            }),
-            None => {
-                data.extend_from_slice(b);
-                Ok(())
-            }
-        }
-    };
-    let n = match m.kind {
-        Kind::Lzma2(dict) => lzma::decode_lzma2(input, dict.min(usize::try_from(size).unwrap_or(usize::MAX)), &mut out),
-        Kind::Lzma => lzma::decode_lzma(input, m.props, size, &mut out),
-        Kind::Copy => out(input).map(|()| input.len() as u64).map_err(lzma::Failure::Stop),
-    }
-    .map_err(|_| Bad)?;
-    if let Some(x) = &mut filter {
-        let _ = x.finish(&mut |d: &[u8]| -> Result<(), ()> {
-            data.extend_from_slice(d);
-            Ok(())
-        });
-    }
-    if n != size || data.len() as u64 != size || f.crc.is_some_and(|c| c != crc(&data)) {
-        return Err(Bad);
-    }
-    Ok(data)
 }
 
 fn crc(data: &[u8]) -> u32 {
@@ -604,7 +578,7 @@ mod tests {
         // A program, for the BCJ filter.
         std::fs::copy(std::env::current_exe().unwrap(), src.join("prog.exe")).unwrap();
 
-        let cases: [(&str, &[&str], bool); 8] = [
+        let cases: [(&str, &[&str], bool); 14] = [
             ("default", &[], true),
             ("nonsolid", &["-ms=off"], true),
             ("plainheader", &["-mhc=off"], true),
@@ -613,6 +587,16 @@ mod tests {
             ("ppmd", &["-m0=ppmd"], true),
             ("password", &["-pabc"], true),
             ("encheader", &["-pabc", "-mhe=on"], false),
+            ("bzip2", &["-m0=bzip2"], true),
+            ("deflate", &["-m0=deflate"], true),
+            ("deflate64", &["-m0=deflate64"], true),
+            (
+                "bcj2",
+                &["-m0=BCJ2", "-m1=LZMA", "-m2=LZMA", "-m3=LZMA", "-mb0:1", "-mb0s1:2", "-mb0s2:3"],
+                true,
+            ),
+            ("delta", &["-mf=Delta:4"], true),
+            ("arm64", &["-mf=ARM64"], true),
         ];
         for (name, args, readable) in cases {
             let archive = dir.join(format!("{name}.7z"));
@@ -627,12 +611,15 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "{name}");
             let map = std::fs::read(&archive).unwrap();
-            let ours = Archive::read(&map);
+            let password = args.contains(&"-pabc").then_some("abc");
+            let src = Source::Map(&map);
             if !readable {
-                assert!(ours.is_err(), "{name}: an encrypted header isn't ours to read");
-                continue;
+                // An encrypted header: no password, a wrong one.
+                assert!(matches!(Archive::read(src, &Keys::new(None)), Err(Error::PasswordRequired)), "{name}");
+                assert!(matches!(Archive::read(src, &Keys::new(Some("abd"))), Err(Error::WrongPassword)), "{name}");
             }
-            let ours = ours.unwrap_or_else(|_| panic!("{name}: not read"));
+            let keys = Keys::new(password);
+            let ours = Archive::read(src, &keys).unwrap_or_else(|e| panic!("{name}: not read: {e}"));
             let pw = if args.contains(&"-pabc") {
                 sevenz_rust2::Password::from("abc")
             } else {
@@ -651,14 +638,11 @@ mod tests {
                 let mtime = t.has_last_modified_date.then(|| time::filetime(t.last_modified_date.into())).flatten();
                 assert_eq!(o.mtime, mtime, "{name}: {}", o.name);
             }
-            // The blocks B-Rar can decode give every file its CRC.
+            // Every block decodes, giving every file its CRC.
             for (f, folder) in ours.folders.iter().enumerate() {
                 assert_eq!(folder.size(), theirs.blocks[f].get_unpack_size(), "{name}");
-                if folder.method().is_none() {
-                    assert!(matches!(name, "ppmd" | "password"), "{name}: block {f} not ours");
-                    continue;
-                }
-                let data = unpack(&map, &ours.packs, folder).unwrap();
+                let mut data = Vec::new();
+                folder_reader(src, &ours.packs, folder, &keys).unwrap().read_to_end(&mut data).unwrap();
                 let mut at = 0;
                 for e in ours.entries.iter().filter(|e| e.folder == Some(f)) {
                     assert_eq!(Some(crc(&data[at..at + e.size as usize])), e.crc, "{name}: {}", e.name);

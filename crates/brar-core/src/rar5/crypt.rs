@@ -74,25 +74,31 @@ impl Keys {
 
     /// Decrypts `data` (whole 16-byte blocks of ciphertext) in place; `prev` is the ciphertext
     /// block before it, or the IV at the start.
-    pub(crate) fn decrypt(&self, mut prev: [u8; 16], data: &mut [u8]) {
-        // Eight blocks at a time, which AES-NI pipelines; each plaintext block is XORed with
-        // the ciphertext before it, which is still in `data` while going backwards.
-        let mut tmp = [Block::default(); 8];
-        for batch in data.chunks_mut(128) {
-            let n = batch.len() / 16;
-            for (t, c) in tmp.iter_mut().zip(batch.as_chunks::<16>().0) {
-                t.copy_from_slice(c);
-            }
-            self.aes.decrypt_blocks(&mut tmp[..n]);
-            let last: [u8; 16] = batch[(n - 1) * 16..n * 16].try_into().unwrap();
-            for j in (0..n).rev() {
-                let before: [u8; 16] = if j == 0 { prev } else { batch[(j - 1) * 16..j * 16].try_into().unwrap() };
-                for (k, o) in batch[j * 16..(j + 1) * 16].iter_mut().enumerate() {
-                    *o = tmp[j][k] ^ before[k];
-                }
-            }
-            prev = last;
+    pub(crate) fn decrypt(&self, prev: [u8; 16], data: &mut [u8]) {
+        decrypt_cbc(&self.aes, prev, data);
+    }
+}
+
+/// AES-CBC: decrypts `data` (whole 16-byte blocks of ciphertext) in place; `prev` is the
+/// ciphertext block before it, or the IV at the start.
+pub(crate) fn decrypt_cbc(aes: &Aes256, mut prev: [u8; 16], data: &mut [u8]) {
+    // Eight blocks at a time, which AES-NI pipelines; each plaintext block is XORed with the
+    // ciphertext before it, which is still in `data` while going backwards.
+    let mut tmp = [Block::default(); 8];
+    for batch in data.chunks_mut(128) {
+        let n = batch.len() / 16;
+        for (t, c) in tmp.iter_mut().zip(batch.as_chunks::<16>().0) {
+            t.copy_from_slice(c);
         }
+        aes.decrypt_blocks(&mut tmp[..n]);
+        let last: [u8; 16] = batch[(n - 1) * 16..n * 16].try_into().unwrap();
+        for j in (0..n).rev() {
+            let before: [u8; 16] = if j == 0 { prev } else { batch[(j - 1) * 16..j * 16].try_into().unwrap() };
+            for (k, o) in batch[j * 16..(j + 1) * 16].iter_mut().enumerate() {
+                *o = tmp[j][k] ^ before[k];
+            }
+        }
+        prev = last;
     }
 }
 

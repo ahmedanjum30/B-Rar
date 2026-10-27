@@ -215,7 +215,7 @@
           <div class="row"><span class="name">7-Zip</span><div class="track"><div class="fill" style="width: 100%"></div></div><span class="time">8.1 s</span></div>
         </div>
       </div>
-      <p class="note">One run per tool, all cores. On 7z, B-Rar and 7-Zip are level (3.9 s each on a 1.1 GB LZMA2 archive; WinRAR 5.0 s). Full method and every result: <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">benches/RESULTS.md</a>.</p>
+      <p class="note">One run per tool, all cores. On a 1.1 GB 7z archive made with 7-Zip's defaults, B-Rar takes 3.8 s, 7-Zip 3.9 s, WinRAR 5.0 s. Full method and every result: <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">benches/RESULTS.md</a>.</p>
     </div>
   </section>
 
@@ -227,7 +227,7 @@
         <ul class="list">
           <li><b>ZIP</b>Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd; AES and ZipCrypto</li>
           <li><b>RAR</b>RAR 4 and RAR 5, solid, encrypted and multi-volume</li>
-          <li><b>7z</b>LZMA, LZMA2, BZip2, Deflate, PPMd, Zstandard, AES</li>
+          <li><b>7z</b>LZMA, LZMA2, PPMd, BZip2, Deflate, Zstandard, LZ4, Brotli, BCJ2 and the other filters, AES</li>
           <li><b>tar</b>.tar, .tar.gz, .tar.xz, .tar.zst, .tar.bz2, and single .gz, .xz, .zst, .bz2 files</li>
         </ul>
       </div>

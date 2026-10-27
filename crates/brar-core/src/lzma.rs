@@ -515,6 +515,68 @@ macro_rules! lit_bit {
     };
 }
 
+/// The last bit of a bit tree, for `Rc::tree_asm`: `lit_bit!` without loading the children.
+#[cfg(target_arch = "x86_64")]
+macro_rules! last_bit {
+    () => {
+        concat!(
+            "cmp {range:e}, 0x1000000
+",
+            "jae 3f
+",
+            "shl {range:e}, 8
+",
+            "shl {code:e}, 8
+",
+            "movzx {t:e}, byte ptr [{inp}]
+",
+            "or {code:e}, {t:e}
+",
+            "inc {inp}
+",
+            "3:
+",
+            "mov {b:e}, {range:e}
+",
+            "shr {b:e}, 11
+",
+            "imul {b:e}, {v:e}
+",
+            "mov {t:e}, {range:e}
+",
+            "sub {t:e}, {b:e}
+",
+            "mov {range:e}, {b:e}
+",
+            "lea {x}, [{v} - 2017]
+",
+            "mov {c2:e}, {code:e}
+",
+            // The bit: CF set for a 0.
+            "sub {c2:e}, {b:e}
+",
+            "cmovae {range:e}, {t:e}
+",
+            "cmovae {code:e}, {c2:e}
+",
+            "cmovae {x}, {v}
+",
+            "lea {t}, [{sym}*2 + 1]
+",
+            "sbb {t}, 0
+",
+            "sar {x}, 5
+",
+            "sub {v}, {x}
+",
+            "mov word ptr [{probs} + {sym}*2], {v:x}
+",
+            "mov {sym}, {t}
+",
+        )
+    };
+}
+
 /// The range decoder: `range` and `code`, and where its next input byte is.
 #[derive(Clone, Copy)]
 struct Rc {
@@ -591,6 +653,10 @@ impl Rc {
     /// children's probabilities load, so the next bit doesn't wait for memory.
     #[inline(always)]
     fn tree(&mut self, input: &[u8], probs: &mut [u16], bits: u32) -> usize {
+        #[cfg(target_arch = "x86_64")]
+        if true {
+            return self.tree_asm(input, probs, bits);
+        }
         let mut s = 1usize;
         let mut v = probs[1];
         for _ in 1..bits {
@@ -651,6 +717,54 @@ impl Rc {
         // SAFETY: same allocation.
         self.at = unsafe { inp.offset_from(input.as_ptr()) } as usize;
         sym - 0x100
+    }
+
+    /// A bit tree `bits` deep (`probs` has its `1 << bits` nodes) in assembly: as
+    /// [`Rc::literal_asm`], in a loop, the last level without loading children (they'd be past
+    /// `probs`).
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn tree_asm(&mut self, input: &[u8], probs: &mut [u16], bits: u32) -> usize {
+        assert!(bits >= 1 && probs.len() >= 1 << bits);
+        let mut range = self.range;
+        let mut code = self.code;
+        // SAFETY: the symbol reads less than PAD bytes from `at`.
+        let mut inp = unsafe { input.as_ptr().add(self.at) };
+        let mut sym = 1usize;
+        let v = u64::from(probs[1]);
+        // SAFETY: the nodes (below 1 << bits) and the children of all but the last level are
+        // in `probs`.
+        unsafe {
+            std::arch::asm!(
+                "test {n}, {n}",
+                "jz 4f",
+                "2:",
+                lit_bit!(),
+                "dec {n}",
+                "jnz 2b",
+                "4:",
+                last_bit!(),
+                range = inout(reg) range,
+                code = inout(reg) code,
+                inp = inout(reg) inp,
+                sym = inout(reg) sym,
+                v = inout(reg) v => _,
+                n = inout(reg) u64::from(bits - 1) => _,
+                probs = in(reg) probs.as_mut_ptr(),
+                t = out(reg) _,
+                b = out(reg) _,
+                c0 = out(reg) _,
+                c1 = out(reg) _,
+                c2 = out(reg) _,
+                x = out(reg) _,
+                options(nostack),
+            );
+        }
+        self.range = range;
+        self.code = code;
+        // SAFETY: same allocation.
+        self.at = unsafe { inp.offset_from(input.as_ptr()) } as usize;
+        sym - (1 << bits)
     }
 
     /// A literal after a match, in assembly: decoded against `match_byte` (the byte at the last
@@ -781,42 +895,79 @@ pub(crate) fn decode_lzma2<E>(input: &[u8], dict: usize, out: &mut dyn FnMut(&[u
 /// [`decode_lzma2`] into window `w`, starting with properties `props` (those in force where a
 /// segment starts, if it starts with an uncompressed chunk).
 fn run<E>(input: &[u8], props: Option<u8>, w: &mut Window, out: &mut dyn FnMut(&[u8]) -> Result<(), E>) -> Result<u64, Failure<E>> {
-    let mut decoder: Option<Decoder> = None;
+    let mut s = Lzma2::new(props)?;
     let mut at = 0usize;
-    let mut props = props.map(Props::from_byte).transpose()?;
-    let mut padded = Vec::new();
-    while let Some(&control) = input.get(at) {
-        at += 1;
+    while at < input.len() {
+        match s.chunk(&input[at..], w, out)? {
+            Some(n) => at += n,
+            None => break,
+        }
+    }
+    w.flush(0, out).map_err(Failure::Stop)?;
+    Ok(w.total())
+}
+
+/// LZMA2's state between chunks.
+struct Lzma2 {
+    decoder: Option<Decoder>,
+    props: Option<Props>,
+    padded: Vec<u8>,
+}
+
+impl Lzma2 {
+    fn new(props: Option<u8>) -> Res<Self> {
+        Ok(Self {
+            decoder: None,
+            props: props.map(Props::from_byte).transpose()?,
+            padded: Vec::new(),
+        })
+    }
+
+    /// The length of the chunk at the start of `input`, from its header (`None` if the header
+    /// isn't all there).
+    fn chunk_len(input: &[u8]) -> Option<usize> {
+        let control = *input.first()?;
+        Some(match control {
+            0 => 1,
+            1 | 2 => 3 + usize::from(u16::from_be_bytes([*input.get(1)?, *input.get(2)?])) + 1,
+            0x80.. => 5 + usize::from(control >= 0xc0) + usize::from(u16::from_be_bytes([*input.get(3)?, *input.get(4)?])) + 1,
+            _ => 1,
+        })
+    }
+
+    /// Decodes the chunk at the start of `input` into `w`, first handing `out` what's in the
+    /// window and making room; returns the chunk's length, or `None` at the end marker.
+    fn chunk<E>(&mut self, input: &[u8], w: &mut Window, out: &mut dyn FnMut(&[u8]) -> Result<(), E>) -> Result<Option<usize>, Failure<E>> {
+        let control = input[0];
+        let mut at = 1;
         if control == 0 {
-            break;
+            return Ok(None);
         }
         if control == 1 || control == 2 {
             // Uncompressed; 1 resets the dictionary.
-            let size = usize::from(u16::from_be_bytes([*input.get(at).ok_or(Bad)?, *input.get(at + 1).ok_or(Bad)?])) + 1;
-            at += 2;
-            let data = input.get(at..at + size).ok_or(Bad)?;
-            at += size;
+            let size = usize::from(u16::from_be_bytes([*input.get(1).ok_or(Bad)?, *input.get(2).ok_or(Bad)?])) + 1;
+            let data = input.get(3..3 + size).ok_or(Bad)?;
             w.flush(size, out).map_err(Failure::Stop)?;
             if control == 1 {
                 w.reset();
             }
             w.buf[w.pos..w.pos + size].copy_from_slice(data);
             w.pos += size;
-            continue;
+            return Ok(Some(3 + size));
         }
         if control < 0x80 {
             return Err(Failure::Bad);
         }
-        let header = input.get(at..at + 4).ok_or(Bad)?;
+        let header = input.get(1..5).ok_or(Bad)?;
         let unpacked = (usize::from(control & 0x1f) << 16) + usize::from(u16::from_be_bytes([header[0], header[1]])) + 1;
         let packed = usize::from(u16::from_be_bytes([header[2], header[3]])) + 1;
         at += 4;
         let reset = (control >> 5) & 3;
         if reset >= 2 {
-            props = Some(Props::from_byte(*input.get(at).ok_or(Bad)?)?);
+            self.props = Some(Props::from_byte(*input.get(at).ok_or(Bad)?)?);
             at += 1;
         }
-        let p = props.ok_or(Bad)?;
+        let p = self.props.ok_or(Bad)?;
         if p.lc + p.lp > 4 {
             return Err(Failure::Bad);
         }
@@ -824,7 +975,7 @@ fn run<E>(input: &[u8], props: Option<u8>, w: &mut Window, out: &mut dyn FnMut(&
         if reset == 3 {
             w.reset();
         }
-        let d = decoder.get_or_insert_with(|| Decoder::new(p));
+        let d = self.decoder.get_or_insert_with(|| Decoder::new(p));
         if reset >= 1 {
             d.reset_state(p);
         }
@@ -833,10 +984,10 @@ fn run<E>(input: &[u8], props: Option<u8>, w: &mut Window, out: &mut dyn FnMut(&
         let chunk = match input.get(at..at + packed + PAD) {
             Some(chunk) => chunk,
             None => {
-                padded.clear();
-                padded.extend_from_slice(input.get(at..at + packed).ok_or(Bad)?);
-                padded.resize(packed + PAD, 0);
-                &padded[..]
+                self.padded.clear();
+                self.padded.extend_from_slice(input.get(at..at + packed).ok_or(Bad)?);
+                self.padded.resize(packed + PAD, 0);
+                &self.padded[..]
             }
         };
         let end = w.pos + unpacked;
@@ -846,10 +997,202 @@ fn run<E>(input: &[u8], props: Option<u8>, w: &mut Window, out: &mut dyn FnMut(&
         if marker || rc.at > packed || w.pos != end {
             return Err(Failure::Bad);
         }
-        at += packed;
+        Ok(Some(at + packed))
     }
-    w.flush(0, out).map_err(Failure::Stop)?;
-    Ok(w.total())
+}
+
+/// A damaged stream, as an I/O error.
+fn bad_data() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "damaged LZMA data")
+}
+
+/// Hands out `w.buf[*sent..w.pos]`; whether there was any.
+fn serve(w: &Window, sent: &mut usize, buf: &mut [u8]) -> Option<usize> {
+    let n = (w.pos - *sent).min(buf.len());
+    if n == 0 {
+        return None;
+    }
+    buf[..n].copy_from_slice(&w.buf[*sent..*sent + n]);
+    *sent += n;
+    Some(n)
+}
+
+/// An LZMA2 stream as a reader (for 7z blocks whose packed data isn't all in memory): decodes
+/// a chunk at a time from `inner`.
+pub(crate) struct Lzma2Reader<R> {
+    inner: R,
+    s: Lzma2,
+    w: Window,
+    chunk: Vec<u8>,
+    /// `w.buf[..sent]` has been read.
+    sent: usize,
+    done: bool,
+}
+
+impl<R: std::io::Read> Lzma2Reader<R> {
+    pub(crate) fn new(inner: R, dict: usize) -> Self {
+        Self {
+            inner,
+            s: Lzma2::new(None).expect("no properties"),
+            w: Window::new(dict, 8 << 20),
+            chunk: Vec::new(),
+            sent: 0,
+            done: false,
+        }
+    }
+
+    /// Reads and decodes the next chunk; `false` at the end.
+    fn next(&mut self) -> std::io::Result<bool> {
+        self.chunk.clear();
+        self.chunk.resize(6, 0);
+        // The control byte (no more input: the end), then the rest of the header.
+        if self.inner.read(&mut self.chunk[..1])? == 0 {
+            return Ok(false);
+        }
+        let head = match self.chunk[0] {
+            0 => return Ok(false),
+            1 | 2 => 3,
+            0xc0.. => 6,
+            0x80.. => 5,
+            _ => return Err(bad_data()),
+        };
+        self.inner.read_exact(&mut self.chunk[1..head])?;
+        let len = Lzma2::chunk_len(&self.chunk[..head]).ok_or_else(bad_data)?;
+        self.chunk.resize(len, 0);
+        self.inner.read_exact(&mut self.chunk[head..])?;
+        // Everything decoded has been read, so the window can slide without handing it out.
+        self.w.emitted = self.w.pos;
+        let before = self.w.total();
+        self.s
+            .chunk(&self.chunk, &mut self.w, &mut |_| Ok::<(), ()>(()))
+            .map_err(|_| bad_data())?;
+        self.sent = self.w.pos - (self.w.total() - before) as usize;
+        Ok(true)
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Lzma2Reader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if let Some(n) = serve(&self.w, &mut self.sent, buf) {
+                return Ok(n);
+            }
+            if self.done || buf.is_empty() {
+                return Ok(0);
+            }
+            self.done = !self.next()?;
+        }
+    }
+}
+
+/// An LZMA (LZMA1) stream of `size` bytes as a reader, like [`decode_lzma`].
+pub(crate) struct LzmaReader<R> {
+    inner: R,
+    d: Decoder,
+    w: Window,
+    rc: Option<Rc>,
+    /// Input: `input[..valid]` read from `inner` (then zeros, for the decoder's look-ahead).
+    input: Vec<u8>,
+    valid: usize,
+    eof: bool,
+    size: u64,
+    sent: usize,
+    done: bool,
+}
+
+impl<R: std::io::Read> LzmaReader<R> {
+    pub(crate) fn new(inner: R, props: &[u8], size: u64) -> std::io::Result<Self> {
+        let &[p, d0, d1, d2, d3] = props else { return Err(bad_data()) };
+        let dict = u64::from(u32::from_le_bytes([d0, d1, d2, d3])).clamp(4096, size.max(4096));
+        Ok(Self {
+            inner,
+            d: Decoder::new(Props::from_byte(p).map_err(|_| bad_data())?),
+            w: Window::new(usize::try_from(dict).map_err(|_| bad_data())?, Self::STEP),
+            rc: None,
+            input: vec![0; Self::INPUT + PAD],
+            valid: 0,
+            eof: false,
+            size,
+            sent: 0,
+            done: false,
+        })
+    }
+
+    const STEP: usize = 4 << 20;
+    const INPUT: usize = 1 << 20;
+
+    /// Moves what's left of the input to the front and reads more.
+    fn refill(&mut self, from: usize) -> std::io::Result<()> {
+        self.input.copy_within(from..self.valid, 0);
+        self.valid -= from;
+        while !self.eof && self.valid < Self::INPUT {
+            match self.inner.read(&mut self.input[self.valid..Self::INPUT])? {
+                0 => self.eof = true,
+                n => self.valid += n,
+            }
+        }
+        self.input[self.valid..].fill(0);
+        Ok(())
+    }
+
+    /// Decodes up to a step more; `false` at the end.
+    fn next(&mut self) -> std::io::Result<bool> {
+        if self.w.total() >= self.size {
+            return Ok(false);
+        }
+        let mut rc = match self.rc {
+            Some(rc) => rc,
+            None => {
+                self.refill(0)?;
+                Rc::new(&self.input[..self.valid]).map_err(|_| bad_data())?
+            }
+        };
+        let step = usize::try_from(self.size - self.w.total()).unwrap_or(usize::MAX).min(Self::STEP);
+        self.w.emitted = self.w.pos;
+        self.w.flush(step, &mut |_| Ok::<(), ()>(())).map_err(|_| bad_data())?;
+        self.sent = self.w.pos;
+        let end = self.w.pos + step;
+        while self.w.pos < end {
+            // While more input can come, the coder stops PAD bytes before what's read.
+            let limit = if self.eof { self.valid } else { self.valid.saturating_sub(PAD) };
+            if rc.at > limit {
+                if self.eof {
+                    return Err(bad_data());
+                }
+                self.refill(rc.at)?;
+                rc.at = 0;
+                continue;
+            }
+            if self
+                .d
+                .decode(&mut rc, &self.input, limit, &mut self.w, end, false)
+                .map_err(|_| bad_data())?
+            {
+                // The end marker.
+                self.size = self.size.min(self.w.total());
+                break;
+            }
+        }
+        self.rc = Some(rc);
+        Ok(true)
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for LzmaReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            // Never past `size` (a match can run past it).
+            let left = self.size.saturating_sub(self.w.total() - (self.w.pos - self.sent) as u64);
+            let cap = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            if let Some(n) = serve(&self.w, &mut self.sent, &mut buf[..cap]) {
+                return Ok(n);
+            }
+            if self.done || cap == 0 {
+                return Ok(0);
+            }
+            self.done = !self.next()?;
+        }
+    }
 }
 
 /// An independent part of an LZMA2 stream: from one dictionary reset to the next.
@@ -865,51 +1208,68 @@ struct Segment {
 /// Splits an LZMA2 stream at its dictionary resets, from the chunk headers alone. `None` if
 /// they don't add up (decoding it in one go then reports the damage).
 fn segments(input: &[u8]) -> Option<Vec<Segment>> {
+    segments_read(
+        &|at, buf: &mut [u8]| {
+            let s = input.get(at as usize..at as usize + buf.len()).ok_or(std::io::ErrorKind::UnexpectedEof)?;
+            buf.copy_from_slice(s);
+            Ok(())
+        },
+        input.len() as u64,
+    )
+}
+
+/// [`segments`] of a stream of `len` bytes that `read` reads (at an offset), header by header.
+fn segments_read(read: &dyn Fn(u64, &mut [u8]) -> std::io::Result<()>, len: u64) -> Option<Vec<Segment>> {
     let mut parts: Vec<Segment> = Vec::new();
-    let (mut at, mut props) = (0usize, None);
-    loop {
-        let control = *input.get(at)?;
+    let (mut at, mut props) = (0u64, None);
+    let mut h = [0u8; 6];
+    while at < len {
+        // A chunk header: up to 6 bytes.
+        let n = (len - at).min(6) as usize;
+        h[n..].fill(0);
+        read(at, &mut h[..n]).ok()?;
+        let control = h[0];
         if control == 0 {
             break;
         }
+        let here = usize::try_from(at).ok()?;
         if control == 1 || control >= 0xe0 {
             if let Some(last) = parts.last_mut() {
-                last.packed.end = at;
+                last.packed.end = here;
             }
             parts.push(Segment {
-                packed: at..at,
+                packed: here..here,
                 unpacked: 0,
                 props,
             });
         }
-        let (unpacked, len) = if control < 0x80 {
+        let (unpacked, size) = if control < 0x80 {
             if control > 2 {
                 return None;
             }
-            let n = usize::from(u16::from_be_bytes([*input.get(at + 1)?, *input.get(at + 2)?])) + 1;
+            let n = usize::from(u16::from_be_bytes([h[1], h[2]])) + 1;
             (n, 3 + n)
         } else {
-            let h = input.get(at + 1..at + 5)?;
             if control >= 0xc0 {
-                props = Some(*input.get(at + 5)?);
+                props = Some(h[5]);
             }
-            let n = (usize::from(control & 0x1f) << 16) + usize::from(u16::from_be_bytes([h[0], h[1]])) + 1;
-            (n, 5 + usize::from(control >= 0xc0) + usize::from(u16::from_be_bytes([h[2], h[3]])) + 1)
+            let n = (usize::from(control & 0x1f) << 16) + usize::from(u16::from_be_bytes([h[1], h[2]])) + 1;
+            (n, 5 + usize::from(control >= 0xc0) + usize::from(u16::from_be_bytes([h[3], h[4]])) + 1)
         };
         // The stream must start with a dictionary reset.
         parts.last_mut()?.unpacked += unpacked as u64;
-        at += len;
+        at += size as u64;
     }
-    parts.last_mut()?.packed.end = at;
+    parts.last_mut()?.packed.end = usize::try_from(at.min(len)).ok()?;
     Some(parts)
 }
 
-/// Decodes one segment into memory.
+/// Decodes one segment (`input`: its chunks) into memory.
 fn decode_segment(input: &[u8], s: &Segment) -> Result<Vec<u8>, Bad> {
     let size = usize::try_from(s.unpacked).map_err(|_| Bad)?;
     // A window that holds the whole segment never slides.
     let mut w = Window::new(size, 0);
-    match run(&input[s.packed.clone()], s.props, &mut w, &mut |_| Ok::<(), ()>(())) {
+    match run(input, s.props, &mut w, &mut |_| Ok::<(), ()>(())) {
         Ok(n) if n == s.unpacked => {}
         _ => return Err(Bad),
     }
@@ -925,6 +1285,11 @@ fn budget() -> u64 {
     *BYTES.get_or_init(|| installed_memory().map_or(BUDGET, |m| (m / 8).clamp(512 << 20, 4 << 30)))
 }
 
+/// Whether `parts` are worth decoding in parallel (and fit in memory).
+fn splits(parts: &[Segment], threads: usize) -> bool {
+    threads > 1 && parts.len() > 1 && parts.iter().all(|s| s.unpacked <= budget() / 4)
+}
+
 /// A decoded segment and the memory it holds.
 type Decoded<'a> = Result<(Vec<u8>, Lease<'a>), Bad>;
 
@@ -934,10 +1299,43 @@ type Decoded<'a> = Result<(Vec<u8>, Lease<'a>), Bad>;
 /// thread hands them to `out` in order. Streams with a part bigger than a quarter of that
 /// decode on one thread.
 pub(crate) fn decode_lzma2_mt<E>(input: &[u8], dict: usize, threads: usize, out: &mut dyn FnMut(&[u8]) -> Result<(), E>) -> Result<u64, Failure<E>> {
-    let parts = match segments(input) {
-        Some(p) if threads > 1 && p.len() > 1 && p.iter().all(|s| s.unpacked <= budget() / 4) => p,
-        _ => return decode_lzma2(input, dict, out),
-    };
+    match segments(input) {
+        Some(parts) if splits(&parts, threads) => in_parts(&parts, threads, &|s| Ok(std::borrow::Cow::Borrowed(&input[s.packed.clone()])), out),
+        _ => decode_lzma2(input, dict, out),
+    }
+}
+
+/// [`decode_lzma2_mt`] for a stream of `len` bytes that `read` reads (at an offset), not
+/// mapped (a split archive's): each worker reads its part. `None` if the stream doesn't split,
+/// for the caller to decode it as a reader.
+pub(crate) fn decode_lzma2_mt_read<E>(
+    read: &(dyn Fn(u64, &mut [u8]) -> std::io::Result<()> + Sync),
+    len: u64,
+    threads: usize,
+    out: &mut dyn FnMut(&[u8]) -> Result<(), E>,
+) -> Option<Result<u64, Failure<E>>> {
+    let parts = segments_read(read, len).filter(|p| splits(p, threads))?;
+    Some(in_parts(
+        &parts,
+        threads,
+        &|s| {
+            let mut data = vec![0u8; s.packed.len()];
+            read(s.packed.start as u64, &mut data).map_err(|_| Bad)?;
+            Ok(std::borrow::Cow::Owned(data))
+        },
+        out,
+    ))
+}
+
+/// Decodes `parts` on up to `threads` workers, each getting a part's chunks from `load`, and
+/// hands them to `out` in order.
+#[allow(clippy::type_complexity)]
+fn in_parts<'a, E>(
+    parts: &[Segment],
+    threads: usize,
+    load: &(dyn Fn(&Segment) -> Result<std::borrow::Cow<'a, [u8]>, Bad> + Sync),
+    out: &mut dyn FnMut(&[u8]) -> Result<(), E>,
+) -> Result<u64, Failure<E>> {
     let budget = Budget::new(budget());
     let next = Mutex::new(0usize);
     // Decoded parts by index, and whether the output stopped.
@@ -958,7 +1356,9 @@ pub(crate) fn decode_lzma2_mt<E>(input: &[u8], dict: usize, threads: usize, out:
                         // before this one, so they go out (freeing it) without waiting for it.
                         (k, budget.take(parts[k].unpacked))
                     };
-                    let r = decode_segment(input, &parts[k]).map(|data| (data, lease));
+                    let r = load(&parts[k])
+                        .and_then(|input| decode_segment(&input, &parts[k]))
+                        .map(|data| (data, lease));
                     let mut s = slots.lock().unwrap();
                     if s.1 {
                         return;
@@ -1153,6 +1553,20 @@ mod tests {
             .unwrap();
             assert_eq!(total as usize, data.len());
             assert!(got == data, "{threads} threads");
+            // The same, read (as from a split archive's parts) rather than mapped.
+            let read = |at: u64, buf: &mut [u8]| {
+                buf.copy_from_slice(&packed[at as usize..at as usize + buf.len()]);
+                Ok(())
+            };
+            let mut got = Vec::new();
+            let total = decode_lzma2_mt_read(&read, packed.len() as u64, threads, &mut |b: &[u8]| -> Result<(), ()> {
+                got.extend_from_slice(b);
+                Ok(())
+            });
+            match total {
+                Some(total) => assert!(total.unwrap() as usize == data.len() && got == data, "{threads} threads, read"),
+                None => assert_eq!(threads, 1),
+            }
         }
         // Damage in the last part fails the whole stream.
         let at = segments(&packed).unwrap()[2].packed.start + 1000;
@@ -1204,6 +1618,55 @@ mod tests {
             .unwrap();
             assert_eq!(total as usize, n);
             assert!(got == data, "{n} bytes, preset {preset}");
+        }
+    }
+
+    /// Reads in pieces of `n` bytes at most, as a file or a pipe might hand them out.
+    struct Trickle<'a>(&'a [u8], usize);
+
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.1).min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn readers_match() {
+        use std::io::Read;
+        let data = sample(9_000_000);
+        let packed = lzma2_encode(&data, 1);
+        for piece in [1, 7, 4096] {
+            let mut got = Vec::new();
+            Lzma2Reader::new(Trickle(&packed, piece), 1 << 20).read_to_end(&mut got).unwrap();
+            assert!(got == data, "LZMA2, pieces of {piece}");
+        }
+        use liblzma::stream::{Action, Filters, LzmaOptions, Status, Stream};
+        let mut filters = Filters::new();
+        filters.lzma1(&LzmaOptions::new_preset(0).unwrap());
+        let mut s = Stream::new_raw_encoder(&filters).unwrap();
+        let mut lz = Vec::new();
+        let mut input = &data[..];
+        loop {
+            let before = s.total_in();
+            lz.reserve(1 << 16);
+            let status = s.process_vec(input, &mut lz, Action::Finish).unwrap();
+            input = &input[(s.total_in() - before) as usize..];
+            if status == Status::StreamEnd {
+                break;
+            }
+        }
+        let mut props = vec![(2 * 5) * 9 + 3];
+        props.extend_from_slice(&(256u32 << 10).to_le_bytes());
+        for piece in [7, 4096, 1 << 20] {
+            let mut got = Vec::new();
+            LzmaReader::new(Trickle(&lz, piece), &props, data.len() as u64)
+                .unwrap()
+                .read_to_end(&mut got)
+                .unwrap();
+            assert!(got == data, "LZMA, pieces of {piece}");
         }
     }
 

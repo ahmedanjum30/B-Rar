@@ -214,6 +214,11 @@ impl Volumes {
         })
     }
 
+    /// The size of all the parts together.
+    pub(crate) fn len(&self) -> u64 {
+        self.len
+    }
+
     /// Index of the part holding byte `offset` (< len).
     fn part_at(&self, offset: u64) -> usize {
         self.parts.partition_point(|&(_, start, _)| start <= offset) - 1

@@ -39,8 +39,6 @@ pub enum Error {
     RawIo(#[from] io::Error),
     #[error("zip: {0}")]
     Zip(#[from] ::zip::result::ZipError),
-    #[error("7z: {0}")]
-    SevenZ(#[from] sevenz_rust2::Error),
     #[error("rar: {0}")]
     Rar(#[from] unrar::error::UnrarError),
     #[error("unrecognized archive format")]
@@ -70,8 +68,6 @@ impl Error {
                 Error::PasswordRequired
             }
             Error::Zip(::zip::result::ZipError::InvalidPassword) => Error::WrongPassword,
-            Error::SevenZ(sevenz_rust2::Error::PasswordRequired) => Error::PasswordRequired,
-            Error::SevenZ(sevenz_rust2::Error::MaybeBadPassword(_)) => Error::WrongPassword,
             Error::Rar(e) if matches!(e.code, Code::MissingPassword) => Error::PasswordRequired,
             Error::Rar(e) if matches!(e.code, Code::BadPassword) => Error::WrongPassword,
             other => other,
@@ -99,8 +95,6 @@ impl Error {
         use unrar::error::Code;
         match self {
             Error::Io { source, .. } | Error::RawIo(source) => source.kind() == io::ErrorKind::InvalidData,
-            Error::SevenZ(sevenz_rust2::Error::ChecksumVerificationFailed) => true,
-            Error::SevenZ(sevenz_rust2::Error::Io(e, _)) => e.kind() == io::ErrorKind::InvalidData,
             Error::Zip(::zip::result::ZipError::InvalidArchive(_)) => true,
             Error::Rar(e) => matches!(e.code, Code::BadData),
             _ => false,

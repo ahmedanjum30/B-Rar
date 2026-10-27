@@ -15,10 +15,10 @@ Free for personal and other non-commercial use. See [License](#license).
 
 ## Features
 
-- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own LZMA/LZMA2 decoder (with the x86 BCJ filter) for 7z.
+- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core), its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own 7z engine, which decodes the parts of an archive 7-Zip made on several threads on all cores at once.
 - **Right-click menu.** Right-click an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**. On Windows 11 it's under **Show more options**; the Microsoft Store version (coming soon) puts it in the short menu.
 - **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
-- **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z, tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
+- **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z (LZMA, LZMA2, PPMd, BZip2, Deflate, Deflate64, Zstandard, LZ4, Brotli, the BCJ, BCJ2, ARM, ARM64, PowerPC, SPARC, IA-64, RISC-V and Delta filters, and AES, including encrypted file names), tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
 - **Archives in parts:** RAR volumes (`name.part1.rar`, `name.r00`) and split files (`name.7z.001`, `name.zip.001`). Start from any part; a missing part is named.
 - **Passwords:** asks when an archive is encrypted, including archives with encrypted file names.
 - **Safe by default:** asks before replacing a file (replace, skip, keep both, for all), refuses paths that would escape the destination folder, and checks every file's checksum.
@@ -38,11 +38,11 @@ Every tool with its default settings, on the same PC (Ryzen 7 5800H, 16 threads,
 | RAR5, 48,000 small files | **6.6 s** | 29.2 s | 24.0 s | 26.3 s ¹ |
 | ZIP, 47,000 small files | **6.5 s** | 22.8 s | 25.7 s | 16.2 s ¹ |
 | tar.gz, 47,000 small files | **6.1 s** | 24.2 s | n/a | 17.1 s |
-| 7z (LZMA2), 1.1 GB | **3.9 s** | 5.0 s | **3.9 s** | 44.1 s |
+| 7z (LZMA2), 1.1 GB | **3.8 s** | 5.0 s | 3.9 s | 44.1 s |
 
 ¹ Windows tar stopped at a file with a non-ASCII name and skipped it.
 
-On 7z, B-Rar and 7-Zip are level (3.85 s and 3.91 s): B-Rar's own LZMA2 decoder decodes the parts of an archive 7-Zip made on several threads on all cores at once. On archives of programs (BCJ) B-Rar is 7% faster than 7-Zip. An archive made on one thread can't be split, and there 7-Zip is still about 6% faster.
+On 7z, B-Rar is ahead of 7-Zip on archives 7-Zip made with its default settings (3.81 s against 3.91 s), split into parts (3.75 s against 3.97 s) and of programs (2.43 s against 2.62 s). An archive made on one thread can't be split, and there 7-Zip is still about 2% faster.
 
 ## Installing
 
@@ -105,7 +105,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 ## Credits
 
-RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate, and 7z's headers, LZMA, LZMA2 and x86 BCJ, use B-Rar's own code; other 7z methods and filters, encryption and split 7z archives use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate and 7z (headers, LZMA, LZMA2, the branch and Delta filters, BCJ2 and AES) use B-Rar's own code; 7z's PPMd, BZip2, Zstandard, LZ4, Brotli and Deflate64 use the [ppmd-rust](https://github.com/hasenbanck/ppmd-rust), [bzip2](https://github.com/trifectatechfoundation/bzip2-rs), [zstd](https://github.com/gyscos/zstd-rs), [lz4_flex](https://github.com/PSeitz/lz4_flex), [brotli](https://github.com/dropbox/rust-brotli) and [deflate64](https://github.com/anatawa12/deflate64-rs) crates.
 
 ## License
 
