@@ -14,6 +14,7 @@ mod time;
 mod volumes;
 mod whole;
 mod zip;
+mod zip_own;
 
 use std::{
     fmt, io,

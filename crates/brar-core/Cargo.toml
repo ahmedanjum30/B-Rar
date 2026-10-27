@@ -21,11 +21,13 @@ liblzma = { version = "0.4.9", default-features = false, features = ["parallel",
 memmap2 = "0.9.11"
 ppmd-rust = "1.5.1"
 rayon = "1.12.0"
+sha1 = "0.11.0"
 sha2 = "0.11.1"
 tar = "0.4.46"
 thiserror = "2.0.21"
 unrar = "0.5.8"
-zip = { version = "9.0.5", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "deflate64", "lzma", "ppmd", "xz", "zstd"] }
+# LZMA and XZ entries are B-Rar's (zip_own.rs).
+zip = { version = "9.0.5", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "deflate64", "ppmd", "zstd"] }
 zstd = "0.14.3"
 
 [target.'cfg(windows)'.dependencies]

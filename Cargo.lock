@@ -254,6 +254,7 @@ dependencies = [
  "ppmd-rust",
  "rayon",
  "sevenz-rust2",
+ "sha1",
  "sha2",
  "tar",
  "thiserror 2.0.21",
@@ -1500,15 +1501,6 @@ dependencies = [
 
 [[package]]
 name = "lzma-rust2"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "lzma-rust2"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
@@ -2352,7 +2344,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "lz4_flex",
- "lzma-rust2 0.23.0",
+ "lzma-rust2",
  "ppmd-rust",
  "sha2",
  "wasm-bindgen",
@@ -3195,7 +3187,6 @@ dependencies = [
  "getrandom",
  "hmac",
  "indexmap",
- "lzma-rust2 0.22.0",
  "memchr",
  "nix",
  "pbkdf2",

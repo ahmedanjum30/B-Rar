@@ -4,8 +4,9 @@
 //! positioned reads, decode them in one call to B-Rar's Deflate decoder
 //! ([`crate::deflate::inflate`]), check the CRC, write in 1 MiB blocks. A Deflate entry of
 //! [`PARALLEL_MIN`] or more decodes on all cores instead ([`crate::deflate::parallel`]),
-//! written as it decodes, with the single-core decoder as its fallback. Everything else
-//! (encryption, split archives, other methods) goes through the zip crate.
+//! written as it decodes, with the single-core decoder as its fallback. LZMA and XZ entries
+//! (plain or encrypted) are B-Rar's too ([`crate::zip_own`]). Everything else (encryption,
+//! other methods) goes through the zip crate.
 
 use std::{
     cell::RefCell,
@@ -32,6 +33,7 @@ use crate::{
     time,
     volumes::Input,
     whole::{BUDGET as FAST_PATH_BUDGET, Budget, read_at},
+    zip_own,
 };
 
 thread_local! {
@@ -96,8 +98,21 @@ struct Plain {
     modified: Option<SystemTime>,
 }
 
+/// An LZMA or XZ entry, which B-Rar decrypts and decodes itself.
+struct Own {
+    name: String,
+    data_start: u64,
+    packed: u64,
+    size: u64,
+    crc: u32,
+    method: u16,
+    crypt: zip_own::Crypt,
+    modified: Option<SystemTime>,
+}
+
 enum Job {
     Fast(Plain),
+    Own(Own),
     Fallback(usize),
 }
 
@@ -141,7 +156,32 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
             let fast = !f.encrypted()
                 && matches!(method, CompressionMethod::Deflated | CompressionMethod::Stored)
                 && f.compressed_size() + f.size() <= FAST_PATH_BUDGET;
+            // The zip crate names LZMA and XZ only with the features B-Rar leaves out.
+            #[allow(deprecated)]
+            let own = match method {
+                CompressionMethod::Unsupported(m) => {
+                    // ZipCrypto's password check: the CRC's top byte, or the time's.
+                    let check = if f.flags().is_using_data_descriptor() {
+                        (f.last_modified().map_or(0, |t| t.timepart()) >> 8) as u8
+                    } else {
+                        (f.crc32() >> 24) as u8
+                    };
+                    let (m, crypt) = zip_own::method(m, f.encrypted(), &f.extra_data().unwrap_or_default(), check);
+                    matches!(m, zip_own::LZMA | zip_own::XZ).then_some((m, crypt))
+                }
+                _ => None,
+            };
             let job = match f.data_start() {
+                Some(data_start) if let Some((method, crypt)) = own => Job::Own(Own {
+                    name: f.name()?.into_owned(),
+                    data_start,
+                    packed: f.compressed_size(),
+                    size: f.size(),
+                    crc: f.crc32(),
+                    method,
+                    crypt,
+                    modified: mtime(&f),
+                }),
                 Some(data_start) if fast => Job::Fast(Plain {
                     name: f.name()?.into_owned(),
                     data_start,
@@ -176,6 +216,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
                 }
                 let result = match job {
                     Job::Fast(entry) => extract_fast(read_at, map, entry, sink, budget, threads),
+                    Job::Own(entry) => extract_own(read_at, entry, password, sink),
                     Job::Fallback(i) => extract_entry(archive.clone(), *i, password, sink),
                 };
                 if let Err(e) = result {
@@ -255,6 +296,68 @@ fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, threads: usize) -> Re
             file.discard();
             Err(err)
         }
+    }
+}
+
+/// An LZMA or XZ entry, read from the archive's bytes.
+fn extract_own(read_at: ReadAt, e: &Own, password: Option<&[u8]>, sink: &Sink) -> Result<()> {
+    let encrypted = !matches!(e.crypt, zip_own::Crypt::None);
+    let raw = Box::new(RawReader {
+        read_at,
+        at: e.data_start,
+        end: e.data_start + e.packed,
+    });
+    let result = zip_own::reader(raw, e.method, &e.crypt, password, e.size).and_then(|data| {
+        // AE-2 entries have no CRC (their authentication code is checked instead).
+        let want = (!matches!(e.crypt, zip_own::Crypt::Aes(_)) || e.crc != 0).then_some(e.crc);
+        let mut data = CrcCheck {
+            inner: data,
+            hasher: crc32fast::Hasher::new(),
+            want,
+            left: e.size,
+        };
+        sink.file(&e.name, Some(e.size), e.modified, &mut data)
+    });
+    result.map_err(|err| err.for_entry(&e.name, encrypted && password.is_some()))
+}
+
+/// An entry's bytes in the archive, read with positioned reads.
+struct RawReader<'a> {
+    read_at: ReadAt<'a>,
+    at: u64,
+    end: u64,
+}
+
+impl Read for RawReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = buf.len().min(usize::try_from(self.end - self.at).unwrap_or(usize::MAX)).min(1 << 20);
+        (self.read_at)(self.at, &mut buf[..n])?;
+        self.at += n as u64;
+        Ok(n)
+    }
+}
+
+/// Checks the data's size and CRC at its end (an error then, if they don't match).
+struct CrcCheck<R> {
+    inner: R,
+    hasher: crc32fast::Hasher,
+    want: Option<u32>,
+    left: u64,
+}
+
+impl<R: Read> Read for CrcCheck<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let cap = buf.len().min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.hasher.update(&buf[..n]);
+        self.left -= n as u64;
+        if n == 0 && !buf.is_empty() {
+            let crc = self.hasher.clone().finalize();
+            if self.left != 0 || self.want.is_some_and(|w| w != crc) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "checksum mismatch"));
+            }
+        }
+        Ok(n)
     }
 }
 
