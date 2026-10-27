@@ -15,7 +15,7 @@ Free for personal and other non-commercial use. See [License](#license).
 
 ## Features
 
-- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) and its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core).
+- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own LZMA2 decoder for 7z.
 - **Right-click menu.** Right-click an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**. On Windows 11 it's under **Show more options**; the Microsoft Store version (coming soon) puts it in the short menu.
 - **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
 - **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z, tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
@@ -38,11 +38,11 @@ Every tool with its default settings, on the same PC (Ryzen 7 5800H, 16 threads,
 | RAR5, 48,000 small files | **6.6 s** | 29.2 s | 24.0 s | 26.3 s ¹ |
 | ZIP, 47,000 small files | **6.5 s** | 22.8 s | 25.7 s | 16.2 s ¹ |
 | tar.gz, 47,000 small files | **6.1 s** | 24.2 s | n/a | 17.1 s |
-| 7z (LZMA2), 1.0 GB | 7.0 s | 5.1 s | **5.0 s** | 44.4 s |
+| 7z (LZMA2), 1.1 GB | **3.9 s** | 5.0 s | **3.9 s** | 44.1 s |
 
 ¹ Windows tar stopped at a file with a non-ASCII name and skipped it.
 
-7z is the one format where 7-Zip is still faster; a faster LZMA decoder is planned.
+On 7z, B-Rar and 7-Zip are level (3.85 s and 3.91 s): B-Rar's own LZMA2 decoder decodes the parts of an archive 7-Zip made on several threads on all cores at once. An archive made on one thread can't be split, and there 7-Zip is still about 8% faster.
 
 ## Installing
 
@@ -95,7 +95,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 | Path | What it is |
 |---|---|
-| `crates/brar-core` | The extraction engine: formats, parallel decoding, B-Rar's RAR5 decoder. No UI code. |
+| `crates/brar-core` | The extraction engine: formats, parallel decoding, B-Rar's RAR5, Deflate and LZMA2 decoders. No UI code. |
 | `crates/brar-cli` | `B-Rar.exe`, the command line. |
 | `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, built with [egui](https://github.com/emilk/egui). |
 | `crates/brar-shell` | `B-Rar-Shell.dll`, the Windows 11 right-click menu. |
@@ -105,7 +105,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 ## Credits
 
-RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate uses [libdeflate](https://github.com/ebiggers/libdeflate); 7z uses [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate and 7z's LZMA2 use B-Rar's own decoders; other 7z methods, filters and encryption use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
 
 ## License
 

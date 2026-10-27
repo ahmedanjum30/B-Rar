@@ -2,6 +2,7 @@
 
 mod deflate;
 mod format;
+mod lzma;
 mod path;
 mod rar;
 mod rar5;

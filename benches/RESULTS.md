@@ -18,6 +18,46 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-28 (02:32): 7z gets B-Rar's own LZMA2 decoder
+
+7z blocks that are one plain LZMA2 stream (7-Zip's default) now use B-Rar's own decoder
+(`crates/brar-core/src/lzma.rs`) instead of sevenz-rust2's `lzma-rust2`; LZMA2 streams 7-Zip
+wrote on several threads (a dictionary reset every 4 dictionary sizes) are split there and the
+parts decoded on all cores (at most 2 GB of them in memory at once), then written in order.
+
+**Archives:** the 79 files of the Italian game folder (1.22 GiB), packed by 7-Zip 26.05 with
+`-m0=lzma2 -md=32m -mx=5 -ms=on`: `mt.7z` with `-mmt=on` (1.04 GiB, 10 parts of 128 MB) and
+`st.7z` with `-mmt=1` (1.04 GiB, one part). Extracted to E:, output deleted between runs, 5 s
+pauses. Defender real-time protection **off**. Output: 79 files, 1,313,683,760 bytes every run;
+the new decoder's output matched the source files (SHA-256, 0 mismatches).
+
+| Archive | B-Rar (own LZMA2) | B-Rar (lzma-rust2, before) | 7-Zip 26.05 | WinRAR | Windows tar |
+|---|---|---|---|---|---|
+| `mt.7z`, all cores | **3.85 s** (3.85–3.93, 3 runs) | 5.91 s (5.91–5.98) | 3.91 s (3.91–3.96) | 5.01 s (2 runs) | 44.14 s (2 runs) |
+| `st.7z`, all cores | 22.40 s (2 runs) | 34.16 s (1 run) | **20.72 s** (2 runs) | | |
+
+- **1.53x faster than before** on `mt.7z` and on `st.7z`; level with 7-Zip on `mt.7z`.
+- `st.7z` is one stream that can't be split: decoding speed alone. B-Rar is 8% behind 7-Zip there.
+
+**The decoder on one core** (the 1.25 GB `st.7z` stream decoded to memory, `lzma_bench` test,
+CRC checked): B-Rar 21.35 s, liblzma (the `liblzma` crate) 20.24 s; it was 45.7 s when it first worked. The data is
+nearly incompressible (65% of the output is literals, 8 hard-to-predict bits each), so the steps
+that counted were:
+
+| Change (first 200 MB) | B-Rar | liblzma |
+|---|---|---|
+| First working version | 8.48 s | 3.75 s |
+| Literal and tree bits without branches (`select_unpredictable`) | 5.38 s | |
+| Both children's probabilities loaded while a bit is decided | 5.0 s | |
+| Plain literals alone in the decoding loop, everything else in a separate function | 4.71 s | |
+| The 8-bit literal tree in x86-64 assembly (one compare per bit) | **3.94 s** | 3.76 s |
+
+Tried and dropped: branch-free normalization, the probability update in fewer instructions,
+unchecked table access, padded input without bounds checks, BMI2, a state table, matched
+literals in assembly (no measurable change; the cache miss on the match byte dominates).
+
+---
+
 ## 2026-10-25 (21:16): ZIP against Windows' built-in extraction
 
 B-Rar against the three ways Windows extracts a ZIP by itself: `tar.exe` (bsdtar, in
