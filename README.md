@@ -4,10 +4,12 @@
 
 **A fast archive extractor for Windows.** B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR, 7-Zip and Windows' own tar, using every core of your PC. It sits in the Windows 11 right-click menu, like WinRAR.
 
+[![Support on Patreon](https://img.shields.io/badge/Support%20on-Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/ahmedanjum30)
+
 [![CI](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
-Free for personal and other non-commercial use. See [License](#license).
+Free for personal and other non-commercial use. See [License](#license). If you'd like to support it, there's [Patreon](https://www.patreon.com/cw/ahmedanjum30).
 
 **[ahmedanjum30.github.io/B-Rar](https://ahmedanjum30.github.io/B-Rar/)** · for Windows 10 and 11, from the Microsoft Store or `winget install B-Rar`.
 

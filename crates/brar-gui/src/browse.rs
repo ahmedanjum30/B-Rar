@@ -226,6 +226,9 @@ enum Action {
     Test,
 }
 
+/// Where people can support B-Rar.
+const SUPPORT_URL: &str = "https://www.patreon.com/cw/ahmedanjum30";
+
 /// Where this window is with updates (see [`update`]).
 enum Updates {
     Idle,
@@ -819,6 +822,9 @@ impl Browser {
             ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(pal.weak));
             if self.updatable() && ui.link(RichText::new("Check for updates").small()).clicked() {
                 self.check_for_updates(ui.ctx(), true);
+            }
+            if ui.link(RichText::new("Support B-Rar").small()).on_hover_text(SUPPORT_URL).clicked() {
+                shell::open_path(Path::new(SUPPORT_URL));
             }
         });
     }
