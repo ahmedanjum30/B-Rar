@@ -1,8 +1,8 @@
-﻿# B-Rar
+# B-Rar
 
 > B-Rar is a free (for personal and non-commercial use) archive extractor for Windows 10 and 11, written in Rust. It extracts ZIP, RAR, 7z and tar archives in parallel on all CPU cores, faster than WinRAR and 7-Zip, and adds a Windows 11 right-click menu (Open in B-Rar, Extract files, Extract to folder, Extract here, Test archive).
 
-- Install: Microsoft Store (search "B-Rar"), or `winget install B-Rar`
+- Install: the installer at https://ahmedanjum30.github.io/B-Rar/download/B-Rar-Setup.exe, or the portable zip from https://github.com/ahmedanjum30/B-Rar/releases/latest. Microsoft Store (and `winget install B-Rar`): coming soon.
 - Source code and documentation: https://github.com/ahmedanjum30/B-Rar
 - Benchmarks: https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md
 - License: PolyForm Noncommercial 1.0.0 (free for personal, non-commercial, educational and public use; commercial use not permitted)
@@ -21,4 +21,4 @@
 
 ## Privacy
 
-B-Rar doesn't connect to the internet and collects no data: https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md
+B-Rar collects no data; it only asks GitHub whether a newer version is out (the Microsoft Store version doesn't connect at all): https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md
