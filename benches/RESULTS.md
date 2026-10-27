@@ -18,6 +18,39 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-28 (03:14): 7z: BCJ and LZMA1 on B-Rar's decoder; writing in parts dropped
+
+B-Rar's 7z path now also takes LZMA (LZMA1) blocks and blocks behind the x86 BCJ filter (7-Zip
+adds it for `.exe`/`.dll` files; B-Rar's filter scans 8 bytes at a time for E8/E9). The LZMA2
+parallel decoder's memory cap is now an eighth of the PC's memory (512 MB to 4 GB; 4 GB here).
+
+**Archives:** `mt.7z` as before; `progs.7z`: 43 `.exe`/`.dll` files from the Rust toolchains
+(1.08 GiB), 7-Zip defaults (`BCJ LZMA2:24`, 209 MB); `progs-lzma1.7z`: the same with
+`-m0=lzma` (`BCJ LZMA:24`, one stream, 208 MB). Extracted to E:, output deleted between runs, 5 s
+pauses, Defender real-time protection **off**. Every output matched its source files (SHA-256).
+
+| Archive | B-Rar (own) | B-Rar (lzma-rust2, before) | 7-Zip 26.05 |
+|---|---|---|---|
+| `mt.7z` (LZMA2, 10 parts) | 3.97 s (3.97–5.65) | | **3.93 s** (3.93–4.20) |
+| `progs.7z` (BCJ + LZMA2) | **2.67 s** (2.67–2.71) | 3.19 s (3.19–3.25) | **2.67 s** (2.67–2.70) |
+| `progs-lzma1.7z` (BCJ + LZMA) | 11.96 s (11.96–12.00) | 13.15 s (13.15–13.28) | **10.26 s** (10.26–10.30) |
+
+- BCJ: level with 7-Zip, 1.19x faster than before. The first version (filtering byte by byte on
+  the output thread) took 3.08 s.
+- LZMA1 is one stream, so one core: 17% behind 7-Zip on this compressible data, where matches
+  (not literals, as on the game data) take most of the time. That's the next thing to speed up.
+- `mt.7z` ran ~0.1 s slower than this morning's 3.85 s in this session for both tools (test mode,
+  no writing, took 3.86–3.98 s, against 3.66 s earlier): the machine, not the change.
+
+**Tried and dropped: workers writing their parts straight into the files.** Each worker wrote
+its output at its place in the files (positional writes) as it decoded, instead of the parts
+going out in order. Extraction of `mt.7z` took 21.8–40.2 s: on NTFS, writing past the end of
+what's been written makes Windows fill the gap with zeros first, so the big files were largely
+written twice, at random places. In order, writing adds only ~0.2 s to decoding (test mode),
+so there was little to gain anyway.
+
+---
+
 ## 2026-10-28 (02:32): 7z gets B-Rar's own LZMA2 decoder
 
 7z blocks that are one plain LZMA2 stream (7-Zip's default) now use B-Rar's own decoder

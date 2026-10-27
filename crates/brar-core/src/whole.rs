@@ -11,6 +11,23 @@ use std::{
 /// Larger entries take the streaming paths instead.
 pub(crate) const BUDGET: u64 = 2 << 30;
 
+/// The PC's installed memory, if it can tell.
+pub(crate) fn installed_memory() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status = MEMORYSTATUSEX {
+            dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `status` is a MEMORYSTATUSEX with its length set.
+        unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+        Some(status.ullTotalPhys)
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// Fills `buf` from `file` at `offset`, without a shared file cursor (safe across threads).
 pub(crate) fn read_at(file: &File, mut offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
     #[cfg(unix)]

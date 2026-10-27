@@ -21,7 +21,7 @@ use std::sync::{Condvar, Mutex};
 
 use crate::{
     deflate::inflate::{Bad, Res},
-    whole::{BUDGET, Budget, Lease},
+    whole::{BUDGET, Budget, Lease, installed_memory},
 };
 
 const NUM_STATES: usize = 12;
@@ -153,7 +153,8 @@ impl Window {
     pub(crate) fn new(dict: usize, step: usize) -> Self {
         let keep = dict.next_multiple_of(4096);
         Self {
-            buf: vec![0; keep + step.max(1 << 20) + MATCH_MAX + 64],
+            // + 4096: sliding keeps a multiple of 4096 more than `keep`.
+            buf: vec![0; keep + 4096 + step.max(1 << 20) + MATCH_MAX + 64],
             pos: 0,
             floor: 0,
             origin: 0,
@@ -234,25 +235,20 @@ impl Decoder {
         self.props = props;
     }
 
-    /// Decodes one range-coded run of `input[..limit]` (which starts with the range coder's 5
-    /// bytes; `input` has [`PAD`] more after it) until `w.pos` reaches `end`; returns the input
-    /// bytes used (which can be more than `limit`: the caller checks). With `exact` (LZMA2 chunks) a
-    /// match may not run past `end`; without (plain LZMA) it may, and the caller cuts the output.
+    /// Decodes from `input` with coder `rc` until `w.pos` reaches `end` or the coder passes
+    /// `limit` (`input` has [`PAD`] bytes after it, so a symbol that starts at or before it
+    /// can't read past the end); returns whether it met the end marker. With `exact` (LZMA2
+    /// chunks) a match may not run past `end`; without (LZMA) it may, and the caller cuts the
+    /// output.
     ///
     /// This loop only does plain literals, most of what poorly compressible data is made of;
     /// everything else goes to [`Self::other`], which keeps the loop small enough for its
     /// values to stay in registers.
     #[inline(never)]
-    fn decode(&mut self, input: &[u8], limit: usize, w: &mut Window, end: usize, exact: bool) -> Res<usize> {
+    fn decode(&mut self, rc: &mut Rc, input: &[u8], limit: usize, w: &mut Window, end: usize, exact: bool) -> Res<bool> {
         assert!(input.len() >= limit + PAD && w.buf.len() >= end + MATCH_MAX + 64);
-        if limit < 5 || input[0] != 0 {
-            return Err(Bad);
-        }
-        let mut rc = Rc {
-            range: u32::MAX,
-            code: u32::from_be_bytes([input[1], input[2], input[3], input[4]]),
-            at: 5,
-        };
+        // A copy, so it stays in registers.
+        let mut c = *rc;
         let Props { lc, lp, pb } = self.props;
         let f = Frame {
             buf: w.buf.as_mut_ptr(),
@@ -269,35 +265,32 @@ impl Decoder {
         let m = &mut self.model;
         let mut pos = w.pos;
         let mut state = m.state;
-        while pos < end {
-            if rc.at > limit {
-                return Err(Bad);
-            }
+        let mut done = false;
+        while pos < end && c.at <= limit {
             let total = base_low.wrapping_add(pos);
             let pos_state = total & pb_mask;
-            let literal = rc.bit(input, &mut m.is_match[(state << 4) + pos_state]) == 0;
+            let literal = c.bit(input, &mut m.is_match[(state << 4) + pos_state]) == 0;
             if literal && state < 7 {
                 let probs = f.literal_probs(m, total, pos);
                 #[cfg(target_arch = "x86_64")]
-                let s = rc.literal_asm(input, probs);
+                let s = c.literal_asm(input, probs);
                 #[cfg(not(target_arch = "x86_64"))]
-                let s = rc.tree(input, probs, 8);
+                let s = c.tree(input, probs, 8);
                 // SAFETY: pos < end.
                 unsafe { *f.buf.add(pos) = s as u8 };
                 pos += 1;
                 state = usize::from(AFTER_LITERAL[state]);
                 continue;
             }
-            let done;
-            (rc, pos, state, done) = Self::other(m, input, &f, rc, pos, state, pos_state, total, literal)?;
+            (c, pos, state, done) = Self::other(m, input, &f, c, pos, state, pos_state, total, literal)?;
             if done {
                 break;
             }
         }
-        rc.normalize(input);
+        *rc = c;
         m.state = state;
         w.pos = pos;
-        Ok(rc.at)
+        Ok(done)
     }
 
     /// A symbol other than a plain literal: a literal after a match (`literal`), a match or a
@@ -526,6 +519,18 @@ struct Rc {
 }
 
 impl Rc {
+    /// A coder starting on `input` (its first 5 bytes: a 0 and the first code).
+    fn new(input: &[u8]) -> Res<Self> {
+        match input {
+            [0, a, b, c, d, ..] => Ok(Self {
+                range: u32::MAX,
+                code: u32::from_be_bytes([*a, *b, *c, *d]),
+                at: 5,
+            }),
+            _ => Err(Bad),
+        }
+    }
+
     #[inline(always)]
     fn normalize(&mut self, input: &[u8]) {
         if self.range < TOP {
@@ -752,8 +757,10 @@ fn run<E>(input: &[u8], props: Option<u8>, w: &mut Window, out: &mut dyn FnMut(&
             }
         };
         let end = w.pos + unpacked;
-        let used = d.decode(chunk, packed, w, end, true)?;
-        if used > packed || w.pos != end {
+        let mut rc = Rc::new(chunk)?;
+        let marker = d.decode(&mut rc, chunk, packed, w, end, true)?;
+        rc.normalize(chunk);
+        if marker || rc.at > packed || w.pos != end {
             return Err(Failure::Bad);
         }
         at += packed;
@@ -828,23 +835,27 @@ fn decode_segment(input: &[u8], s: &Segment) -> Result<Vec<u8>, Bad> {
     Ok(data)
 }
 
-/// The biggest segment [`decode_lzma2_mt`] holds in memory; streams with bigger ones decode
-/// on one thread.
-const MAX_SEGMENT: u64 = BUDGET / 4;
+/// Most bytes [`decode_lzma2_mt`] holds in memory at once: an eighth of the PC's memory, at
+/// least 512 MB and at most 4 GB.
+fn budget() -> u64 {
+    static BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| installed_memory().map_or(BUDGET, |m| (m / 8).clamp(512 << 20, 4 << 30)))
+}
 
 /// A decoded segment and the memory it holds.
 type Decoded<'a> = Result<(Vec<u8>, Lease<'a>), Bad>;
 
 /// Decodes an LZMA2 stream like [`decode_lzma2`], on up to `threads` threads: the parts between
 /// dictionary resets (which 7-Zip writes when compressing on several threads) are independent,
-/// so workers decode them into memory at once (at most [`BUDGET`] bytes of them), and this
-/// thread hands them to `out` in order.
+/// so workers decode them into memory at once (at most [`budget`] bytes of them), and this
+/// thread hands them to `out` in order. Streams with a part bigger than a quarter of that
+/// decode on one thread.
 pub(crate) fn decode_lzma2_mt<E>(input: &[u8], dict: usize, threads: usize, out: &mut dyn FnMut(&[u8]) -> Result<(), E>) -> Result<u64, Failure<E>> {
     let parts = match segments(input) {
-        Some(p) if threads > 1 && p.len() > 1 && p.iter().all(|s| s.unpacked <= MAX_SEGMENT) => p,
+        Some(p) if threads > 1 && p.len() > 1 && p.iter().all(|s| s.unpacked <= budget() / 4) => p,
         _ => return decode_lzma2(input, dict, out),
     };
-    let budget = Budget::new(BUDGET);
+    let budget = Budget::new(budget());
     let next = Mutex::new(0usize);
     // Decoded parts by index, and whether the output stopped.
     let slots = Mutex::new((parts.iter().map(|_| None).collect::<Vec<Option<Decoded>>>(), false));
@@ -904,6 +915,55 @@ pub(crate) fn decode_lzma2_mt<E>(input: &[u8], dict: usize, threads: usize, out:
         drop(s);
         result.map(|()| total)
     })
+}
+
+/// Decodes a 7z LZMA (LZMA1) stream of `size` bytes (7z's have no end marker, usually) with the
+/// coder's 5 properties bytes (`lc`/`lp`/`pb`, then the dictionary size), handing the output to
+/// `out` in order; returns the bytes decoded.
+pub(crate) fn decode_lzma<E>(input: &[u8], props: &[u8], size: u64, out: &mut dyn FnMut(&[u8]) -> Result<(), E>) -> Result<u64, Failure<E>> {
+    const STEP: usize = 8 << 20;
+    let &[p, d0, d1, d2, d3] = props else { return Err(Failure::Bad) };
+    let mut d = Decoder::new(Props::from_byte(p)?);
+    let dict = u64::from(u32::from_le_bytes([d0, d1, d2, d3])).clamp(4096, size.max(4096));
+    let mut w = Window::new(usize::try_from(dict).map_err(|_| Bad)?, STEP);
+    // The output, cut at `size` (a match can run past it).
+    let mut sent = 0u64;
+    let mut out = |b: &[u8]| -> Result<(), E> {
+        let n = b.len().min(usize::try_from(size - sent).unwrap_or(usize::MAX));
+        sent += n as u64;
+        if n > 0 { out(&b[..n]) } else { Ok(()) }
+    };
+    let mut rc = Rc::new(input)?;
+    // The coder runs on `input` while PAD bytes follow, then on a padded copy of the rest.
+    let split = input.len().saturating_sub(PAD);
+    let mut tail = Vec::new();
+    while w.total() < size {
+        let step = usize::try_from(size - w.total()).unwrap_or(usize::MAX).min(STEP);
+        w.flush(step, &mut out).map_err(Failure::Stop)?;
+        let end = w.pos + step;
+        if tail.is_empty() && rc.at <= split {
+            if d.decode(&mut rc, input, split, &mut w, end, false)? {
+                break;
+            }
+            if w.pos >= end {
+                continue;
+            }
+        }
+        if tail.is_empty() {
+            tail.extend_from_slice(&input[split..]);
+            tail.resize(input.len() - split + PAD, 0);
+            rc.at -= split;
+        }
+        let limit = input.len() - split;
+        if d.decode(&mut rc, &tail, limit, &mut w, end, false)? {
+            break;
+        }
+        if w.pos < end {
+            return Err(Failure::Bad);
+        }
+    }
+    w.flush(0, &mut out).map_err(Failure::Stop)?;
+    Ok(sent)
 }
 
 /// LZMA2's dictionary size from its 7z (or xz) properties byte.
@@ -1020,6 +1080,48 @@ mod tests {
             Ok(())
         });
         assert!(r.is_err() || got != data);
+    }
+
+    #[test]
+    fn decodes_lzma1() {
+        use liblzma::stream::{Action, Filters, LzmaOptions, Status, Stream};
+        // 20 MB with preset 0's 256 KB dictionary: the window slides, a whole step at a time.
+        for (n, preset) in [(0, 6), (1, 0), (300_000, 6), (2_000_000, 1), (20_000_000, 0)] {
+            let data = sample(n);
+            let opts = LzmaOptions::new_preset(preset).unwrap();
+            let mut filters = Filters::new();
+            filters.lzma1(&opts);
+            let mut s = Stream::new_raw_encoder(&filters).unwrap();
+            let mut packed = Vec::new();
+            let mut input = &data[..];
+            loop {
+                let before = s.total_in();
+                packed.reserve(1 << 16);
+                let status = s.process_vec(input, &mut packed, Action::Finish).unwrap();
+                input = &input[(s.total_in() - before) as usize..];
+                if status == Status::StreamEnd {
+                    break;
+                }
+            }
+            // The presets' lc=3, lp=0, pb=2, and their dictionary size.
+            let dict: u32 = if preset == 0 {
+                256 << 10
+            } else if preset == 1 {
+                1 << 20
+            } else {
+                8 << 20
+            };
+            let mut props = vec![(2 * 5) * 9 + 3];
+            props.extend_from_slice(&dict.to_le_bytes());
+            let mut got = Vec::new();
+            let total = decode_lzma(&packed, &props, n as u64, &mut |b: &[u8]| -> Result<(), ()> {
+                got.extend_from_slice(b);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(total as usize, n);
+            assert!(got == data, "{n} bytes, preset {preset}");
+        }
     }
 
     #[test]

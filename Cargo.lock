@@ -254,6 +254,7 @@ dependencies = [
  "tar",
  "thiserror 2.0.21",
  "unrar",
+ "windows",
  "zip",
  "zstd",
 ]

@@ -25,6 +25,9 @@ unrar = "0.5.8"
 zip = { version = "9.0.5", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "deflate64", "lzma", "ppmd", "xz", "zstd"] }
 zstd = "0.14.3"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_SystemInformation"] }
+
 [dev-dependencies]
 # Only to benchmark B-Rar's Deflate decoder against.
 libdeflater = "1.26.1"

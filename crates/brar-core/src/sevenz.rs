@@ -1,7 +1,8 @@
 //! 7z: solid blocks are independent, so blocks decode in parallel; LZMA2 streams written with
 //! multithreading can additionally split across threads inside one block. Blocks that are one
-//! plain LZMA2 stream (7-Zip's default) use B-Rar's own decoder ([`crate::lzma`]); the rest
-//! (filters, other methods, encryption, split archives) use sevenz-rust2.
+//! LZMA2 or LZMA stream (7-Zip's default), maybe behind the x86 BCJ filter, use B-Rar's own
+//! decoders ([`crate::lzma`], [`crate::bcj`]); the rest (other methods and filters, encryption,
+//! split archives) use sevenz-rust2.
 
 use std::{
     io::{Cursor, Read, Seek},
@@ -12,7 +13,7 @@ use rayon::prelude::*;
 use sevenz_rust2::{Archive, ArchiveEntry, BlockDecoder, EncoderMethod, Password};
 
 use crate::{
-    EntryInfo, Error, Options, Result, lzma, mmap,
+    EntryInfo, Error, Options, Result, bcj, lzma, mmap,
     sink::{FileOut, SMALL_FILE, Sink},
     time,
     volumes::Input,
@@ -100,7 +101,7 @@ fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), map: Option
                     .iter()
                     .any(|c| c.encoder_method_id() == EncoderMethod::ID_AES256_SHA256);
             if let Some(map) = own
-                && let Some(done) = own_lzma2(map, &archive, block, per_block as usize, sink)
+                && let Some(done) = own_block(map, &archive, block, per_block as usize, sink)
             {
                 return done;
             }
@@ -129,16 +130,22 @@ fn extract_from<R: Read + Seek>(new_reader: &(dyn Fn() -> R + Sync), map: Option
     })
 }
 
-/// Decodes block `b` with B-Rar's own LZMA2 decoder (on up to `threads` threads) if it is one
-/// LZMA2 stream, with no filter and no encryption, writing its files to the sink. `None`: it
-/// isn't, so sevenz-rust2 decodes it.
-fn own_lzma2(map: &[u8], archive: &Archive, b: usize, threads: usize, sink: &Sink) -> Option<Result<()>> {
+/// Decodes block `b` with B-Rar's own decoders if it is one LZMA2 or LZMA stream, maybe behind
+/// the x86 BCJ filter, without encryption (LZMA2 on up to `threads` threads), writing its
+/// files to the sink. `None`: it isn't, so sevenz-rust2 decodes it.
+fn own_block(map: &[u8], archive: &Archive, b: usize, threads: usize, sink: &Sink) -> Option<Result<()>> {
     let block = &archive.blocks[b];
-    let [coder] = &block.coders[..] else { return None };
-    if coder.encoder_method_id() != EncoderMethod::ID_LZMA2 {
-        return None;
-    }
-    let dict = lzma::lzma2_dict(*coder.properties().first()?).ok()?;
+    let (coder, bcj) = match &block.coders[..] {
+        [c] => (c, false),
+        [f, c] | [c, f] if f.encoder_method_id() == EncoderMethod::ID_BCJ_X86 => (c, true),
+        _ => return None,
+    };
+    let lzma2 = match coder.encoder_method_id() {
+        EncoderMethod::ID_LZMA2 => true,
+        EncoderMethod::ID_LZMA => false,
+        _ => return None,
+    };
+    let size = block.get_unpack_size();
     let first = archive.stream_map.block_first_pack_stream_index()[b];
     let at = 32 + archive.pack_pos() + archive.stream_map.pack_stream_offsets()[first];
     let packed = map
@@ -148,7 +155,7 @@ fn own_lzma2(map: &[u8], archive: &Archive, b: usize, threads: usize, sink: &Sin
     // The block's files, in order: those after its first that belong to it (files without
     // data, in between, belong to no block).
     let start = archive.stream_map.block_first_file_index[b];
-    let files = (start..archive.files.len())
+    let files: Vec<&ArchiveEntry> = (start..archive.files.len())
         .take_while(|&i| archive.stream_map.file_block_index[i].is_none_or(|x| x == b))
         .filter(|&i| archive.stream_map.file_block_index[i] == Some(b))
         .map(|i| &archive.files[i])
@@ -164,9 +171,24 @@ fn own_lzma2(map: &[u8], archive: &Archive, b: usize, threads: usize, sink: &Sin
     };
     let result = (|| {
         out.empty_files()?;
-        let decoded = lzma::decode_lzma2_mt(packed, dict, threads, &mut |data| out.write(data));
+        let mut filter = bcj.then(bcj::X86::new);
+        let mut write = |data: &[u8]| match &mut filter {
+            Some(f) => f.write(data, &mut |d| out.write(d)),
+            None => out.write(data),
+        };
+        let decoded = if lzma2 {
+            // A window no bigger than the output.
+            let dict = lzma::lzma2_dict(*coder.properties().first().ok_or(Out::Bad)?).map_err(|_| Out::Bad)?;
+            let dict = dict.min(usize::try_from(size).unwrap_or(usize::MAX));
+            lzma::decode_lzma2_mt(packed, dict, threads, &mut write)
+        } else {
+            lzma::decode_lzma(packed, coder.properties(), size, &mut write)
+        };
+        if let Some(f) = &mut filter {
+            f.finish(&mut |d| out.write(d))?;
+        }
         match decoded {
-            Ok(n) if n == block.get_unpack_size() && out.next == out.files.len() => {}
+            Ok(n) if n == size && out.next == out.files.len() => {}
             Ok(_) | Err(lzma::Failure::Bad) => return Err(Out::Bad),
             Err(lzma::Failure::Stop(e)) => return Err(e),
         }

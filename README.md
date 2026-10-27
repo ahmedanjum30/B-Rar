@@ -15,7 +15,7 @@ Free for personal and other non-commercial use. See [License](#license).
 
 ## Features
 
-- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own LZMA2 decoder for 7z.
+- **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core) its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own LZMA/LZMA2 decoder (with the x86 BCJ filter) for 7z.
 - **Right-click menu.** Right-click an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**. On Windows 11 it's under **Show more options**; the Microsoft Store version (coming soon) puts it in the short menu.
 - **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
 - **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z, tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
@@ -105,7 +105,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 ## Credits
 
-RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate and 7z's LZMA2 use B-Rar's own decoders; other 7z methods, filters and encryption use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate and 7z's LZMA, LZMA2 and x86 BCJ use B-Rar's own decoders; 7z's headers, other methods and filters, encryption and split 7z archives use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
 
 ## License
 

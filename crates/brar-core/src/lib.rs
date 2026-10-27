@@ -1,5 +1,6 @@
 //! brar-core, B-Rar's engine: fast, parallel archive reading (zip, 7z, rar, tar and single-stream codecs).
 
+mod bcj;
 mod deflate;
 mod format;
 mod lzma;
