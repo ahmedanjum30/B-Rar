@@ -1305,6 +1305,11 @@ pub(crate) fn decode_lzma2_mt<E>(input: &[u8], dict: usize, threads: usize, out:
     }
 }
 
+/// Whether [`decode_lzma2_mt`] decodes `input` on several threads.
+pub(crate) fn lzma2_splits(input: &[u8], threads: usize) -> bool {
+    threads > 1 && segments(input).is_some_and(|p| splits(&p, threads))
+}
+
 /// [`decode_lzma2_mt`] for a stream of `len` bytes that `read` reads (at an offset), not
 /// mapped (a split archive's): each worker reads its part. `None` if the stream doesn't split,
 /// for the caller to decode it as a reader.

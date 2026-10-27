@@ -18,6 +18,33 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-28 (04:49): 7z: one-thread streams decode beside their output
+
+A 7z block that decodes on one thread (LZMA, stored, or LZMA2 written on one thread) now
+decodes on a thread of its own, handing its output across in 4 MB batches (3 at a time, the
+buffers reused) to the thread that runs the BCJ filter, the CRCs and the file writes. Before,
+the decoder did all that itself: extraction took about 1 s longer than decoding alone.
+
+Same archives and method as before; Defender off; 5 s pauses; B-Rar and 7-Zip alternating.
+The extracted programs matched the source (SHA-256).
+
+| Archive | B-Rar | 7-Zip 26.05 |
+|---|---|---|
+| `progs-lzma1.7z` (BCJ + LZMA, one stream) | **9.57 s** (9.56–9.60, 4 runs; one 11.01) | 9.86 s (9.86–9.93, 5 runs) |
+| `st.7z` (LZMA2, one stream, game data) | 21.42 s (21.42–21.51, 5 runs) | **20.55 s** (20.55–20.58, 5 runs) |
+| `mt.7z` (LZMA2, 10 parts) | 3.96 s (3.96–4.08) | 4.00 s (4.00–4.01) |
+| `progs.7z` (BCJ + LZMA2) | **2.36 s** (2 runs) | 2.56 s (2.56–2.57) |
+
+(7-Zip ran 0.3–0.4 s faster on `progs-lzma1.7z` than at 04:17 too: the machine, which also
+makes `mt.7z` a tie this time.)
+
+- **B-Rar is now ahead of 7-Zip on the LZMA archive** (3%); it was 2% behind.
+- `st.7z`: 22.40 s → 21.42 s, but still 4% behind. Decoding alone takes 20.82 s on one core
+  (03:37), more than 7-Zip's whole extraction: what's left is decoding speed on poorly
+  compressible data, where 7-Zip's hand-written assembly loop wins.
+
+---
+
 ## 2026-10-28 (04:17): 7z without sevenz-rust2; the match path in assembly
 
 **sevenz-rust2 removed.** B-Rar reads every 7z archive itself (it stays a dev-dependency, for

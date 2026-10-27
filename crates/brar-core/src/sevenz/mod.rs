@@ -125,37 +125,17 @@ fn decode_block(packed: Packed, method: &Method, size: u64, crc: Option<u32>, fi
             Some(f) => f.write(data, &mut |d| out.write(d)),
             None => out.write(data),
         };
-        // A window no bigger than the output.
-        let window = |dict: usize| dict.min(usize::try_from(size).unwrap_or(usize::MAX));
-        let decoded = match (packed, &method.kind) {
-            (Packed::Map(p), Kind::Lzma2(dict)) => lzma::decode_lzma2_mt(p, window(*dict), threads, &mut write),
-            (Packed::Map(p), Kind::Lzma) => lzma::decode_lzma(p, method.props, size, &mut write),
-            (Packed::Map(p), Kind::Copy) => write(p).map(|()| p.len() as u64).map_err(lzma::Failure::Stop),
-            (Packed::Read(src, at, len), Kind::Lzma2(dict)) => {
-                match lzma::decode_lzma2_mt_read(&|o, buf| src.read_at(at + o, buf), len, threads, &mut write) {
-                    Some(r) => r,
-                    // In one part: as a reader.
-                    None => {
-                        let mut r = lzma::Lzma2Reader::new(src.reader(at, len), window(*dict));
-                        let mut buf = vec![0u8; 1 << 20];
-                        let mut total = 0u64;
-                        loop {
-                            match r.read(&mut buf) {
-                                Ok(0) => break Ok(total),
-                                Ok(n) => {
-                                    total += n as u64;
-                                    if let Err(e) = write(&buf[..n]) {
-                                        break Err(lzma::Failure::Stop(e));
-                                    }
-                                }
-                                Err(e) if e.kind() == io::ErrorKind::InvalidData => break Err(lzma::Failure::Bad),
-                                Err(e) => break Err(lzma::Failure::Stop(Out::Stop(e.into()))),
-                            }
-                        }
-                    }
-                }
-            }
-            (Packed::Read(..), _) => Err(lzma::Failure::Bad),
+        // A stream decoded on one thread: the filter, the CRCs and the writing run on this
+        // one, beside it.
+        let serial = match (packed, &method.kind) {
+            (Packed::Map(p), Kind::Lzma2(_)) => !lzma::lzma2_splits(p, threads),
+            (Packed::Map(_), _) => true,
+            (Packed::Read(..), _) => false,
+        };
+        let decoded = if serial {
+            pipe(|send| decode_to(packed, method, size, threads, send), &mut write)
+        } else {
+            decode_to(packed, method, size, threads, &mut write)
         };
         if let Some(f) = &mut filter {
             f.finish(&mut |d| out.write(d))?;
@@ -167,6 +147,94 @@ fn decode_block(packed: Packed, method: &Method, size: u64, crc: Option<u32>, fi
         }
     })();
     result.map_err(|e| out.fail(e))
+}
+
+/// Decodes a block's packed bytes, handing the output to `out`.
+fn decode_to(
+    packed: Packed,
+    method: &Method,
+    size: u64,
+    threads: usize,
+    out: &mut dyn FnMut(&[u8]) -> std::result::Result<(), Out>,
+) -> std::result::Result<u64, lzma::Failure<Out>> {
+    // A window no bigger than the output.
+    let window = |dict: usize| dict.min(usize::try_from(size).unwrap_or(usize::MAX));
+    match (packed, &method.kind) {
+        (Packed::Map(p), Kind::Lzma2(dict)) => lzma::decode_lzma2_mt(p, window(*dict), threads, out),
+        (Packed::Map(p), Kind::Lzma) => lzma::decode_lzma(p, method.props, size, out),
+        (Packed::Map(p), Kind::Copy) => out(p).map(|()| p.len() as u64).map_err(lzma::Failure::Stop),
+        (Packed::Read(src, at, len), Kind::Lzma2(dict)) => {
+            match lzma::decode_lzma2_mt_read(&|o, buf| src.read_at(at + o, buf), len, threads, out) {
+                Some(r) => r,
+                // In one part: as a reader.
+                None => {
+                    let mut r = lzma::Lzma2Reader::new(src.reader(at, len), window(*dict));
+                    let mut buf = vec![0u8; 1 << 20];
+                    let mut total = 0u64;
+                    loop {
+                        match r.read(&mut buf) {
+                            Ok(0) => break Ok(total),
+                            Ok(n) => {
+                                total += n as u64;
+                                if let Err(e) = out(&buf[..n]) {
+                                    break Err(lzma::Failure::Stop(e));
+                                }
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::InvalidData => break Err(lzma::Failure::Bad),
+                            Err(e) => break Err(lzma::Failure::Stop(Out::Stop(e.into()))),
+                        }
+                    }
+                }
+            }
+        }
+        (Packed::Read(..), _) => Err(lzma::Failure::Bad),
+    }
+}
+
+/// Runs `decode` on a thread of its own, its output going to `write` on this one: a decoder
+/// on one core then never waits for the filter, the CRCs or the disk. The output goes across
+/// in batches of [`BATCH`] bytes, a few at a time, their buffers coming back for reuse.
+fn pipe(
+    decode: impl FnOnce(&mut dyn FnMut(&[u8]) -> std::result::Result<(), Out>) -> std::result::Result<u64, lzma::Failure<Out>> + Send,
+    write: &mut dyn FnMut(&[u8]) -> std::result::Result<(), Out>,
+) -> std::result::Result<u64, lzma::Failure<Out>> {
+    const BATCH: usize = 4 << 20;
+    let (full, batches) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+    let (empty, spares) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::scope(|scope| {
+        let decoder = scope.spawn(move || {
+            let mut batch = Vec::with_capacity(BATCH);
+            let result = decode(&mut |data| {
+                batch.extend_from_slice(data);
+                if batch.len() >= BATCH {
+                    let mut next = spares.try_recv().unwrap_or_else(|_| Vec::with_capacity(BATCH));
+                    next.clear();
+                    // The other side gone: it failed, and its error is the one reported.
+                    full.send(std::mem::replace(&mut batch, next)).map_err(|_| Out::Bad)?;
+                }
+                Ok(())
+            });
+            if result.is_ok() && !batch.is_empty() {
+                let _ = full.send(batch);
+            }
+            result
+        });
+        let mut written = Ok(());
+        for batch in &batches {
+            written = write(&batch);
+            if written.is_err() {
+                break;
+            }
+            let _ = empty.send(batch);
+        }
+        // Stops the decoder, if this side failed.
+        drop(batches);
+        let decoded = decoder.join().expect("the decoder thread panicked");
+        match written {
+            Err(e) => Err(lzma::Failure::Stop(e)),
+            Ok(()) => decoded,
+        }
+    })
 }
 
 /// Decodes a block from `reader` (see [`coders`]) into its `files`, in order.

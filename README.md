@@ -42,7 +42,7 @@ Every tool with its default settings, on the same PC (Ryzen 7 5800H, 16 threads,
 
 ¹ Windows tar stopped at a file with a non-ASCII name and skipped it.
 
-On 7z, B-Rar is ahead of 7-Zip on archives 7-Zip made with its default settings (3.81 s against 3.91 s), split into parts (3.75 s against 3.97 s) and of programs (2.43 s against 2.62 s). An archive made on one thread can't be split, and there 7-Zip is still about 2% faster.
+On 7z, B-Rar is ahead of 7-Zip on archives 7-Zip made with its default settings (3.81 s against 3.91 s), split into parts (3.75 s against 3.97 s), of programs (2.36 s against 2.56 s) and in the older LZMA format (9.57 s against 9.90 s). An LZMA2 archive made on one thread can't be split: on poorly compressible data there 7-Zip is still 4% faster (20.55 s against 21.42 s).
 
 ## Installing
 
