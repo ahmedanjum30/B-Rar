@@ -11,10 +11,9 @@
 //! its front, so a match never wraps around.
 //!
 //! Speed: the bits of a literal (most of what poorly compressible data is made of) are as hard
-//! to predict as coin tosses, so they're decided without branches, and the decoding loop does
-//! nothing but plain literals; on x86-64 their 8-bit tree is in assembly, which decides each
-//! bit from one compare. Other symbols go to a function of their own, which keeps the loop's
-//! values in registers. LZMA2 streams that 7-Zip wrote on several threads restart their
+//! to predict as coin tosses, so they're decided without branches; on x86-64 the 8-bit trees of
+//! literals (plain, and after a match) are in assembly, which decides each bit from one compare.
+//! LZMA2 streams that 7-Zip wrote on several threads restart their
 //! dictionary every few dictionary sizes; [`decode_lzma2_mt`] decodes those parts in parallel.
 
 use std::sync::{Condvar, Mutex};
@@ -241,9 +240,8 @@ impl Decoder {
     /// chunks) a match may not run past `end`; without (LZMA) it may, and the caller cuts the
     /// output.
     ///
-    /// This loop only does plain literals, most of what poorly compressible data is made of;
-    /// everything else goes to [`Self::other`], which keeps the loop small enough for its
-    /// values to stay in registers.
+    /// The loop does plain literals, most of what poorly compressible data is made of, itself;
+    /// the other symbols are in [`Self::other`].
     #[inline(never)]
     fn decode(&mut self, rc: &mut Rc, input: &[u8], limit: usize, w: &mut Window, end: usize, exact: bool) -> Res<bool> {
         assert!(input.len() >= limit + PAD && w.buf.len() >= end + MATCH_MAX + 64);
@@ -296,7 +294,7 @@ impl Decoder {
     /// A symbol other than a plain literal: a literal after a match (`literal`), a match or a
     /// repeated match. Returns the coder, position and state after it, and whether it was the
     /// end marker.
-    #[inline(never)]
+    #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn other(
         m: &mut Model,
@@ -318,18 +316,25 @@ impl Decoder {
                 return Err(Bad);
             }
             // SAFETY: back <= pos - floor.
+            #[cfg_attr(target_arch = "x86_64", allow(unused_mut))]
             let mut match_byte = usize::from(unsafe { *buf.add(pos - back) });
             let probs = f.literal_probs(m, total, pos);
-            let mut s = 1usize;
-            let mut offs = 0x100usize;
-            while s < 0x100 {
-                match_byte <<= 1;
-                let match_bit = match_byte & offs;
-                let b = rc.bit_free(input, &mut probs[offs + match_bit + s]);
-                s = (s << 1) | b;
-                // Once a bit differs from the match byte's, the rest are plain.
-                offs &= if b == 0 { !match_bit } else { match_bit };
-            }
+            #[cfg(target_arch = "x86_64")]
+            let s = rc.matched_asm(input, probs, match_byte as u8);
+            #[cfg(not(target_arch = "x86_64"))]
+            let s = {
+                let mut s = 1usize;
+                let mut offs = 0x100usize;
+                while s < 0x100 {
+                    match_byte <<= 1;
+                    let match_bit = match_byte & offs;
+                    let b = rc.bit_free(input, &mut probs[offs + match_bit + s]);
+                    s = (s << 1) | b;
+                    // Once a bit differs from the match byte's, the rest are plain.
+                    offs &= if b == 0 { !match_bit } else { match_bit };
+                }
+                s
+            };
             // SAFETY: pos < end.
             unsafe { *buf.add(pos) = s as u8 };
             return Ok((rc, pos + 1, usize::from(AFTER_LITERAL[state]), false));
@@ -636,6 +641,84 @@ impl Rc {
                 b = out(reg) _,
                 c0 = out(reg) _,
                 c1 = out(reg) _,
+                c2 = out(reg) _,
+                x = out(reg) _,
+                options(nostack),
+            );
+        }
+        self.range = range;
+        self.code = code;
+        // SAFETY: same allocation.
+        self.at = unsafe { inp.offset_from(input.as_ptr()) } as usize;
+        sym - 0x100
+    }
+
+    /// A literal after a match, in assembly: decoded against `match_byte` (the byte at the last
+    /// distance), whose bits pick their own probabilities until one differs (as LzmaDec does
+    /// it). `probs` is the literal's 0x300.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn matched_asm(&mut self, input: &[u8], probs: &mut [u16], match_byte: u8) -> usize {
+        assert!(probs.len() >= 0x300);
+        let mut range = self.range;
+        let mut code = self.code;
+        // SAFETY: the symbol reads less than PAD bytes from `at`.
+        let mut inp = unsafe { input.as_ptr().add(self.at) };
+        let mut sym = 1usize;
+        // SAFETY: offs + bit + sym < 0x300.
+        unsafe {
+            std::arch::asm!(
+                "2:",
+                "cmp {range:e}, 0x1000000",
+                "jae 3f",
+                "shl {range:e}, 8",
+                "shl {code:e}, 8",
+                "movzx {t:e}, byte ptr [{inp}]",
+                "or {code:e}, {t:e}",
+                "inc {inp}",
+                "3:",
+                "add {mb:e}, {mb:e}",
+                "mov {bit:e}, {offs:e}",
+                "and {offs:e}, {mb:e}",
+                "lea {i}, [{offs} + {bit}]",
+                "add {i}, {sym}",
+                "movzx {v:e}, word ptr [{probs} + {i}*2]",
+                "mov {b:e}, {range:e}",
+                "shr {b:e}, 11",
+                "imul {b:e}, {v:e}",
+                "mov {t:e}, {range:e}",
+                "sub {t:e}, {b:e}",
+                "mov {range:e}, {b:e}",
+                "lea {x}, [{v} - 2017]",
+                // After a 0 bit the rest are plain: offs ^ bit.
+                "xor {bit:e}, {offs:e}",
+                "mov {c2:e}, {code:e}",
+                // The bit: CF set for a 0.
+                "sub {c2:e}, {b:e}",
+                "cmovae {range:e}, {t:e}",
+                "cmovae {code:e}, {c2:e}",
+                "cmovae {x}, {v}",
+                "cmovb {offs:e}, {bit:e}",
+                "lea {t}, [{sym}*2 + 1]",
+                "sbb {t}, 0",
+                "sar {x}, 5",
+                "sub {v}, {x}",
+                "mov word ptr [{probs} + {i}*2], {v:x}",
+                "mov {sym}, {t}",
+                "cmp {sym}, 256",
+                "jb 2b",
+                range = inout(reg) range,
+                code = inout(reg) code,
+                inp = inout(reg) inp,
+                sym = inout(reg) sym,
+                mb = inout(reg) u64::from(match_byte) => _,
+                offs = inout(reg) 0x100u64 => _,
+                probs = in(reg) probs.as_mut_ptr(),
+                bit = out(reg) _,
+                i = out(reg) _,
+                v = out(reg) _,
+                t = out(reg) _,
+                b = out(reg) _,
                 c2 = out(reg) _,
                 x = out(reg) _,
                 options(nostack),
@@ -1143,13 +1226,15 @@ mod tests {
     }
 }
 
-/// One-core speed of the LZMA2 decoder on the blocks of a real 7z archive, against liblzma:
-/// `BRAR_LZMA_BENCH=archive.7z cargo test --release -p brar-core --lib lzma_bench -- --ignored --nocapture`
 #[cfg(test)]
 mod bench {
     use super::*;
     use std::time::Instant;
 
+    /// One core's speed (or `BRAR_LZMA_THREADS`' for LZMA2 in parts) on the LZMA and LZMA2
+    /// blocks of a real 7z archive, against liblzma:
+    /// `BRAR_LZMA_BENCH=archive.7z cargo test --release -p brar-core --lib lzma_bench -- --ignored --nocapture`.
+    /// `BRAR_LZMA_MB` decodes only the first so many MB of each block.
     #[test]
     #[ignore]
     fn lzma_bench() {
@@ -1157,70 +1242,40 @@ mod bench {
         let file = std::fs::File::open(&path).unwrap();
         let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
         let archive = sevenz_rust2::Archive::read(&mut std::io::Cursor::new(&map[..]), &sevenz_rust2::Password::empty()).unwrap();
+        let limit = std::env::var("BRAR_LZMA_MB").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20);
+        let threads = std::env::var("BRAR_LZMA_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        // (packed, properties, LZMA2?, bytes to decode, CRC to check)
         let mut streams = Vec::new();
         for (b, block) in archive.blocks.iter().enumerate() {
-            let [coder] = &block.coders[..] else { continue };
-            if coder.encoder_method_id() != [0x21] {
+            let Some(coder) = block.coders.iter().find(|c| matches!(c.encoder_method_id(), [0x21] | [3, 1, 1])) else {
                 continue;
-            }
+            };
             let first = archive.stream_map.block_first_pack_stream_index()[b];
             let at = (32 + archive.pack_pos() + archive.stream_map.pack_stream_offsets()[first]) as usize;
             let packed = &map[at..at + archive.pack_sizes()[first] as usize];
-            streams.push((
-                packed,
-                lzma2_dict(coder.properties()[0]).unwrap(),
-                block.get_unpack_size(),
-                block.has_crc.then_some(block.crc as u32),
-            ));
+            let size = block.get_unpack_size().min(limit.unwrap_or(u64::MAX));
+            let crc = (block.coders.len() == 1 && block.has_crc && limit.is_none()).then_some(block.crc as u32);
+            streams.push((packed, coder.properties(), coder.encoder_method_id() == [0x21], size, crc));
         }
-        // BRAR_LZMA_MB: decode only the first so many MB of each block.
-        if let Some(mb) = std::env::var("BRAR_LZMA_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
-            for s in &mut streams {
-                s.2 = s.2.min(mb << 20);
-                s.3 = None;
-            }
-        }
-        // BRAR_LZMA_THREADS: decode the parts between dictionary resets on so many threads.
-        let threads = std::env::var("BRAR_LZMA_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-        let unpacked: u64 = streams.iter().map(|s| s.2).sum();
-        for &(packed, _, _, _) in &streams {
-            let mut at = 0;
-            let (mut resets, mut chunks, mut out, mut last, mut biggest) = (0, 0, 0u64, 0u64, 0u64);
-            while packed[at] != 0 {
-                let c = packed[at];
-                chunks += 1;
-                if c == 1 || c >= 0xe0 {
-                    resets += 1;
-                    biggest = biggest.max(out - last);
-                    last = out;
-                }
-                if c < 0x80 {
-                    let n = u16::from_be_bytes([packed[at + 1], packed[at + 2]]) as usize + 1;
-                    out += n as u64;
-                    at += 3 + n;
-                } else {
-                    out += ((usize::from(c & 0x1f) << 16) + u16::from_be_bytes([packed[at + 1], packed[at + 2]]) as usize + 1) as u64;
-                    at += 5 + u16::from_be_bytes([packed[at + 3], packed[at + 4]]) as usize + 1 + usize::from(c >= 0xc0);
-                }
-            }
-            println!(
-                "{chunks} chunks, {resets} dictionary resets, biggest segment {} MB",
-                biggest.max(out - last) >> 20
-            );
-        }
-        println!("{} LZMA2 blocks, {} MB", streams.len(), unpacked >> 20);
+        let unpacked: u64 = streams.iter().map(|s| s.3).sum();
+        println!("{} blocks, {} MB", streams.len(), unpacked >> 20);
         for round in 0..3 {
             let t = Instant::now();
-            for &(packed, dict, size, crc) in &streams {
+            for &(packed, props, lzma2, size, crc) in &streams {
                 let mut h = crc32fast::Hasher::new();
                 let mut done = 0u64;
-                let r = decode_lzma2_mt::<()>(packed, dict, threads, &mut |b| {
+                let mut out = |b: &[u8]| {
                     if round == 0 {
                         h.update(b);
                     }
                     done += b.len() as u64;
                     if done >= size { Err(()) } else { Ok(()) }
-                });
+                };
+                let r = if lzma2 {
+                    decode_lzma2_mt::<()>(packed, lzma2_dict(props[0]).unwrap(), threads, &mut out)
+                } else {
+                    decode_lzma::<()>(packed, props, size, &mut out)
+                };
                 assert!(matches!(r, Ok(_) | Err(Failure::Stop(()))), "B-Rar failed");
                 assert!(done >= size);
                 if let (0, Some(crc)) = (round, crc) {
@@ -1229,12 +1284,21 @@ mod bench {
             }
             let ours = t.elapsed().as_secs_f64();
             let t = Instant::now();
-            for &(packed, dict, size, _) in &streams {
+            for &(packed, props, lzma2, size, _) in &streams {
                 use liblzma::stream::{Action, Filters, LzmaOptions, Stream};
                 let mut opts = LzmaOptions::new_preset(6).unwrap();
-                opts.dict_size(dict.min(u32::MAX as usize) as u32);
                 let mut f = Filters::new();
-                f.lzma2(&opts);
+                if lzma2 {
+                    opts.dict_size(lzma2_dict(props[0]).unwrap().min(u32::MAX as usize) as u32);
+                    f.lzma2(&opts);
+                } else {
+                    let p = props[0];
+                    opts.literal_context_bits(u32::from(p % 9))
+                        .literal_position_bits(u32::from(p / 9 % 5))
+                        .position_bits(u32::from(p / 45))
+                        .dict_size(u32::from_le_bytes(props[1..5].try_into().unwrap()));
+                    f.lzma1(&opts);
+                }
                 let mut s = Stream::new_raw_decoder(&f).unwrap();
                 let mut out = vec![0u8; 8 << 20];
                 let mut input = packed;

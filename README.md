@@ -42,7 +42,7 @@ Every tool with its default settings, on the same PC (Ryzen 7 5800H, 16 threads,
 
 ¹ Windows tar stopped at a file with a non-ASCII name and skipped it.
 
-On 7z, B-Rar and 7-Zip are level (3.85 s and 3.91 s): B-Rar's own LZMA2 decoder decodes the parts of an archive 7-Zip made on several threads on all cores at once. An archive made on one thread can't be split, and there 7-Zip is still about 8% faster.
+On 7z, B-Rar and 7-Zip are level (3.85 s and 3.91 s): B-Rar's own LZMA2 decoder decodes the parts of an archive 7-Zip made on several threads on all cores at once. On archives of programs (BCJ) B-Rar is 7% faster than 7-Zip. An archive made on one thread can't be split, and there 7-Zip is still about 6% faster.
 
 ## Installing
 
@@ -105,7 +105,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 
 ## Credits
 
-RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate and 7z's LZMA, LZMA2 and x86 BCJ use B-Rar's own decoders; 7z's headers, other methods and filters, encryption and split 7z archives use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
+RAR5 archives, solid, encrypted or in volumes, use B-Rar's own decoder; RAR 4 archives (and the rare RAR5 file it can't check, such as one with only a BLAKE2 checksum) are decoded with RARLAB's unRAR source code ([license](installer/unrar-license.txt)); unRAR may not be used to re-create the RAR compression algorithm. ZIP Deflate, and 7z's headers, LZMA, LZMA2 and x86 BCJ, use B-Rar's own code; other 7z methods and filters, encryption and split 7z archives use [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2).
 
 ## License
 

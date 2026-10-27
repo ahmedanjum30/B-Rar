@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Own LZMA2 decoder for 7z.** 7z archives in 7-Zip's default format (LZMA2) now use B-Rar's own decoder: 1.5x faster than before on all cores, level with 7-Zip on a 1.25 GB archive (3.9 s), and archives 7-Zip made on several threads are decoded on all cores. Archives of programs (LZMA2 behind the x86 BCJ filter, which 7-Zip adds for .exe and .dll files) and older LZMA archives use it too: 1.2x faster than before, level with 7-Zip on BCJ. Other 7z methods and filters, encrypted and split 7z archives still use sevenz-rust2.
+- **Own LZMA2 decoder for 7z.** 7z archives in 7-Zip's default format (LZMA2) now use B-Rar's own decoder: 1.5x faster than before on all cores, level with 7-Zip on a 1.25 GB archive (3.9 s), and archives 7-Zip made on several threads are decoded on all cores. Archives of programs (LZMA2 behind the x86 BCJ filter, which 7-Zip adds for .exe and .dll files) and older LZMA archives use it too: 1.2x faster than before, level with 7-Zip on BCJ. B-Rar also reads 7z headers itself, so such archives don't touch sevenz-rust2 at all. Other 7z methods and filters, encrypted and split 7z archives still use sevenz-rust2.
 
 ## 1.0.0 (2026-10-27)
 

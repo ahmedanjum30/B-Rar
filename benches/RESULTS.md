@@ -18,6 +18,44 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-28 (03:37): 7z: faster matches, and B-Rar's own 7z header reader
+
+- **Matches on one core.** Literals after a match (decoded against the byte at the last
+  distance) now also have an 8-bit tree in assembly, and the match path is inlined into the
+  decoding loop again (with the literal trees in assembly, the loop no longer needs it apart).
+  On compressible data that's where the time goes: on the program files, literals right after a
+  match outnumber plain ones (13.8M against 8.2M in the first 300 MB), with 23.3M matches.
+- **Headers.** B-Rar reads 7z headers itself (`crates/brar-core/src/sevenz/header.rs`,
+  including packed headers, decoded with its own LZMA). When every block is LZMA, LZMA2 or
+  stored, maybe behind x86 BCJ, the archive is listed and extracted without sevenz-rust2.
+  Checked against sevenz-rust2's reading of the same archives (every file's name, size, CRC,
+  time, block) for 7-Zip archives in 8 layouts, and on sevenz-rust2's 18 sample archives (same
+  test results and listings with `BRAR_NO_OWN_7Z=1`).
+
+**One core, decoding only** (`lzma_bench`, whole streams, best of 3):
+
+| Stream | B-Rar | before (03:14) | liblzma |
+|---|---|---|---|
+| `st.7z` (LZMA2, game data, 1.22 GiB) | 20.95 s | 21.35 s | 20.19 s |
+| `progs-lzma1.7z` (LZMA, programs, 1.08 GiB) | 9.90 s | 11.06 s | 9.02 s |
+
+Tried and dropped: 16-byte match copies and a fill for distance 1 (no change; matches here
+average 12.5 bytes).
+
+**Extraction**, as in the 03:14 entry (same archives, method and machine; Defender off; every
+output matched its source):
+
+| Archive | B-Rar | 7-Zip 26.05 |
+|---|---|---|
+| `mt.7z` (LZMA2, 10 parts) | **3.90 s** (3.90–4.00) | 3.91 s (3.91–4.05) |
+| `progs.7z` (BCJ + LZMA2) | **2.47 s** (2.47–2.51) | 2.66 s (2.66–2.69) |
+| `progs-lzma1.7z` (BCJ + LZMA, one stream) | 10.87 s (10.87–10.88) | **10.26 s** (10.26–10.27) |
+
+B-Rar is now ahead of 7-Zip on programs (7%), level on game data, and 6% behind on a stream
+that can't be split (was 17%).
+
+---
+
 ## 2026-10-28 (03:14): 7z: BCJ and LZMA1 on B-Rar's decoder; writing in parts dropped
 
 B-Rar's 7z path now also takes LZMA (LZMA1) blocks and blocks behind the x86 BCJ filter (7-Zip
