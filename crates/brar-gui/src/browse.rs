@@ -327,7 +327,10 @@ impl Browser {
     }
 
     fn updatable(&self) -> bool {
-        matches!(self.update_kind, update::Kind::Portable | update::Kind::Sideloaded)
+        matches!(
+            self.update_kind,
+            update::Kind::Installed | update::Kind::Portable | update::Kind::Sideloaded
+        )
     }
 
     /// Looks for a newer release in the background. A check that wasn't asked for fails

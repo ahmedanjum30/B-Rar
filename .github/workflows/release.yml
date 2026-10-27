@@ -1,8 +1,9 @@
 name: Release
 
 # Pushing a v* tag builds the Microsoft Store package (a workflow artifact, uploaded to Partner
-# Center by hand; Microsoft signs it) and publishes the portable zip, and the MSIX signed with
-# B-Rar's own certificate, as a GitHub release. Copies outside the Store update from these.
+# Center by hand; Microsoft signs it) and publishes the installer (B-Rar-Setup), the portable
+# zip and the MSIX signed with B-Rar's own certificate as a GitHub release, with the website.
+# Copies outside the Store update from these releases.
 on:
   push:
     tags: ["v*"]
@@ -36,6 +37,14 @@ jobs:
         shell: pwsh
         run: ./installer/build.ps1 -Store
 
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # The release binaries are built already (by the Store package).
+      - name: Build the installer
+        shell: pwsh
+        run: ./installer/build-setup.ps1
+
       # The sideloaded package: the certificate goes into the runner's store, where build.ps1
       # looks for it (by subject and friendly name).
       - name: Build the signed package
@@ -59,7 +68,7 @@ jobs:
           Copy-Item target\release\B-Rar.exe, target\release\B-Rar-GUI.exe, README.md, LICENSE, installer\unrar-license.txt "dist\$name"
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Remove-Item -Recurse "dist\$name"
-          Get-ChildItem dist -File | Where-Object { $_.Name -like '*.zip' -or $_.Name -like '*-x64.msix' } | ForEach-Object {
+          Get-ChildItem dist -File | Where-Object { $_.Name -like '*.zip' -or $_.Name -like '*-x64.msix' -or $_.Name -like 'B-Rar-Setup-*.exe' } | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist\SHA256SUMS.txt
 
@@ -67,6 +76,7 @@ jobs:
         with:
           name: release-files
           path: |
+            dist/B-Rar-Setup-*.exe
             dist/B-Rar-*-portable-x64.zip
             dist/B-Rar-*-x64.msix
             dist/SHA256SUMS.txt
@@ -95,16 +105,19 @@ jobs:
           body: |
             ## Install
 
-            Get B-Rar from the **Microsoft Store** for the full app with the right-click menu and automatic updates (or `winget install B-Rar`).
+            Download **B-Rar-Setup-${{ github.ref_name }}.exe** below and run it. It installs for your user only, without admin rights, and adds B-Rar to the right-click menu of archives (on Windows 11 under **Show more options**). Installed copies update themselves: B-Rar says when a new version is out.
 
-            **The `-portable-x64.zip`** below has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` with nothing to install, and no right-click menu. It's built by this repository's release workflow; check it against `SHA256SUMS.txt`.
+            > **Windows says "Windows protected your PC"?** Click **More info**, then **Run anyway**. B-Rar isn't code-signed yet, so Windows doesn't know the publisher. The installer is the one built by this repository's release workflow; you can check it against `SHA256SUMS.txt`.
 
-            Copies outside the Store (the portable files, and the `-x64.msix` signed with B-Rar's own certificate) say when a new version is out, and update from here when you click **Update**.
+            **The `-portable-x64.zip`** has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` with nothing to install and no right-click menu.
+
+            **Microsoft Store:** coming soon, with the Windows 11 short right-click menu and updates through the Store (and `winget install B-Rar`).
           generate_release_notes: true
 
   # The website (docs/) on GitHub Pages, served from the gh-pages branch, with this version's
-  # portable zip at a fixed link without redirects:
-  # https://ahmedanjum30.github.io/B-Rar/download/<version>/B-Rar-<version>-portable-x64.zip
+  # installer and portable zip at fixed links without redirects:
+  # https://ahmedanjum30.github.io/B-Rar/download/<version>/, and the newest installer at
+# https://ahmedanjum30.github.io/B-Rar/download/B-Rar-Setup.exe (the website's download button).
   pages:
     needs: publish
     runs-on: ubuntu-latest
@@ -129,9 +142,10 @@ jobs:
           find . -mindepth 1 -maxdepth 1 ! -name .git ! -name download -exec rm -rf {} +
           cp -r ../main/docs/. .
           mkdir -p "download/$version"
-          cp "../release/B-Rar-$version-portable-x64.zip" "download/$version/"
+          cp "../release/B-Rar-$version-portable-x64.zip" "../release/B-Rar-Setup-$version.exe" "download/$version/"
+          cp "../release/B-Rar-Setup-$version.exe" download/B-Rar-Setup.exe
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Site and portable zip $version"
+          git commit -m "Site and downloads $version"
           git push

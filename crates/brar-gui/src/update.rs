@@ -1,5 +1,6 @@
 //! Updates from GitHub releases, for the copies the Microsoft Store doesn't update: the
-//! portable files and the sideloaded MSIX (signed with B-Rar's own certificate). B-Rar only
+//! installed version (B-Rar-Setup), the portable files and the sideloaded MSIX (signed with
+//! B-Rar's own certificate). B-Rar only
 //! tells about a new version; nothing is downloaded until the update is asked for.
 //!
 //! The newest version comes from the release pages, not GitHub's API: the API allows only 60
@@ -27,6 +28,8 @@ pub enum Kind {
     /// The MSIX package signed with B-Rar's certificate: updated by opening the new package
     /// in App Installer.
     Sideloaded,
+    /// Installed by B-Rar-Setup: updated by running the new setup.
+    Installed,
     /// The portable zip's files: replaced in place.
     Portable,
     /// Anything else (a development build): never updated.
@@ -37,6 +40,8 @@ pub fn kind() -> Kind {
     match package_family() {
         Some(family) if family == SIDELOADED_FAMILY => Kind::Sideloaded,
         Some(_) => Kind::Store,
+        // The setup leaves its uninstaller next to the programs.
+        None if exe_dir().is_some_and(|d| d.join("unins000.exe").exists()) => Kind::Installed,
         // The portable zip ships the unRAR license next to the programs; a build folder
         // doesn't have it.
         None if exe_dir().is_some_and(|d| d.join("unrar-license.txt").exists()) => Kind::Portable,
@@ -88,6 +93,7 @@ fn check_against(kind: Kind, current: &str) -> Result<Option<Release>, String> {
     }
     let file_name = match kind {
         Kind::Sideloaded => format!("B-Rar-{version}-x64.msix"),
+        Kind::Installed => format!("B-Rar-Setup-{version}.exe"),
         _ => format!("B-Rar-{version}-portable-x64.zip"),
     };
     let sums = http::get(&format!("{REPO}/releases/download/{tag}/SHA256SUMS.txt"), 64 * 1024)?;
@@ -153,7 +159,8 @@ pub fn download(release: &Release, done: &AtomicU64, total: &AtomicU64) -> Resul
     }
 }
 
-/// Installs a downloaded update. Sideloaded: opens the package in App Installer (which
+/// Installs a downloaded update. Installed: runs the new setup silently (it closes B-Rar,
+/// replaces it and opens it again). Sideloaded: opens the package in App Installer (which
 /// closes B-Rar to update it). Portable: puts the new files in place of these and starts the
 /// new B-Rar-GUI. Either way this window should close afterwards.
 pub fn install(kind: Kind, file: &Path) -> Result<(), String> {
@@ -162,6 +169,12 @@ pub fn install(kind: Kind, file: &Path) -> Result<(), String> {
             crate::shell::open_path(file);
             Ok(())
         }
+        // Read by the `UpdateMode` check in installer\b-rar.iss: open B-Rar again afterwards.
+        Kind::Installed => std::process::Command::new(file)
+            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1"])
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("couldn't start the update: {e}")),
         Kind::Portable => replace_files(file),
         _ => Err("this copy of B-Rar isn't updated from GitHub".to_owned()),
     }

@@ -44,11 +44,13 @@ One run per tool on the same PC (16 threads, NVMe SSD), extracting to the same d
 
 ## Installing
 
-**Microsoft Store:** coming soon. It's the full app with the right-click menu, and it updates itself. Once it's in the Store, `winget install B-Rar` installs it too.
+**Installer:** `B-Rar-Setup-<version>.exe` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) (or the [website](https://ahmedanjum30.github.io/B-Rar/)). It installs for your user without admin rights, adds B-Rar to the right-click menu of archives (on Windows 11 under **Show more options**) and to **Open with**, and can add `B-Rar` to PATH. B-Rar isn't code-signed yet: if Windows says "Windows protected your PC", click **More info**, then **Run anyway**.
+
+**Microsoft Store:** coming soon. It's the full app with the Windows 11 short right-click menu, and it updates itself. Once it's in the Store, `winget install B-Rar` installs it too.
 
 **Portable:** `B-Rar-<version>-portable-x64.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` (the window) with nothing to install, and no right-click menu. Run `B-Rar-GUI.exe archive.zip` to browse an archive. The zip is built by this repository's [release workflow](.github/workflows/release.yml) from the source you see here; to check yours, compare its SHA-256 (`Get-FileHash <file>` in PowerShell) with `SHA256SUMS.txt` on the same release.
 
-**Updates:** the Store version updates itself. The portable version (and the `-x64.msix` signed with B-Rar's own certificate) checks GitHub when its window opens and says when a new version is out; nothing is downloaded until you click **Update**. The download is checked against the release's `SHA256SUMS.txt`, then the portable files are replaced in place (the window reopens) or the package opens in App Installer.
+**Updates:** the Store version updates itself. The installed and portable versions (and the `-x64.msix` signed with B-Rar's own certificate) check GitHub when the window opens and say when a new version is out; nothing is downloaded until you click **Update**. The download is checked against the release's `SHA256SUMS.txt`, then the new setup runs (B-Rar reopens afterwards), the portable files are replaced in place, or the package opens in App Installer.
 
 ## Command line
 
