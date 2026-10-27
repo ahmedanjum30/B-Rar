@@ -101,3 +101,37 @@ jobs:
 
             Copies outside the Store (the portable files, and the `-x64.msix` signed with B-Rar's own certificate) say when a new version is out, and update from here when you click **Update**.
           generate_release_notes: true
+
+  # The website (docs/) on GitHub Pages, served from the gh-pages branch, with this version's
+  # portable zip at a fixed link without redirects:
+  # https://ahmedanjum30.github.io/B-Rar/download/<version>/B-Rar-<version>-portable-x64.zip
+  pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: main
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: release
+      - name: Update the site
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd site
+          # The site from main's docs/; earlier versions' downloads stay.
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name download -exec rm -rf {} +
+          cp -r ../main/docs/. .
+          mkdir -p "download/$version"
+          cp "../release/B-Rar-$version-portable-x64.zip" "download/$version/"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Site and portable zip $version"
+          git push
