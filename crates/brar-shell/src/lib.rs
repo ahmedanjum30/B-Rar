@@ -1,6 +1,7 @@
 //! Explorer context-menu handler (`IExplorerCommand`) for B-Rar, registered by the MSIX
 //! package for every file and folder. On Windows 11 this is what puts B-Rar in the short
-//! right-click menu: the extract commands for archives, and "Add to archive" for anything.
+//! right-click menu: one B-Rar submenu, as WinRAR's, with the extract commands for archives and
+//! the add commands for anything else.
 //!
 //! It runs inside Explorer, so it stays tiny: it only builds the menu and launches
 //! `B-Rar-GUI.exe` (installed next to this DLL), and it never lets a panic cross into Explorer.
@@ -24,8 +25,8 @@ use windows::{
             },
         },
         UI::Shell::{
-            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECF_SEPARATORBEFORE, ECS_ENABLED, ECS_HIDDEN, IEnumExplorerCommand, IEnumExplorerCommand_Impl,
-            IExplorerCommand, IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, ECS_HIDDEN, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
+            IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
         },
     },
     core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, Result, implement},
@@ -50,8 +51,8 @@ enum Verb {
     Compress,
 }
 
-/// In WinRAR's order: open, extract (asking, here, to a folder), test; then adding.
-const VERBS: [Verb; 7] = [Verb::Open, Verb::Ask, Verb::Here, Verb::ToFolder, Verb::Test, Verb::Add, Verb::Compress];
+/// In WinRAR's order: open, extract (asking, to a folder, here), test; or adding.
+const VERBS: [Verb; 7] = [Verb::Open, Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test, Verb::Add, Verb::Compress];
 
 /// The archive types B-Rar opens (the same as the installer's list).
 const ARCHIVES: [&str; 15] = [
@@ -185,11 +186,11 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
     fn GetState(&self, items: Ref<IShellItemArray>, _: BOOL) -> Result<u32> {
         let verb = self.0;
         guard(|| {
-            // The extract commands only when everything selected is an archive.
-            let shown = !verb.extracts() || {
-                let items = selected(&items);
-                !items.is_empty() && items.iter().all(|p| is_archive(p))
-            };
+            // As WinRAR's menu: the extract commands when everything selected is an archive, the
+            // add ones otherwise.
+            let items = selected(&items);
+            let archives = !items.is_empty() && items.iter().all(|p| is_archive(p));
+            let shown = verb.extracts() == archives;
             Ok(if shown { ECS_ENABLED.0 } else { ECS_HIDDEN.0 } as u32)
         })
     }
@@ -234,8 +235,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
     }
 
     fn GetFlags(&self) -> Result<u32> {
-        // A line between the extract commands and the add ones (as WinRAR's menu has).
-        Ok(if self.0 == Verb::Add { ECF_SEPARATORBEFORE.0 } else { ECF_DEFAULT.0 } as u32)
+        Ok(ECF_DEFAULT.0 as u32)
     }
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {

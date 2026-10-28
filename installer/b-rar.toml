@@ -114,11 +114,11 @@ key = 'Software\Classes\.{each}\OpenWithProgids'
 name = "B-Rar.Archive"
 value = ""
 
-# The right-click menu: one B-Rar submenu, like WinRAR's. For archives: the extract commands, then
-# (below a line) the add ones; for any other file and for folders, just the add ones. Subkeys are
-# listed in name order, hence the numbers. Explorer runs the add commands once per selected item;
-# B-Rar-GUI gathers them into one archive. (Archives match both their type's B-Rar key and the
-# all-files one; Explorer shows the type's.)
+# The right-click menu: one B-Rar submenu, like WinRAR's. For archives the extract commands (in
+# WinRAR's order), for any other file and for folders the add commands. Subkeys are listed in name
+# order, hence the numbers. Explorer runs the add commands once per selected item; B-Rar-GUI
+# gathers them into one archive. (Archives match both their type's B-Rar key and the all-files one;
+# Explorer shows the type's.)
 [[registry]]
 each = "archive"
 root = "HKA"
@@ -170,28 +170,28 @@ value = '"{app}\B-Rar-GUI.exe" x "%1" --ask'
 [[registry]]
 each = "archive"
 root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3here'
-name = "MUIVerb"
-value = "Extract here"
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3here\command'
-value = '"{app}\B-Rar-GUI.exe" x "%1" --here'
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4folder'
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder'
 name = "MUIVerb"
 value = "Extract to folder"
 
 [[registry]]
 each = "archive"
 root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4folder\command'
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder\command'
 value = '"{app}\B-Rar-GUI.exe" x "%1"'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here'
+name = "MUIVerb"
+value = "Extract here"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here\command'
+value = '"{app}\B-Rar-GUI.exe" x "%1" --here'
 
 [[registry]]
 each = "archive"
@@ -205,39 +205,6 @@ each = "archive"
 root = "HKA"
 key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\5test\command'
 value = '"{app}\B-Rar-GUI.exe" t "%1"'
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add'
-name = "MUIVerb"
-value = "Add to archive..."
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add'
-name = "CommandFlags"
-value = 32
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add\command'
-value = '"{app}\B-Rar-GUI.exe" a --ask "%1"'
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\7zip'
-name = "MUIVerb"
-value = "Add to ZIP"
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\7zip\command'
-value = '"{app}\B-Rar-GUI.exe" a "%1"'
 
 [[registry]]
 each = "anything"
