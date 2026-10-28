@@ -158,7 +158,7 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
     Ok(app::run(archive, mode, password))
 }
 
-/// The archive "Compress to" makes for `inputs`: one item's name, or for several their folder's
+/// The archive "Add to name.zip" makes for `inputs`: one item's name, or for several their folder's
 /// name, with .zip, next to them; " (2)" and so on if that's taken.
 fn archive_for(inputs: &[PathBuf]) -> PathBuf {
     let first = &inputs[0];

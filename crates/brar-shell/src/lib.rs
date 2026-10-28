@@ -24,8 +24,8 @@ use windows::{
             },
         },
         UI::Shell::{
-            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, ECS_HIDDEN, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
-            IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECF_SEPARATORBEFORE, ECS_ENABLED, ECS_HIDDEN, IEnumExplorerCommand, IEnumExplorerCommand_Impl,
+            IExplorerCommand, IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
         },
     },
     core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, Result, implement},
@@ -46,11 +46,12 @@ enum Verb {
     Test,
     /// "Add to archive...": the settings page first.
     Add,
-    /// "Compress to name.zip", straight away.
+    /// "Add to name.zip", straight away.
     Compress,
 }
 
-const VERBS: [Verb; 7] = [Verb::Open, Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test, Verb::Add, Verb::Compress];
+/// In WinRAR's order: open, extract (asking, here, to a folder), test; then adding.
+const VERBS: [Verb; 7] = [Verb::Open, Verb::Ask, Verb::Here, Verb::ToFolder, Verb::Test, Verb::Add, Verb::Compress];
 
 /// The archive types B-Rar opens (the same as the installer's list).
 const ARCHIVES: [&str; 15] = [
@@ -163,7 +164,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
                 Verb::Here => "Extract here".to_owned(),
                 Verb::Test => "Test archive".to_owned(),
                 Verb::Add => "Add to archive...".to_owned(),
-                Verb::Compress => format!("Compress to \"{}\"", zip_name(&selected(&items))),
+                Verb::Compress => format!("Add to \"{}\"", zip_name(&selected(&items))),
             };
             co_string(&title)
         })
@@ -233,7 +234,8 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
     }
 
     fn GetFlags(&self) -> Result<u32> {
-        Ok(ECF_DEFAULT.0 as u32)
+        // A line between the extract commands and the add ones (as WinRAR's menu has).
+        Ok(if self.0 == Verb::Add { ECF_SEPARATORBEFORE.0 } else { ECF_DEFAULT.0 } as u32)
     }
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
@@ -302,7 +304,7 @@ fn selected(items: &Ref<IShellItemArray>) -> Vec<PathBuf> {
     }
 }
 
-/// The archive "Compress to" makes (as B-Rar-GUI picks it, without the " (2)" it adds when the
+/// The archive "Add to" makes (as B-Rar-GUI picks it, without the " (2)" it adds when the
 /// name is taken): one item's name, or for several their folder's name, with .zip.
 fn zip_name(items: &[PathBuf]) -> String {
     let name = match items {

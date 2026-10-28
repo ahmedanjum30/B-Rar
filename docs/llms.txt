@@ -1,6 +1,6 @@
 # B-Rar
 
-> B-Rar is a free (for personal and non-commercial use) archive extractor for Windows 10 and 11, written in Rust. It extracts ZIP, RAR, 7z and tar archives in parallel on all CPU cores, faster than WinRAR and 7-Zip, makes ZIP archives on all cores (with optional AES-256 passwords), and adds a Windows 11 right-click menu (Open in B-Rar, Extract files, Extract to folder, Extract here, Test archive, Add to archive, Compress to ZIP).
+> B-Rar is a free (for personal and non-commercial use) archive extractor for Windows 10 and 11, written in Rust. It extracts ZIP, RAR, 7z and tar archives in parallel on all CPU cores, faster than WinRAR and 7-Zip, makes ZIP archives on all cores (with optional AES-256 passwords), and adds a Windows 11 right-click menu (Open in B-Rar, Extract files, Extract to folder, Extract here, Test archive, Add to archive, Add to "name.zip").
 
 - Install: the installer at https://ahmedanjum30.github.io/B-Rar/download/B-Rar-Setup.exe, or the portable zip from https://github.com/ahmedanjum30/B-Rar/releases/latest. Microsoft Store (and `winget install B-Rar`): coming soon.
 - Source code and documentation: https://github.com/ahmedanjum30/B-Rar
@@ -16,7 +16,7 @@
 - Archives in parts: RAR volumes (.part1.rar, .r00) and split archives (.001); extraction can start from any part.
 - Passwords, including encrypted file names. Asks before replacing files. Extracting into admin-only folders shows the Windows UAC prompt.
 - Command line: `B-Rar x archive.rar`, `B-Rar l`, `B-Rar t`.
-- Creates ZIP archives only (not RAR or 7z): `B-Rar a backup.zip folder`, or Add to archive / Compress to ZIP in the right-click menu.
+- Creates ZIP archives only (not RAR or 7z): `B-Rar a backup.zip folder`, or Add to archive / Add to "name.zip" in the right-click menu.
 - Alternative to: WinRAR, 7-Zip, PeaZip, Bandizip, the Windows built-in ZIP and tar support.
 
 ## Privacy

@@ -114,8 +114,11 @@ key = 'Software\Classes\.{each}\OpenWithProgids'
 name = "B-Rar.Archive"
 value = ""
 
-# The right-click submenu, the same commands as the Store version's. Subkeys are listed in name
-# order, hence the numbers.
+# The right-click menu: one B-Rar submenu, like WinRAR's. For archives: the extract commands, then
+# (below a line) the add ones; for any other file and for folders, just the add ones. Subkeys are
+# listed in name order, hence the numbers. Explorer runs the add commands once per selected item;
+# B-Rar-GUI gathers them into one archive. (Archives match both their type's B-Rar key and the
+# all-files one; Explorer shows the type's.)
 [[registry]]
 each = "archive"
 root = "HKA"
@@ -167,28 +170,28 @@ value = '"{app}\B-Rar-GUI.exe" x "%1" --ask'
 [[registry]]
 each = "archive"
 root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder'
-name = "MUIVerb"
-value = "Extract to folder"
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder\command'
-value = '"{app}\B-Rar-GUI.exe" x "%1"'
-
-[[registry]]
-each = "archive"
-root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here'
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3here'
 name = "MUIVerb"
 value = "Extract here"
 
 [[registry]]
 each = "archive"
 root = "HKA"
-key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here\command'
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3here\command'
 value = '"{app}\B-Rar-GUI.exe" x "%1" --here'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4folder'
+name = "MUIVerb"
+value = "Extract to folder"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4folder\command'
+value = '"{app}\B-Rar-GUI.exe" x "%1"'
 
 [[registry]]
 each = "archive"
@@ -203,48 +206,85 @@ root = "HKA"
 key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\5test\command'
 value = '"{app}\B-Rar-GUI.exe" t "%1"'
 
-# "Add to archive..." (the settings first) and "Compress to ZIP", on every file and folder. Explorer
-# runs the command once per selected item; B-Rar-GUI gathers them into one archive.
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add'
+name = "MUIVerb"
+value = "Add to archive..."
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add'
+name = "CommandFlags"
+value = 32
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\6add\command'
+value = '"{app}\B-Rar-GUI.exe" a --ask "%1"'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\7zip'
+name = "MUIVerb"
+value = "Add to ZIP"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\7zip\command'
+value = '"{app}\B-Rar-GUI.exe" a "%1"'
+
 [[registry]]
 each = "anything"
 root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Add'
+key = 'Software\Classes\{each}\shell\B-Rar'
 name = "MUIVerb"
-value = "Add to archive..."
+value = "B-Rar"
 uninstall = "key"
 
 [[registry]]
 each = "anything"
 root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Add'
+key = 'Software\Classes\{each}\shell\B-Rar'
 name = "Icon"
 value = '{app}\B-Rar-GUI.exe,0'
 
 [[registry]]
 each = "anything"
 root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Add\command'
+key = 'Software\Classes\{each}\shell\B-Rar'
+name = "SubCommands"
+value = ""
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar\shell\6add'
+name = "MUIVerb"
+value = "Add to archive..."
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar\shell\6add\command'
 value = '"{app}\B-Rar-GUI.exe" a --ask "%1"'
 
 [[registry]]
 each = "anything"
 root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Compress'
+key = 'Software\Classes\{each}\shell\B-Rar\shell\7zip'
 name = "MUIVerb"
-value = "Compress to ZIP"
-uninstall = "key"
+value = "Add to ZIP"
 
 [[registry]]
 each = "anything"
 root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Compress'
-name = "Icon"
-value = '{app}\B-Rar-GUI.exe,0'
-
-[[registry]]
-each = "anything"
-root = "HKA"
-key = 'Software\Classes\{each}\shell\B-Rar.Compress\command'
+key = 'Software\Classes\{each}\shell\B-Rar\shell\7zip\command'
 value = '"{app}\B-Rar-GUI.exe" a "%1"'
 
 # PATH, for `B-Rar` in a terminal: the user's, or everyone's for an install for all users.
