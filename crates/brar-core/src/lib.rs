@@ -1,6 +1,7 @@
 //! brar-core, B-Rar's engine: fast, parallel archive reading (zip, 7z, rar, tar and single-stream codecs).
 
 mod bcj;
+mod create;
 mod deflate;
 mod format;
 mod lzma;
@@ -26,6 +27,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub use create::{CreateOptions, create};
 pub use format::{Codec, Format, detect};
 
 #[derive(Debug, thiserror::Error)]

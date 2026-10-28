@@ -136,6 +136,28 @@ impl<R: Read> Read for ZipCrypto<R> {
     }
 }
 
+/// WinZip AES's keys for `password` and `salt`: PBKDF2-HMAC-SHA1, 1000 rounds, giving the AES
+/// key, the HMAC key (`key_len` bytes each) and the 2-byte password check.
+pub(crate) fn winzip_keys(password: &[u8], salt: &[u8], key_len: usize) -> Vec<u8> {
+    let mut derived = vec![0u8; 2 * key_len + 2];
+    let prf = Hmac::<Sha1>::new_from_slice(password).expect("HMAC takes any key length");
+    for (i, block) in derived.chunks_mut(20).enumerate() {
+        let mut m = prf.clone();
+        m.update(salt);
+        m.update(&(i as u32 + 1).to_be_bytes());
+        let mut u: [u8; 20] = m.finalize().into_bytes().into();
+        let mut acc = u;
+        for _ in 1..1000 {
+            let mut m = prf.clone();
+            m.update(&u);
+            u = m.finalize().into_bytes().into();
+            acc.iter_mut().zip(&u).for_each(|(a, b)| *a ^= b);
+        }
+        block.copy_from_slice(&acc[..block.len()]);
+    }
+    derived
+}
+
 enum AesKey {
     K128(Aes128),
     K192(Aes192),
@@ -171,23 +193,7 @@ impl<R: Read> WinZipAes<R> {
         inner.read_exact(&mut salt)?;
         let mut verifier = [0u8; 2];
         inner.read_exact(&mut verifier)?;
-        // PBKDF2-HMAC-SHA1, 1000 rounds: the AES key, the HMAC key, the password check.
-        let mut derived = vec![0u8; 2 * key_len + 2];
-        let prf = Hmac::<Sha1>::new_from_slice(password).expect("HMAC takes any key length");
-        for (i, block) in derived.chunks_mut(20).enumerate() {
-            let mut m = prf.clone();
-            m.update(&salt);
-            m.update(&(i as u32 + 1).to_be_bytes());
-            let mut u: [u8; 20] = m.finalize().into_bytes().into();
-            let mut acc = u;
-            for _ in 1..1000 {
-                let mut m = prf.clone();
-                m.update(&u);
-                u = m.finalize().into_bytes().into();
-                acc.iter_mut().zip(&u).for_each(|(a, b)| *a ^= b);
-            }
-            block.copy_from_slice(&acc[..block.len()]);
-        }
+        let derived = winzip_keys(password, &salt, key_len);
         if derived[2 * key_len..] != verifier {
             return Err(bad_password());
         }

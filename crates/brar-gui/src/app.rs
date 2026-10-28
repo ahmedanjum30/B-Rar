@@ -1,5 +1,6 @@
 //! The B-Rar window: progress, "file already exists", password and result pages, talking to
-//! the extraction running on a worker thread.
+//! the extraction (or the archive being created) running on a worker thread; and the "Add to
+//! archive" page that comes before creating one.
 
 use std::{
     collections::VecDeque,
@@ -14,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Progress, Resolution, Summary};
+use brar_core::{Conflict, ConflictPolicy, CreateOptions, Decision, Error, Options, Progress, Resolution, Summary};
 use eframe::egui::{self, Align, Key, Layout, RichText, TextureHandle, Ui, Vec2, ViewportCommand, vec2};
 
 use crate::{
@@ -78,10 +79,17 @@ struct Ask {
 }
 
 enum Page {
+    /// Creating an archive: its name, level and password first.
+    Add,
     Running,
     Conflict(Ask),
-    Password { wrong: bool },
-    Done { summary: Summary, secs: f64 },
+    Password {
+        wrong: bool,
+    },
+    Done {
+        summary: Summary,
+        secs: f64,
+    },
     Failed(String),
 }
 
@@ -89,7 +97,7 @@ impl Page {
     /// Window width; the height follows the content.
     fn width(&self) -> f32 {
         match self {
-            Page::Conflict(_) => 540.0,
+            Page::Conflict(_) | Page::Add => 540.0,
             Page::Password { .. } => 480.0,
             Page::Running | Page::Done { .. } | Page::Failed(_) => 520.0,
         }
@@ -151,6 +159,21 @@ struct App {
     show_password: bool,
     focus_password: bool,
     apply_to_all: bool,
+    /// The "Add to archive" page's fields.
+    add: AddForm,
+}
+
+/// Compression levels the "Add to archive" page offers: name, Deflate level.
+const LEVELS: [(&str, u32); 4] = [("Store", 0), ("Fastest", 1), ("Normal", 6), ("Best", 9)];
+
+#[derive(Default)]
+struct AddForm {
+    path: String,
+    level: u32,
+    encrypt: bool,
+    password: String,
+    confirm: String,
+    focus: bool,
 }
 
 impl App {
@@ -174,16 +197,32 @@ impl App {
             show_password: false,
             focus_password: false,
             apply_to_all: false,
+            add: AddForm::default(),
         };
-        app.start(ctx, password);
+        match &app.mode {
+            Mode::Create { ask: true, level, .. } => {
+                app.add = AddForm {
+                    path: app.archive.display().to_string(),
+                    level: *level,
+                    focus: true,
+                    ..Default::default()
+                };
+                app.page = Page::Add;
+            }
+            _ => app.start(ctx, password),
+        }
         app
     }
 
     fn dest(&self) -> Option<&Path> {
         match &self.mode {
             Mode::Extract { dest, .. } => Some(dest),
-            Mode::Test => None,
+            Mode::Test | Mode::Create { .. } => None,
         }
+    }
+
+    fn creating(&self) -> bool {
+        matches!(self.mode, Mode::Create { .. })
     }
 
     fn progress(&self) -> Arc<Progress> {
@@ -223,7 +262,7 @@ impl App {
             on_conflict: ConflictPolicy::Ask(Arc::new(ask)),
             selection: match &self.mode {
                 Mode::Extract { selection, .. } => selection.clone(),
-                Mode::Test => None,
+                Mode::Test | Mode::Create { .. } => None,
             },
             ..Options::default()
         };
@@ -232,6 +271,22 @@ impl App {
             let result = match &mode {
                 Mode::Extract { dest, .. } => brar_core::extract(&archive, dest, &opts),
                 Mode::Test => brar_core::test(&archive, &opts),
+                Mode::Create {
+                    inputs,
+                    level,
+                    password,
+                    overwrite,
+                    ..
+                } => {
+                    let create = CreateOptions {
+                        level: *level,
+                        password: password.clone(),
+                        progress: opts.progress.clone(),
+                        overwrite: *overwrite,
+                        ..Default::default()
+                    };
+                    brar_core::create(&archive, inputs, &create)
+                }
             };
             *shared.outcome.lock().unwrap() = Some(result);
             ctx.request_repaint();
@@ -319,6 +374,7 @@ impl eframe::App for App {
         }
 
         let title = match &self.page {
+            Page::Add => "Add to archive - B-Rar".into(),
             Page::Running => {
                 let p = self.progress();
                 if !p.is_paused() {
@@ -350,6 +406,7 @@ impl eframe::App for App {
         let shown = egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
             ui.set_width(self.page.width() - 48.0);
             match &self.page {
+                Page::Add => self.add_page(ui),
                 Page::Running => self.running_page(ui),
                 Page::Conflict(_) => self.conflict_page(ui),
                 Page::Password { wrong } => {
@@ -384,9 +441,10 @@ impl App {
     fn running_page(&mut self, ui: &mut Ui) {
         let pal = palette(ui);
         let p = self.progress();
-        let (title, subtitle) = match self.dest() {
-            Some(dest) => (format!("Extracting {}", self.name), format!("to {}", dest.display())),
-            None => (format!("Testing {}", self.name), "Checking every file for errors".to_owned()),
+        let (title, subtitle) = match (self.dest(), self.creating()) {
+            (Some(dest), _) => (format!("Extracting {}", self.name), format!("to {}", dest.display())),
+            (None, true) => (format!("Compressing to {}", self.name), format!("in {}", folder(&self.archive))),
+            (None, false) => (format!("Testing {}", self.name), "Checking every file for errors".to_owned()),
         };
         header(ui, |ui| logo(ui, &self.logo), &title, &subtitle);
         ui.add_space(18.0);
@@ -540,6 +598,9 @@ impl App {
     }
 
     fn done_page(&mut self, ui: &mut Ui, s: Summary, secs: f64) {
+        if self.creating() {
+            return self.created_page(ui, s, secs);
+        }
         let pal = palette(ui);
         let (title, subtitle) = match self.dest() {
             Some(_) => ("Extraction complete".to_owned(), self.name.clone()),
@@ -580,7 +641,11 @@ impl App {
 
     fn failed_page(&mut self, ui: &mut Ui, message: &str) {
         let pal = palette(ui);
-        let verb = if self.dest().is_some() { "extract" } else { "test" };
+        let verb = match (self.dest(), self.creating()) {
+            (Some(_), _) => "extract",
+            (None, true) => "create",
+            (None, false) => "test",
+        };
         header(
             ui,
             |ui| style::status_icon(ui, Icon::Error),
@@ -595,6 +660,129 @@ impl App {
             }
         });
     }
+}
+
+impl App {
+    fn add_page(&mut self, ui: &mut Ui) {
+        let pal = palette(ui);
+        let Mode::Create { inputs, .. } = &self.mode else { return };
+        let what = match inputs.as_slice() {
+            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            many => format!("{} items", many.len()),
+        };
+        header(ui, |ui| logo(ui, &self.logo), "Add to archive", &what);
+        ui.add_space(14.0);
+
+        ui.label(RichText::new("Archive").color(pal.weak));
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut self.add.path)
+                .margin(vec2(8.0, 6.0))
+                .desired_width(ui.available_width()),
+        );
+        if std::mem::take(&mut self.add.focus) {
+            field.request_focus();
+        }
+        ui.add_space(10.0);
+        ui.label(RichText::new("Compression").color(pal.weak));
+        ui.horizontal(|ui| {
+            for (name, level) in LEVELS {
+                ui.radio_value(&mut self.add.level, level, name);
+            }
+        });
+        ui.add_space(10.0);
+        ui.checkbox(&mut self.add.encrypt, "Encrypt with a password (AES-256)");
+        if self.add.encrypt {
+            for (value, hint) in [(&mut self.add.password, "Password"), (&mut self.add.confirm, "Type it again")] {
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .password(true)
+                        .hint_text(hint)
+                        .margin(vec2(8.0, 6.0))
+                        .desired_width(ui.available_width()),
+                );
+            }
+        }
+
+        // What's wrong with the form, if anything (shown under it, and Create stays off).
+        let path = PathBuf::from(self.add.path.trim());
+        let problem = if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            Some("The archive's name must end in .zip.")
+        } else if self.add.encrypt && self.add.password.is_empty() {
+            Some("Enter a password.")
+        } else if self.add.encrypt && self.add.password != self.add.confirm {
+            Some("The two passwords don't match.")
+        } else {
+            None
+        };
+        let exists = path.exists();
+        if let Some(problem) = problem.filter(|p| !p.starts_with("Enter") && !(p.starts_with("The two") && self.add.confirm.is_empty())) {
+            ui.label(RichText::new(problem).color(pal.error));
+        } else if exists {
+            ui.label(RichText::new("An archive with this name exists; it will be replaced.").color(pal.weak));
+        }
+
+        let mut create = false;
+        let mut cancel = false;
+        buttons(ui, |ui| {
+            create = style::primary_button(ui, if exists { "Replace" } else { "Create" }, problem.is_none()).clicked()
+                || (problem.is_none() && ui.input(|i| i.key_pressed(Key::Enter)));
+            cancel = style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+        });
+        if cancel {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        } else if create {
+            let path = std::path::absolute(&path).unwrap_or(path);
+            if let Mode::Create {
+                level, password, overwrite, ..
+            } = &mut self.mode
+            {
+                *level = self.add.level;
+                *password = self.add.encrypt.then(|| std::mem::take(&mut self.add.password));
+                *overwrite = exists;
+            }
+            self.add.confirm.clear();
+            self.name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            self.archive = path;
+            self.start(ui.ctx(), None);
+        }
+    }
+
+    fn created_page(&mut self, ui: &mut Ui, s: Summary, secs: f64) {
+        let pal = palette(ui);
+        header(ui, |ui| style::status_icon(ui, Icon::Ok), "Archive created", &self.name);
+        ui.add_space(12.0);
+        let packed = std::fs::metadata(&self.archive).map(|m| m.len()).unwrap_or(0);
+        let ratio = if s.bytes > 0 { packed as f64 * 100.0 / s.bytes as f64 } else { 100.0 };
+        let line = format!(
+            "{} files · {} folders · {} to {} ({ratio:.0}%)  in {}",
+            s.files,
+            s.dirs,
+            human(s.bytes),
+            human(packed),
+            seconds(secs)
+        );
+        ui.label(RichText::new(line).color(pal.text));
+        let mut notes = vec![format!("Saved in {}", folder(&self.archive))];
+        if s.skipped > 0 {
+            notes.push(format!("skipped {} links", s.skipped));
+        }
+        ui.add(egui::Label::new(RichText::new(notes.join(" · ")).color(pal.weak)).truncate());
+        let archive = self.archive.clone();
+        buttons(ui, |ui| {
+            if style::primary_button(ui, "Show in folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                shell::show_in_folder(&archive);
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+            if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+        });
+    }
+}
+
+/// The folder `path` is in, for display.
+fn folder(path: &Path) -> String {
+    path.parent().map(|p| p.display().to_string()).unwrap_or_default()
 }
 
 // ---- layout helpers ------------------------------------------------------------------------

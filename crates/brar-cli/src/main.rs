@@ -10,7 +10,8 @@ use anyhow::Context;
 use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Resolution, Selection, Summary};
 use clap::{Args, Parser, Subcommand};
 
-/// B-Rar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2).
+/// B-Rar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2) that also
+/// creates ZIP archives.
 #[derive(Parser)]
 #[command(name = "B-Rar", version, about)]
 struct Cli {
@@ -61,6 +62,23 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Create a ZIP archive from files and folders (with -p, encrypted with AES-256).
+    #[command(visible_alias = "a")]
+    Add {
+        /// The archive to create (.zip).
+        archive: PathBuf,
+        /// Files and folders to put in it.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Compression level: 0 (store) to 9 (smallest, slowest).
+        #[arg(short, long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
+        level: u32,
+        /// Replace the archive if it already exists.
+        #[arg(short = 'y', long = "yes")]
+        overwrite: bool,
+        #[command(flatten)]
+        common: Common,
+    },
 }
 
 #[derive(Args)]
@@ -92,7 +110,7 @@ impl Common {
 impl Command {
     fn common(&self) -> &Common {
         match self {
-            Command::Extract { common, .. } | Command::List { common, .. } | Command::Test { common, .. } => common,
+            Command::Extract { common, .. } | Command::List { common, .. } | Command::Test { common, .. } | Command::Add { common, .. } => common,
         }
     }
 }
@@ -159,6 +177,33 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let summary = with_password(&archive, common.options(), |o| brar_core::test(&archive, o))
                 .with_context(|| format!("testing {}", archive.display()))?;
             report("OK", &summary, started);
+        }
+        Command::Add {
+            archive,
+            files,
+            level,
+            overwrite,
+            common,
+        } => {
+            let is_zip = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+            anyhow::ensure!(is_zip, "B-Rar creates ZIP archives: name it .zip");
+            let opts = brar_core::CreateOptions {
+                threads: common.threads,
+                level,
+                password: common.password.clone(),
+                overwrite,
+                ..Default::default()
+            };
+            let started = Instant::now();
+            let summary = brar_core::create(&archive, &files, &opts).with_context(|| format!("creating {}", archive.display()))?;
+            report("Added", &summary, started);
+            let packed = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+            let ratio = if summary.bytes > 0 {
+                packed as f64 * 100.0 / summary.bytes as f64
+            } else {
+                100.0
+            };
+            println!("  -> {} ({}, {ratio:.0}% of the original)", archive.display(), human(packed));
         }
         Command::List { archive, common } => {
             let entries = with_password(&archive, common.options(), |o| brar_core::list(&archive, o))

@@ -4,7 +4,7 @@
 
 [![Support on Patreon](https://img.shields.io/badge/Support%20on-Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/ahmedanjum30)
 
-**A fast archive extractor for Windows.** B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR, 7-Zip and Windows' own tar, using every core of your PC. It sits in the Windows 11 right-click menu, like WinRAR.
+**A fast archive extractor for Windows.** B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR, 7-Zip and Windows' own tar, using every core of your PC, and makes ZIP archives the same way. It sits in the Windows 11 right-click menu, like WinRAR.
 
 [![CI](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmedanjum30/B-Rar/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
@@ -17,6 +17,7 @@ Free for personal and other non-commercial use. See [License](#license).
 
 - **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core), its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own 7z engine, which decodes the parts of an archive 7-Zip made on several threads on all cores at once.
 - **Right-click menu.** Right-click an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**. On Windows 11 it's under **Show more options**; the Microsoft Store version (coming soon) puts it in the short menu.
+- **Make ZIP archives.** Right-click files or folders: **Add to archive...** (the archive's name, compression level, and an AES-256 password if you want one) or **Compress to ZIP**. Every core compresses at once, a big file in pieces, and files that are already compressed (photos, videos, archives) are stored as they are.
 - **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
 - **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z (LZMA, LZMA2, PPMd, BZip2, Deflate, Deflate64, Zstandard, LZ4, Brotli, the BCJ, BCJ2, ARM, ARM64, PowerPC, SPARC, IA-64, RISC-V and Delta filters, and AES, including encrypted file names), tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
 - **Archives in parts:** RAR volumes (`name.part1.rar`, `name.r00`) and split files (`name.7z.001`, `name.zip.001`). Start from any part; a missing part is named.
@@ -25,7 +26,7 @@ Free for personal and other non-commercial use. See [License](#license).
 - **Protected folders:** extracting into Program Files or another folder that needs administrator rights shows the Windows permission prompt.
 - **Command line:** `B-Rar x archive.rar` from any terminal.
 
-B-Rar reads archives; it doesn't create them.
+B-Rar makes ZIP archives only, not RAR or 7z.
 
 ## Speed
 
@@ -77,6 +78,7 @@ B-Rar x archive.zip docs photos/2024     extract only these files and folders
 B-Rar x archive.zip docs/a.txt --from docs   ...written relative to docs
 B-Rar l archive.7z                       list the contents
 B-Rar t archive.7z                       test: decode everything, write nothing
+B-Rar a backup.zip docs photos           make backup.zip from these (-l 0-9, -p password)
 ```
 
 Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all.

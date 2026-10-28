@@ -9,7 +9,13 @@
 //! B-Rar-GUI x <archive> --ask       pick the destination folder first
 //! B-Rar-GUI x <archive> -o <dir>    extract to <dir>
 //! B-Rar-GUI t <archive>             test the archive
+//! B-Rar-GUI a <paths>...            compress files and folders to "name.zip" next to them
+//! B-Rar-GUI a --ask <paths>...      the same, after the "Add to archive" page
 //! ```
+//!
+//! `a` from the installer's right-click menu runs once per selected item; those runs hand
+//! their paths to the first, which opens one window for all of them ([`gather`]). The Store
+//! version's menu passes them all at once, with `--all`.
 //!
 //! `x` also takes `--items <file>` (archive paths to extract, one per line; the file is
 //! deleted after reading) and `--base <folder>` (write them relative to that archive folder).
@@ -35,8 +41,20 @@ pub const PASSWORD_VAR: &str = "BRAR_PASSWORD";
 
 #[derive(Clone)]
 pub enum Mode {
-    Extract { dest: PathBuf, selection: Option<Selection> },
+    Extract {
+        dest: PathBuf,
+        selection: Option<Selection>,
+    },
     Test,
+    /// Create the archive from these files and folders; `ask`: the "Add to archive" page
+    /// first.
+    Create {
+        inputs: Vec<PathBuf>,
+        level: u32,
+        password: Option<String>,
+        overwrite: bool,
+        ask: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -57,7 +75,7 @@ fn main() -> ExitCode {
 fn run(password: Option<String>) -> Result<ExitCode, String> {
     let mut args = env::args_os().skip(1);
     let usage = || {
-        "usage:\n  B-Rar-GUI <archive>\n  B-Rar-GUI x <archive> [--here | --ask | -o <dir>] [--items <file> [--base <folder>]]\n  B-Rar-GUI t <archive>"
+        "usage:\n  B-Rar-GUI <archive>\n  B-Rar-GUI x <archive> [--here | --ask | -o <dir>] [--items <file> [--base <folder>]]\n  B-Rar-GUI t <archive>\n  B-Rar-GUI a [--ask] <paths>..."
             .to_owned()
     };
     // From the Start menu: the browser's home page.
@@ -68,6 +86,35 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
         let p = PathBuf::from(p);
         std::path::absolute(&p).map_err(|e| format!("{}: {e}", p.display()))
     };
+    if command == "a" {
+        let (mut ask, mut all, mut inputs) = (false, false, Vec::new());
+        for arg in args {
+            match arg.to_str() {
+                Some("--ask") => ask = true,
+                Some("--all") => all = true,
+                _ => inputs.push(absolute(arg)?),
+            }
+        }
+        if inputs.is_empty() {
+            return Err(usage());
+        }
+        if !all {
+            match gather(inputs, ask) {
+                Some(everything) => inputs = everything,
+                // Handed over to the run that opens the window.
+                None => return Ok(ExitCode::SUCCESS),
+            }
+        }
+        let archive = archive_for(&inputs);
+        let mode = Mode::Create {
+            inputs,
+            level: 6,
+            password: None,
+            overwrite: false,
+            ask,
+        };
+        return Ok(app::run(archive, mode, None));
+    }
     if !matches!(command.to_str(), Some("x" | "t")) {
         // "Open with" passes just the archive.
         return Ok(browse::run(Some(absolute(command)?), password));
@@ -109,6 +156,78 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
         };
     }
     Ok(app::run(archive, mode, password))
+}
+
+/// The archive "Compress to" makes for `inputs`: one item's name, or for several their folder's
+/// name, with .zip, next to them; " (2)" and so on if that's taken.
+fn archive_for(inputs: &[PathBuf]) -> PathBuf {
+    let first = &inputs[0];
+    let dir = first.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = match inputs {
+        [one] if one.is_dir() => one.file_name().map(|n| n.to_string_lossy().into_owned()),
+        [one] => one.file_stem().map(|n| n.to_string_lossy().into_owned()),
+        _ => dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+    }
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "Archive".to_owned());
+    (1..)
+        .map(|n| match n {
+            1 => dir.join(format!("{stem}.zip")),
+            n => dir.join(format!("{stem} ({n}).zip")),
+        })
+        .find(|p| !p.exists())
+        .expect("a free name")
+}
+
+/// Explorer runs the installer's "Add to archive" entries once per selected item. The first
+/// run takes a lock and collects the paths the others append to a queue file, until none has
+/// come for a moment; the others append theirs and return `None`.
+fn gather(mine: Vec<PathBuf>, ask: bool) -> Option<Vec<PathBuf>> {
+    use std::{
+        io::Write,
+        time::{Duration, Instant},
+    };
+    let dir = env::temp_dir().join("B-Rar");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Some(mine);
+    }
+    let key = if ask { "add-ask" } else { "add" };
+    let (lock, queue) = (dir.join(format!("{key}.lock")), dir.join(format!("{key}.queue")));
+    // A lock left by a run that died is taken over.
+    if std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().is_ok_and(|e| e > Duration::from_secs(30)))
+    {
+        let _ = std::fs::remove_file(&lock);
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+        let text: String = mine.iter().map(|p| format!("{}\n", p.display())).collect();
+        let appended = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&queue)
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        return match appended {
+            Ok(()) => None,
+            Err(_) => Some(mine),
+        };
+    }
+    let mut all = mine;
+    let (mut seen, mut quiet) = (u64::MAX, Instant::now());
+    while quiet.elapsed() < Duration::from_millis(300) {
+        std::thread::sleep(Duration::from_millis(30));
+        let len = std::fs::metadata(&queue).map_or(0, |m| m.len());
+        if len != seen {
+            (seen, quiet) = (len, Instant::now());
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(&queue) {
+        all.extend(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from));
+    }
+    let _ = std::fs::remove_file(&queue);
+    let _ = std::fs::remove_file(&lock);
+    all.dedup();
+    Some(all)
 }
 
 /// Can this process write to `dest`? Only "access denied" counts: anything else is left for

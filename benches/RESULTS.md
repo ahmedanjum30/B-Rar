@@ -18,6 +18,37 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-10-29 (02:00): making ZIP archives
+
+B-Rar's first archive writer (`crates/brar-core/src/create.rs`): files cut into 1 MB pieces,
+compressed by workers with zlib-rs (each piece after a file's first starts from the 32 KB before
+it as its dictionary, and ends with a sync flush, so the pieces join into one Deflate stream);
+written in order. Files with an extension of already-compressed data are stored, as is a
+one-piece file that wouldn't get smaller. No earlier B-Rar build makes archives, so the
+comparison is all cores against one.
+
+Same machine; **Defender real-time protection on**; archives written to E:, 5 s pauses; every
+archive passed `B-Rar t`. Programs: the 43 `.exe`/`.dll` files of `progs` (1106 MB); game: the
+79 game files (1253 MB, mostly already compressed).
+
+| Data | Level | All cores | One thread | Size |
+|---|---|---|---|---|
+| programs | 1 (Fastest) | 0.74 s (1.4 GB/s; 0.74–0.79, 3 runs) | | 39.0% |
+| programs | 6 (Normal) | 1.72 s (644 MB/s) | 17.84 s | 29.9% |
+| programs | 9 (Best) | 4.20 s (263 MB/s) | | 28.9% |
+| game | 1 | 1.80 s (696 MB/s) | | 95.4% |
+| game | 6 | 2.99 s (418 MB/s) | 29.43 s | 90.4% |
+| game | 9 | 3.24 s (387 MB/s) | | 90.2% |
+
+- All cores against one: 10.4x (programs) and 9.8x (game) at level 6 on 16 logical CPUs.
+- The first level-1 run on the programs took 6.64 s: the files weren't in the disk cache yet
+  (the runs after it, 0.74–0.79 s, read them from memory, as all the others here did).
+- Checked: archives made at levels 0, 1, 6 and 9, with one thread and with a password, extract
+  to the same files with B-Rar and pass 7-Zip's test (`crates/brar-core/tests/create.rs`;
+  7-Zip takes only ASCII passwords for ZIP archives, so a non-ASCII one is checked with B-Rar).
+
+---
+
 ## 2026-10-28 (04:49): 7z: one-thread streams decode beside their output
 
 A 7z block that decodes on one thread (LZMA, stored, or LZMA2 written on one thread) now

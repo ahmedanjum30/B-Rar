@@ -245,6 +245,7 @@ dependencies = [
  "crc32fast",
  "deflate64",
  "flate2",
+ "getrandom",
  "hmac",
  "jiff",
  "libdeflater",

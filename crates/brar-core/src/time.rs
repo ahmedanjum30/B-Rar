@@ -46,3 +46,18 @@ pub(crate) fn filetime(ticks: u64) -> Option<SystemTime> {
 pub(crate) fn unix(secs: u64) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs))
 }
+
+/// `t` as a DOS date and time (local time, 2-second steps, 1980 to 2107): (time, date).
+pub(crate) fn to_dos(t: SystemTime) -> (u16, u16) {
+    static TZ: OnceLock<TimeZone> = OnceLock::new();
+    let tz = TZ.get_or_init(TimeZone::system);
+    let dt = jiff::Timestamp::try_from(t).map(|ts| ts.to_zoned(tz.clone()).datetime());
+    match dt {
+        Ok(d) if (1980..2108).contains(&d.year()) => (
+            ((d.hour() as u16) << 11) | ((d.minute() as u16) << 5) | ((d.second() as u16) / 2),
+            (((d.year() - 1980) as u16) << 9) | ((d.month() as u16) << 5) | d.day() as u16,
+        ),
+        // Before 1980: the earliest DOS time.
+        _ => (0, 1 << 5 | 1),
+    }
+}

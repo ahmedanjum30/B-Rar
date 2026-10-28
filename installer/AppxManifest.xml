@@ -69,23 +69,10 @@
         <!-- The Windows 11 short right-click menu, served by B-Rar-Shell.dll. -->
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
-            <desktop5:ItemType Type=".zip"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".7z"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".rar"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".tar"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".gz"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".tgz"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".xz"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".txz"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".zst"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".tzst"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".bz2"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".tbz"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".tbz2"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <!-- Archives in parts: split files (name.7z.001) and old-style RAR volumes (name.r00).
-                 New-style RAR volumes (name.part2.rar) are already covered by .rar. -->
-            <desktop5:ItemType Type=".001"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
-            <desktop5:ItemType Type=".r00"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
+            <!-- Every file and folder: "Add to archive" is for anything, and B-Rar-Shell.dll
+                 shows the extract commands only when the selection is all archives. -->
+            <desktop5:ItemType Type="*"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
+            <desktop5:ItemType Type="Directory"><desktop5:Verb Id="BRar" Clsid="91F265B3-8846-4B4F-9721-DA1F07BEC959" /></desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
 

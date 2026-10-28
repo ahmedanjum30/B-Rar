@@ -36,6 +36,8 @@ delete = ['{app}\*.old']
 [lists]
 # The archive types B-Rar registers for (the same as installer\AppxManifest.xml).
 archive = ["zip", "7z", "rar", "tar", "gz", "tgz", "xz", "txz", "zst", "tzst", "bz2", "tbz", "tbz2", "001", "r00"]
+# What "Add to archive" is offered for: every file, and folders.
+anything = ["*", "Directory"]
 
 [[task]]
 name = "addtopath"
@@ -200,6 +202,50 @@ each = "archive"
 root = "HKA"
 key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\5test\command'
 value = '"{app}\B-Rar-GUI.exe" t "%1"'
+
+# "Add to archive..." (the settings first) and "Compress to ZIP", on every file and folder. Explorer
+# runs the command once per selected item; B-Rar-GUI gathers them into one archive.
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Add'
+name = "MUIVerb"
+value = "Add to archive..."
+uninstall = "key"
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Add'
+name = "Icon"
+value = '{app}\B-Rar-GUI.exe,0'
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Add\command'
+value = '"{app}\B-Rar-GUI.exe" a --ask "%1"'
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Compress'
+name = "MUIVerb"
+value = "Compress to ZIP"
+uninstall = "key"
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Compress'
+name = "Icon"
+value = '{app}\B-Rar-GUI.exe,0'
+
+[[registry]]
+each = "anything"
+root = "HKA"
+key = 'Software\Classes\{each}\shell\B-Rar.Compress\command'
+value = '"{app}\B-Rar-GUI.exe" a "%1"'
 
 # PATH, for `B-Rar` in a terminal: the user's, or everyone's for an install for all users.
 [[path]]

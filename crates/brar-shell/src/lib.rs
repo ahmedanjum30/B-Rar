@@ -1,5 +1,6 @@
 //! Explorer context-menu handler (`IExplorerCommand`) for B-Rar, registered by the MSIX
-//! package. On Windows 11 this is what puts B-Rar in the short right-click menu.
+//! package for every file and folder. On Windows 11 this is what puts B-Rar in the short
+//! right-click menu: the extract commands for archives, and "Add to archive" for anything.
 //!
 //! It runs inside Explorer, so it stays tiny: it only builds the menu and launches
 //! `B-Rar-GUI.exe` (installed next to this DLL), and it never lets a panic cross into Explorer.
@@ -23,8 +24,8 @@ use windows::{
             },
         },
         UI::Shell::{
-            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand, IExplorerCommand_Impl,
-            IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+            ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECS_ENABLED, ECS_HIDDEN, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
+            IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
         },
     },
     core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, Result, implement},
@@ -36,16 +37,35 @@ pub const CLSID_BRAR: GUID = GUID::from_u128(0x91F265B3_8846_4B4F_9721_DA1F07BEC
 /// The window app, installed next to this DLL.
 const GUI_EXE: &str = "B-Rar-GUI.exe";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Open,
     Ask,
     ToFolder,
     Here,
     Test,
+    /// "Add to archive...": the settings page first.
+    Add,
+    /// "Compress to name.zip", straight away.
+    Compress,
 }
 
-const VERBS: [Verb; 5] = [Verb::Open, Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test];
+const VERBS: [Verb; 7] = [Verb::Open, Verb::Ask, Verb::ToFolder, Verb::Here, Verb::Test, Verb::Add, Verb::Compress];
+
+/// The archive types B-Rar opens (the same as the installer's list).
+const ARCHIVES: [&str; 15] = [
+    "zip", "7z", "rar", "tar", "gz", "tgz", "xz", "txz", "zst", "tzst", "bz2", "tbz", "tbz2", "001", "r00",
+];
+
+fn is_archive(path: &std::path::Path) -> bool {
+    path.is_file() && path.extension().is_some_and(|e| ARCHIVES.iter().any(|a| e.eq_ignore_ascii_case(a)))
+}
+
+impl Verb {
+    fn extracts(self) -> bool {
+        !matches!(self, Verb::Add | Verb::Compress)
+    }
+}
 
 /// The "B-Rar" entry; its submenu holds the verbs.
 #[implement(IExplorerCommand)]
@@ -142,6 +162,8 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
                 },
                 Verb::Here => "Extract here".to_owned(),
                 Verb::Test => "Test archive".to_owned(),
+                Verb::Add => "Add to archive...".to_owned(),
+                Verb::Compress => format!("Compress to \"{}\"", zip_name(&selected(&items))),
             };
             co_string(&title)
         })
@@ -159,14 +181,37 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
         Err(E_NOTIMPL.into())
     }
 
-    fn GetState(&self, _: Ref<IShellItemArray>, _: BOOL) -> Result<u32> {
-        Ok(ECS_ENABLED.0 as u32)
+    fn GetState(&self, items: Ref<IShellItemArray>, _: BOOL) -> Result<u32> {
+        let verb = self.0;
+        guard(|| {
+            // The extract commands only when everything selected is an archive.
+            let shown = !verb.extracts() || {
+                let items = selected(&items);
+                !items.is_empty() && items.iter().all(|p| is_archive(p))
+            };
+            Ok(if shown { ECS_ENABLED.0 } else { ECS_HIDDEN.0 } as u32)
+        })
     }
 
     fn Invoke(&self, items: Ref<IShellItemArray>, _: Ref<IBindCtx>) -> Result<()> {
         let verb = self.0;
         guard(|| {
             let gui = install_dir().join(GUI_EXE);
+            if !verb.extracts() {
+                // All the selected items, into one archive, in one window.
+                let items = selected(&items);
+                let mut cmd = Command::new(&gui);
+                cmd.arg("a").arg("--all");
+                if verb == Verb::Add {
+                    cmd.arg("--ask");
+                }
+                cmd.args(&items);
+                if let Some(dir) = items.first().and_then(|p| p.parent()) {
+                    cmd.current_dir(dir);
+                }
+                let _ = cmd.spawn();
+                return Ok(());
+            }
             for archive in selected(&items) {
                 let mut cmd = Command::new(&gui);
                 match verb {
@@ -175,6 +220,8 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
                     Verb::ToFolder => cmd.arg("x").arg(&archive),
                     Verb::Here => cmd.arg("x").arg(&archive).arg("--here"),
                     Verb::Test => cmd.arg("t").arg(&archive),
+                    // Handled above.
+                    Verb::Add | Verb::Compress => continue,
                 };
                 if let Some(dir) = archive.parent() {
                     cmd.current_dir(dir);
@@ -253,6 +300,19 @@ fn selected(items: &Ref<IShellItemArray>) -> Vec<PathBuf> {
             })
             .collect()
     }
+}
+
+/// The archive "Compress to" makes (as B-Rar-GUI picks it, without the " (2)" it adds when the
+/// name is taken): one item's name, or for several their folder's name, with .zip.
+fn zip_name(items: &[PathBuf]) -> String {
+    let name = match items {
+        [one] if one.is_dir() => one.file_name(),
+        [one] => one.file_stem(),
+        [first, ..] => first.parent().and_then(|p| p.file_name()),
+        [] => None,
+    };
+    let stem = name.map(|n| n.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+    format!("{}.zip", stem.as_deref().unwrap_or("Archive"))
 }
 
 /// Same rule as `brar_core::suggested_dir`: the name up to the first dot.

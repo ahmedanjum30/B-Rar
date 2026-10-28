@@ -13,6 +13,7 @@ brotli = { version = "9.0.0", default-features = false, features = ["std"] }
 bzip2 = "0.6.1"
 crc32fast = "1.5.3"
 deflate64 = "0.1.12"
+getrandom = "0.4.3"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 hmac = "0.13.0"
 jiff = "0.2"

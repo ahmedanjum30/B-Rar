@@ -51,6 +51,14 @@ pub fn open_path(path: &Path) {
     }
 }
 
+/// Opens the folder `path` is in, in Explorer, with `path` selected.
+pub fn show_in_folder(path: &Path) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn();
+}
+
 /// Passes this window's right to take the foreground to process `pid`, so the window it opens
 /// comes to the front instead of flashing on the taskbar.
 pub fn allow_foreground(pid: u32) {
