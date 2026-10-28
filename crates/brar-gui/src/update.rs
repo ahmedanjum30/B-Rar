@@ -169,7 +169,7 @@ pub fn install(kind: Kind, file: &Path) -> Result<(), String> {
             crate::shell::open_path(file);
             Ok(())
         }
-        // Read by the `UpdateMode` check in installer\b-rar.iss: open B-Rar again afterwards.
+        // Read by the `if_param` run entry in installer\b-rar.toml: open B-Rar again afterwards.
         Kind::Installed => std::process::Command::new(file)
             .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1"])
             .spawn()

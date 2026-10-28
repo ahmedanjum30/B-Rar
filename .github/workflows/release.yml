@@ -37,10 +37,8 @@ jobs:
         shell: pwsh
         run: ./installer/build.ps1 -Store
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-
-      # The release binaries are built already (by the Store package).
+      # The release binaries are built already (by the Store package); B-Installer is
+      # downloaded by the script.
       - name: Build the installer
         shell: pwsh
         run: ./installer/build-setup.ps1

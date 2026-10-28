@@ -99,7 +99,7 @@ The programs are in `target/release`. `installer\build.ps1` packages them as an 
 | `crates/brar-cli` | `B-Rar.exe`, the command line. |
 | `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, built with [egui](https://github.com/emilk/egui). |
 | `crates/brar-shell` | `B-Rar-Shell.dll`, the Windows 11 right-click menu. |
-| `installer` | The MSIX manifest and packaging scripts. |
+| `installer` | The setup's script (`b-rar.toml`, built with [B-Installer](https://github.com/ahmedanjum30/B-Installer) by `build-setup.ps1`), the MSIX manifest and the packaging scripts. |
 | `vendor` | Patched copies of the `unrar` and `unrar_sys` crates. |
 | `benches` | Benchmark scripts and results. |
 

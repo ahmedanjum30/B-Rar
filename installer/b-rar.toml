@@ -1,0 +1,217 @@
+# B-Rar's installer, dist\B-Rar-Setup-<version>.exe, made with B-Installer
+# (https://github.com/ahmedanjum30/B-Installer). Build it with installer\build-setup.ps1, which
+# passes the version and the folder with the release binaries:
+#
+#   bi installer\b-rar.toml -D version=1.0.0 -D bindir=..\target\release
+#
+# Paths, those given with -D too, are relative to this file.
+#
+# Installs for the current user (no admin prompt), into %LOCALAPPDATA%\Programs\B-Rar, or for
+# everyone if chosen. Adds "Open with > B-Rar" and a B-Rar submenu to the right-click menu of
+# archives. It doesn't take over the default app for any file type.
+
+[defines]
+version = "0.0.0"
+root = ".."
+bindir = "..\\target\\release"
+
+[app]
+# Never change it: Windows finds the existing install by it, including the ones Inno Setup made
+# (B-Rar 1.0.0).
+id = "3B7F0E52-6C1D-4A8E-9F25-B0D4E7A61C38"
+name = "B-Rar"
+version = "${version}"
+publisher = "Ahmad Anjum"
+url = "https://ahmedanjum30.github.io/B-Rar/"
+support_url = "https://github.com/ahmedanjum30/B-Rar/issues"
+dir = '{pf}\B-Rar'
+uninstall_icon = '{app}\B-Rar-GUI.exe'
+icon = '${root}\assets\brar.ico'
+license = '${root}\LICENSE'
+output = '${root}\dist\B-Rar-Setup-${version}.exe'
+
+# What an update made from inside B-Rar leaves (see crates\brar-gui\src\update.rs).
+delete = ['{app}\*.old']
+
+[lists]
+# The archive types B-Rar registers for (the same as installer\AppxManifest.xml).
+archive = ["zip", "7z", "rar", "tar", "gz", "tgz", "xz", "txz", "zst", "tzst", "bz2", "tbz", "tbz2", "001", "r00"]
+
+[[task]]
+name = "addtopath"
+label = "Add B-Rar to PATH (run B-Rar from any terminal)"
+
+[[task]]
+name = "desktopicon"
+label = "Create a desktop shortcut"
+checked = false
+
+[[file]]
+source = '${bindir}\B-Rar.exe'
+dest = '{app}'
+
+[[file]]
+source = '${bindir}\B-Rar-GUI.exe'
+dest = '{app}'
+
+[[file]]
+source = '${root}\installer\unrar-license.txt'
+dest = '{app}'
+
+[[file]]
+source = '${root}\LICENSE'
+dest = '{app}'
+rename = "LICENSE.txt"
+
+[[file]]
+source = '${root}\PRIVACY.md'
+dest = '{app}'
+
+[[shortcut]]
+path = '{programs}\B-Rar'
+target = '{app}\B-Rar-GUI.exe'
+
+[[shortcut]]
+path = '{desktop}\B-Rar'
+target = '{app}\B-Rar-GUI.exe'
+task = "desktopicon"
+
+# "Open with > B-Rar": a ProgID listed for each type, so the default app stays as it is.
+[[registry]]
+root = "HKA"
+key = 'Software\Classes\B-Rar.Archive'
+value = "Archive"
+uninstall = "key"
+
+[[registry]]
+root = "HKA"
+key = 'Software\Classes\B-Rar.Archive\DefaultIcon'
+value = '{app}\B-Rar-GUI.exe,0'
+
+[[registry]]
+root = "HKA"
+key = 'Software\Classes\B-Rar.Archive\shell\open\command'
+value = '"{app}\B-Rar-GUI.exe" "%1"'
+
+[[registry]]
+root = "HKA"
+key = 'Software\Classes\Applications\B-Rar-GUI.exe'
+name = "FriendlyAppName"
+value = "B-Rar"
+uninstall = "key"
+
+[[registry]]
+root = "HKA"
+key = 'Software\Classes\Applications\B-Rar-GUI.exe\shell\open\command'
+value = '"{app}\B-Rar-GUI.exe" "%1"'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\.{each}\OpenWithProgids'
+name = "B-Rar.Archive"
+value = ""
+
+# The right-click submenu, the same commands as the Store version's. Subkeys are listed in name
+# order, hence the numbers.
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar'
+name = "MUIVerb"
+value = "B-Rar"
+uninstall = "key"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar'
+name = "Icon"
+value = '{app}\B-Rar-GUI.exe,0'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar'
+name = "SubCommands"
+value = ""
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\1open'
+name = "MUIVerb"
+value = "Open in B-Rar"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\1open\command'
+value = '"{app}\B-Rar-GUI.exe" "%1"'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\2ask'
+name = "MUIVerb"
+value = "Extract files..."
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\2ask\command'
+value = '"{app}\B-Rar-GUI.exe" x "%1" --ask'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder'
+name = "MUIVerb"
+value = "Extract to folder"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\3folder\command'
+value = '"{app}\B-Rar-GUI.exe" x "%1"'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here'
+name = "MUIVerb"
+value = "Extract here"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\4here\command'
+value = '"{app}\B-Rar-GUI.exe" x "%1" --here'
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\5test'
+name = "MUIVerb"
+value = "Test archive"
+
+[[registry]]
+each = "archive"
+root = "HKA"
+key = 'Software\Classes\SystemFileAssociations\.{each}\shell\B-Rar\shell\5test\command'
+value = '"{app}\B-Rar-GUI.exe" t "%1"'
+
+# PATH, for `B-Rar` in a terminal: the user's, or everyone's for an install for all users.
+[[path]]
+dir = '{app}'
+task = "addtopath"
+
+[[run]]
+file = '{app}\B-Rar-GUI.exe'
+launch = true
+
+# An update started from B-Rar (/UPDATE=1) opens it again afterwards.
+[[run]]
+file = '{app}\B-Rar-GUI.exe'
+if_param = "UPDATE=1"
+wait = false
