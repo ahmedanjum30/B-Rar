@@ -103,7 +103,7 @@ jobs:
           body: |
             ## Install
 
-            Download **B-Rar-Setup-${{ github.ref_name }}.exe** below and run it. It installs for your user only, without admin rights, and adds B-Rar to the right-click menu of archives (on Windows 11 under **Show more options**). Installed copies update themselves: B-Rar says when a new version is out.
+            Download **B-Rar-Setup-${{ github.ref_name }}.exe** below and run it. It installs for your user only, without admin rights, and adds a B-Rar submenu to the right-click menu: extract commands on archives, **Add to archive** on other files and folders (on Windows 11 under **Show more options**). Installed copies update themselves: B-Rar says when a new version is out.
 
             > **Windows says "Windows protected your PC"?** Click **More info**, then **Run anyway**. B-Rar isn't code-signed yet, so Windows doesn't know the publisher. The installer is the one built by this repository's release workflow; you can check it against `SHA256SUMS.txt`.
 

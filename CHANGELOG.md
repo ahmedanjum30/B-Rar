@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-10-29)
 
 - **B-Rar makes ZIP archives.** Right-click files or folders, **B-Rar**: **Add to archive...** (name, level, AES-256 password) or **Add to "name.zip"** (one B-Rar submenu, like WinRAR's: extract commands on archives, add commands on anything else); or `B-Rar a backup.zip folder`. Every core compresses at once, a big file in pieces; already-compressed files (photos, videos, archives) are stored. 1.1 GB of programs in 1.7 s at Normal level.
 - **The installer is made with [B-Installer](https://github.com/ahmedanjum30/B-Installer)** instead of Inno Setup: the same per-user install, right-click menu, Open with and PATH option. It updates and uninstalls copies installed by B-Rar 1.0.0's Inno Setup installer.
