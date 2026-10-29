@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 (2026-10-29)
 
 - **The command line on Linux.** `B-Rar-<version>-linux-x64.tar.gz` has `brar` for x86-64 Linux: the same extraction (ZIP, RAR, 7z, tar and the rest) and ZIP creation as on Windows. Files keep the permissions stored in the archive, and ZIPs made on Linux store them.
 - Website and Microsoft Store search terms include "BRar", without the hyphen.
