@@ -70,7 +70,7 @@ No ads, no tracking, no internet connection
 ## Search terms (up to 7)
 
 ```
-rar, zip, 7z, unzip, unrar, extract, archive
+brar, rar, zip, 7z, unzip, unrar, archive
 ```
 
 ## What's new in this version
