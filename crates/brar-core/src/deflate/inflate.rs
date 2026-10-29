@@ -1316,6 +1316,7 @@ mod tests {
     /// base and the most frequent addresses, to look up in `objdump -d` of the test binary.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn profile_loop() {
         #[repr(C, align(16))]
         struct Context([u8; 1232]);

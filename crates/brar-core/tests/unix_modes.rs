@@ -73,7 +73,7 @@ fn made_zip_keeps_modes() {
     fs::set_permissions(src.join("notes.txt"), fs::Permissions::from_mode(0o644)).unwrap();
 
     let archive = dir.join("made.zip");
-    create(&archive, &[src.clone()], &CreateOptions::default()).unwrap();
+    create(&archive, std::slice::from_ref(&src), &CreateOptions::default()).unwrap();
     let out = dir.join("out");
     extract(&archive, &out, &Options::default()).unwrap();
     assert_eq!(mode(&out.join("src/run.sh")), 0o755);
