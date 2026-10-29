@@ -554,6 +554,7 @@ mod tests {
     /// `cargo test --release -p brar-core --lib piece_modes -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn piece_modes() {
         #[link(name = "kernel32")]
         unsafe extern "system" {

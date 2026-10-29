@@ -683,6 +683,7 @@ mod tests {
     /// `cargo test --release -p brar-core --lib rar5_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn rar5_bench() {
         use std::time::Instant;
         #[link(name = "kernel32")]
@@ -746,6 +747,7 @@ mod tests {
     /// `cargo test --release -p brar-core --lib phase_a_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn phase_a_bench() {
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -789,6 +791,7 @@ mod tests {
     /// with line tables (CARGO_PROFILE_RELEASE_DEBUG=line-tables-only, ..._STRIP=none).
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn rar5_profile() {
         use std::{
             collections::HashMap,

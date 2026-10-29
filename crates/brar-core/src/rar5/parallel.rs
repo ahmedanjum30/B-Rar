@@ -52,7 +52,14 @@ impl From<Corrupt> for Failure {
     }
 }
 
+/// CPU cycles this thread has used (for BRAR_STATS); 0 where Windows' counter isn't there.
+#[cfg(not(windows))]
+fn thread_cycles() -> u64 {
+    0
+}
+
 /// CPU cycles this thread has used (for BRAR_STATS).
+#[cfg(windows)]
 fn thread_cycles() -> u64 {
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -341,7 +348,7 @@ pub(crate) fn decode(src: &Source, files: &[&Entry], window: usize, threads: usi
 }
 /// Phase A alone, on this thread: every chunk of `files` decoded into tokens and dropped
 /// (for profiling it). Returns the number of ops.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(super) fn phase_a_only(src: &Source, files: &[&Entry]) -> usize {
     let mut chunks = Vec::new();
     let Ok(_) = scan(src, files, &AtomicBool::new(false), |c| chunks.push(c)) else {

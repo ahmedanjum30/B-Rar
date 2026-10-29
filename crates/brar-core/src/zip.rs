@@ -404,6 +404,7 @@ mod tests {
     /// `cargo test --release -p brar-core --lib zip_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn zip_bench() {
         use std::time::Instant;
         #[link(name = "kernel32")]

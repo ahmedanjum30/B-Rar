@@ -1186,6 +1186,7 @@ mod tests {
     /// `cargo test --release -p brar-core --lib inflate_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn inflate_bench() {
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -1249,6 +1250,7 @@ mod tests {
     /// over the block count difference.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn block_cost() {
         #[link(name = "kernel32")]
         unsafe extern "system" {
