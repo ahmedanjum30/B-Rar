@@ -11,7 +11,7 @@
 
 Free for personal and other non-commercial use. See [License](#license).
 
-**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11, or visit the [website](https://ahmedanjum30.github.io/B-Rar/). Microsoft Store: coming soon.
+**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11, or visit the [website](https://ahmedanjum30.github.io/B-Rar/). Microsoft Store: coming soon. The command line also runs on [Linux](#linux).
 
 ## Features
 
@@ -66,6 +66,18 @@ The installer on the Releases page is built by this repository's [release workfl
 
 **Updates:** the Store version updates itself. The installed and portable versions (and the `-x64.msix` signed with B-Rar's own certificate) check GitHub when the window opens and say when a new version is out; nothing is downloaded until you click **Update**. The download is checked against the release's `SHA256SUMS.txt`, then the new setup runs (B-Rar reopens afterwards), the portable files are replaced in place, or the package opens in App Installer.
 
+### Linux
+
+The command line runs on Linux too: `B-Rar-<version>-linux-x64.tar.gz` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `brar` for x86-64 (glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 and later). The window and the right-click menu are Windows only.
+
+```sh
+tar xzf B-Rar-*-linux-x64.tar.gz
+sudo install B-Rar-*-linux-x64/brar /usr/local/bin/
+brar x archive.rar
+```
+
+Files keep the permissions stored in the archive (a script stays executable), and ZIPs made on Linux store them. Check the download with `sha256sum` against `SHA256SUMS.txt`. It doesn't update itself: download the new version from Releases.
+
 Questions or ideas? Found a bug? Open an [issue](https://github.com/ahmedanjum30/B-Rar/issues).
 
 ## Command line
@@ -81,7 +93,7 @@ B-Rar t archive.7z                       test: decode everything, write nothing
 B-Rar a backup.zip docs photos           make backup.zip from these (-l 0-9, -p password)
 ```
 
-Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all.
+Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all. On Linux the command is `brar`.
 
 ## Building from source
 
@@ -91,7 +103,7 @@ You need [Rust](https://rustup.rs/) 1.99 or newer with the `x86_64-pc-windows-gn
 cargo build --release
 ```
 
-The programs are in `target/release`. `installer\build.ps1` packages them as an MSIX signed with a local certificate from `installer\new-cert.ps1` (`-Quick` for a fast test build, `-Install` to install it); `-Store` builds the unsigned package for the Microsoft Store.
+The programs are in `target/release`. On Linux, `cargo build --release -p brar-cli` builds the command line (with `gcc` and `g++` installed). `installer\build.ps1` packages them as an MSIX signed with a local certificate from `installer\new-cert.ps1` (`-Quick` for a fast test build, `-Install` to install it); `-Store` builds the unsigned package for the Microsoft Store.
 
 ## Project layout
 

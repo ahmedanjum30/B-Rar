@@ -87,14 +87,44 @@ jobs:
           path: dist/B-Rar-*-store.msix
           if-no-files-found: error
 
+  # The command line for Linux: brar in a .tar.gz, for x86-64 with glibc.
+  linux:
+    # Pinned: the glibc it is built against is the oldest the program runs on.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build
+        run: cargo build --release -p brar-cli
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="B-Rar-$version-linux-x64"
+          mkdir -p "dist/$name"
+          cp target/release/B-Rar "dist/$name/brar"
+          cp README.md LICENSE installer/unrar-license.txt "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-files
+          path: dist/B-Rar-*-linux-x64.tar.gz
+          if-no-files-found: error
+
   publish:
-    needs: [checks, build]
+    needs: [checks, build, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: release-files
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-files
+          path: dist
+      - name: Add the Linux file to the checksums
+        run: cd dist && sha256sum B-Rar-*-linux-x64.tar.gz >> SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -108,6 +138,8 @@ jobs:
             > **Windows says "Windows protected your PC"?** Click **More info**, then **Run anyway**. B-Rar isn't code-signed yet, so Windows doesn't know the publisher. The installer is the one built by this repository's release workflow; you can check it against `SHA256SUMS.txt`.
 
             **The `-portable-x64.zip`** has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` with nothing to install and no right-click menu.
+
+            **Linux:** the `-linux-x64.tar.gz` has the command line, `brar` (x86-64, glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 and later). Unpack it and put `brar` on your PATH, for example `sudo install brar /usr/local/bin/`. Then `brar x archive.rar`, `brar a backup.zip folder`, `brar --help`.
 
             **Microsoft Store:** coming soon, with the Windows 11 short right-click menu and updates through the Store (and `winget install B-Rar`).
           generate_release_notes: true

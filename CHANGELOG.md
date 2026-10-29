@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **The command line on Linux.** `B-Rar-<version>-linux-x64.tar.gz` has `brar` for x86-64 Linux: the same extraction (ZIP, RAR, 7z, tar and the rest) and ZIP creation as on Windows. Files keep the permissions stored in the archive, and ZIPs made on Linux store them.
+- Website and Microsoft Store search terms include "BRar", without the hyphen.
+
 ## 1.1.0 (2026-10-29)
 
 - **B-Rar makes ZIP archives.** Right-click files or folders, **B-Rar**: **Add to archive...** (name, level, AES-256 password) or **Add to "name.zip"** (one B-Rar submenu, like WinRAR's: extract commands on archives, add commands on anything else); or `B-Rar a backup.zip folder`. Every core compresses at once, a big file in pieces; already-compressed files (photos, videos, archives) are stored. 1.1 GB of programs in 1.7 s at Normal level.
