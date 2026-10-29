@@ -79,7 +79,7 @@ struct Item {
     modified: SystemTime,
     /// FILETIMEs: modified, accessed, created.
     times: [u64; 3],
-    /// Windows file attributes.
+    /// Windows file attributes; on Unix, the mode in the top 16 bits as well.
     attributes: u32,
     is_dir: bool,
     /// Already compressed: stored as it is.
@@ -182,8 +182,13 @@ fn walk(path: &Path, name: String, meta: &fs::Metadata, own: Option<&Path>, item
         meta.file_attributes(),
         [meta.last_write_time(), meta.last_access_time(), meta.creation_time()],
     );
-    #[cfg(not(windows))]
-    let (attributes, times) = (if meta.is_dir() { 0x10 } else { 0x20 }, [0; 3]);
+    // Unix: the mode in the top half, as Info-ZIP does, over the DOS folder/archive bit.
+    #[cfg(unix)]
+    let (attributes, times) = {
+        use std::os::unix::fs::PermissionsExt;
+        let dos = if meta.is_dir() { 0x10 } else { 0x20 };
+        ((meta.permissions().mode() << 16) | dos, [0; 3])
+    };
     let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     if meta.is_dir() {
         items.push(Item {
@@ -737,8 +742,8 @@ fn central_directory(out: &mut Out, items: &[Item], records: &[Record], encrypt:
         }
         let mut h = Bytes::default();
         h.u32(0x0201_4b50)
-            // Made by: MS-DOS attributes (Windows), ZIP 6.3.
-            .u16(63)
+            // Made by: MS-DOS attributes (Windows) or Unix, ZIP 6.3.
+            .u16(if cfg!(unix) { 3 << 8 | 63 } else { 63 })
             .u16(needed(!zip64.0.is_empty(), encrypted))
             .u16(flags(item, encrypted))
             .u16(if encrypted { AES } else { r.method })

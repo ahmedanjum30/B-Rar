@@ -316,7 +316,7 @@ impl rar5::parallel::Output for EngineOutput<'_> {
         self.open = Some(if e.size <= SMALL_FILE {
             Open::Buffer(Vec::with_capacity(e.size as usize))
         } else {
-            Open::Stream(self.sink.begin_file(&e.name, Some(e.size), e.modified)?)
+            Open::Stream(self.sink.begin_file(&e.name, Some(e.size), e.stamp())?)
         });
         Ok(())
     }
@@ -346,7 +346,7 @@ impl rar5::parallel::Output for EngineOutput<'_> {
                 {
                     self.written.push(p);
                 }
-                self.sink.file_owned(&e.name, e.modified, data)?;
+                self.sink.file_owned(&e.name, e.stamp(), data)?;
             }
         }
         Ok(())
@@ -385,9 +385,9 @@ fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> 
         return Err(Fail::Retry);
     }
     let written = if e.size <= SMALL_FILE {
-        sink.file_owned(&e.name, e.modified, data)
+        sink.file_owned(&e.name, e.stamp(), data)
     } else {
-        sink.file_bytes(&e.name, e.modified, &data)
+        sink.file_bytes(&e.name, e.stamp(), &data)
     };
     written.map_err(Fail::Stop)
 }
@@ -400,7 +400,7 @@ fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Resul
     if e.packed < e.size || (e.packed != e.size && (e.crypt.is_none() || e.packed - e.size >= 16)) {
         return Err(Fail::Retry);
     }
-    let mut out = sink.begin_file(&e.name, Some(e.size), e.modified).map_err(Fail::Stop)?;
+    let mut out = sink.begin_file(&e.name, Some(e.size), e.stamp()).map_err(Fail::Stop)?;
     let mut hasher = e.check.hasher();
     let mut buf = Vec::with_capacity(PIECE as usize);
     let mut at = 0;

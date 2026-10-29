@@ -29,7 +29,7 @@ use crate::{
         parallel::{Failure, inflate_parallel},
     },
     mmap,
-    sink::{SMALL_FILE, Sink},
+    sink::{SMALL_FILE, Sink, Stamp},
     time,
     volumes::Input,
     whole::{BUDGET as FAST_PATH_BUDGET, Budget, read_at},
@@ -95,7 +95,7 @@ struct Plain {
     size: u64,
     crc: u32,
     stored: bool,
-    modified: Option<SystemTime>,
+    stamp: Stamp,
 }
 
 /// An LZMA or XZ entry, which B-Rar decrypts and decodes itself.
@@ -107,7 +107,7 @@ struct Own {
     crc: u32,
     method: u16,
     crypt: zip_own::Crypt,
-    modified: Option<SystemTime>,
+    stamp: Stamp,
 }
 
 enum Job {
@@ -180,7 +180,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
                     crc: f.crc32(),
                     method,
                     crypt,
-                    modified: mtime(&f),
+                    stamp: stamp(&f),
                 }),
                 Some(data_start) if fast => Job::Fast(Plain {
                     name: f.name()?.into_owned(),
@@ -189,7 +189,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
                     size: f.size(),
                     crc: f.crc32(),
                     stored: method == CompressionMethod::Stored,
-                    modified: mtime(&f),
+                    stamp: stamp(&f),
                 }),
                 _ => Job::Fallback(i),
             };
@@ -267,9 +267,9 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
         return Err(Error::Damaged(e.name.clone()));
     }
     if e.size <= SMALL_FILE {
-        sink.file_owned(&e.name, e.modified, data)
+        sink.file_owned(&e.name, e.stamp, data)
     } else {
-        sink.file_bytes(&e.name, e.modified, &data)
+        sink.file_bytes(&e.name, e.stamp, &data)
     }
 }
 
@@ -277,7 +277,7 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
 /// gave up or the CRC didn't match (the partial file is removed); the single-core decoder
 /// takes over, and reports real damage.
 fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, threads: usize) -> Result<bool> {
-    let mut file = sink.begin_file(&e.name, Some(e.size), e.modified)?;
+    let mut file = sink.begin_file(&e.name, Some(e.size), e.stamp)?;
     let mut crc = crc32fast::Hasher::new();
     let result = inflate_parallel(packed, e.packed as usize, threads, &mut |b: &[u8]| {
         crc.update(b);
@@ -316,7 +316,7 @@ fn extract_own(read_at: ReadAt, e: &Own, password: Option<&[u8]>, sink: &Sink) -
             want,
             left: e.size,
         };
-        sink.file(&e.name, Some(e.size), e.modified, &mut data)
+        sink.file(&e.name, Some(e.size), e.stamp, &mut data)
     });
     result.map_err(|err| err.for_entry(&e.name, encrypted && password.is_some()))
 }
@@ -367,9 +367,17 @@ fn extract_entry<R: Read + Seek>(mut archive: ZipArchive<R>, i: usize, password:
         None => archive.by_index(i)?,
     };
     let name = f.name()?.into_owned();
-    let (size, modified, encrypted) = (f.size(), mtime(&f), f.encrypted());
-    sink.file(&name, Some(size), modified, &mut f)
+    let (size, stamp, encrypted) = (f.size(), stamp(&f), f.encrypted());
+    sink.file(&name, Some(size), stamp, &mut f)
         .map_err(|e| e.for_entry(&name, encrypted && password.is_some()))
+}
+
+/// The entry's time and, for entries made on Unix, its permissions.
+fn stamp<R: std::io::Read>(f: &ZipFile<'_, R>) -> Stamp {
+    Stamp {
+        mtime: mtime(f),
+        mode: f.unix_mode(),
+    }
 }
 
 fn mtime<R: std::io::Read>(f: &ZipFile<'_, R>) -> Option<SystemTime> {

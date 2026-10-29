@@ -13,7 +13,7 @@ use std::{
 use crate::{
     EntryInfo, IoContext, Options, Result,
     format::{Codec, is_tar},
-    sink::Sink,
+    sink::{Sink, Stamp},
     time,
     volumes::Input,
 };
@@ -113,7 +113,11 @@ pub(crate) fn extract(input: &Input, codec: Codec, sink: &Sink, opts: &Options) 
             sink.dir(&name)?;
         } else if kind.is_file() || kind.is_contiguous() {
             let size = entry.size();
-            sink.file_buffered(&name, size, modified, &mut entry)?;
+            let stamp = Stamp {
+                mtime: modified,
+                mode: entry.header().mode().ok(),
+            };
+            sink.file_buffered(&name, size, stamp, &mut entry)?;
         } else {
             // Symlinks, hard links and devices are skipped: following them safely is a
             // feature of its own.

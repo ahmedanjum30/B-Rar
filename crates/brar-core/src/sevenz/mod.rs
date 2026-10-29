@@ -73,7 +73,7 @@ fn extract_all(src: Source, a: &header::Archive, keys: &Keys, sink: &Sink, opts:
             }
             None if e.is_anti => {}
             None if e.is_dir => sink.dir(&e.name)?,
-            None => sink.file_owned(&e.name, e.mtime, Vec::new())?,
+            None => sink.file_owned(&e.name, e.stamp(), Vec::new())?,
         }
     }
     let blocks = a.folders.len();
@@ -372,7 +372,7 @@ impl<'a> BlockOut<'a> {
         } else if e.size <= SMALL_FILE {
             Open::Buffer(Vec::with_capacity(e.size as usize))
         } else {
-            Open::Stream(self.sink.begin_file(&e.name, Some(e.size), e.mtime)?)
+            Open::Stream(self.sink.begin_file(&e.name, Some(e.size), e.stamp())?)
         });
         Ok(())
     }
@@ -385,7 +385,7 @@ impl<'a> BlockOut<'a> {
         }
         match self.open.take().expect("a file is open") {
             Open::Stream(f) => f.finish(),
-            Open::Buffer(data) => self.sink.file_owned(&e.name, e.mtime, data)?,
+            Open::Buffer(data) => self.sink.file_owned(&e.name, e.stamp(), data)?,
             Open::Skip => {}
         }
         self.next += 1;

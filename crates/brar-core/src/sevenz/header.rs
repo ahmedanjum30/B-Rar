@@ -8,7 +8,9 @@ use super::coders::{Keys, Source, folder_reader};
 use crate::{
     Error,
     deflate::inflate::{Bad, Res},
-    lzma, time,
+    lzma,
+    sink::Stamp,
+    time,
 };
 
 const SIGNATURE: [u8; 6] = [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
@@ -105,8 +107,19 @@ pub(crate) struct Entry {
     pub(crate) is_dir: bool,
     pub(crate) is_anti: bool,
     pub(crate) mtime: Option<SystemTime>,
+    /// Unix permissions, when 7-Zip stored them (archives made on Unix).
+    pub(crate) mode: Option<u32>,
     /// The folder its data is in; `None` for directories and empty files.
     pub(crate) folder: Option<usize>,
+}
+
+impl Entry {
+    pub(crate) fn stamp(&self) -> Stamp {
+        Stamp {
+            mtime: self.mtime,
+            mode: self.mode,
+        }
+    }
 }
 
 pub(crate) struct Archive {
@@ -479,6 +492,7 @@ fn files(r: &mut Reader, s: &Streams) -> Res<Vec<Entry>> {
     let (mut empty_file, mut anti) = (Vec::new(), Vec::new());
     let mut names = Vec::new();
     let mut mtimes = vec![None; n];
+    let mut modes = vec![None; n];
     loop {
         let t = r.byte()?;
         if t == 0 {
@@ -509,7 +523,20 @@ fn files(r: &mut Reader, s: &Streams) -> Res<Vec<Entry>> {
                     }
                 }
             }
-            // Other times, attributes, padding.
+            0x15 => {
+                let defined = p.defined(n)?;
+                if p.byte()? != 0 {
+                    return Err(Bad);
+                }
+                for (m, d) in modes.iter_mut().zip(defined) {
+                    if d {
+                        // p7zip and 7-Zip on Unix set 0x8000 and put the mode in the top half.
+                        let a = p.u32()?;
+                        *m = (a & 0x8000 != 0).then_some(a >> 16);
+                    }
+                }
+            }
+            // Other times, padding.
             _ => {}
         }
     }
@@ -528,6 +555,7 @@ fn files(r: &mut Reader, s: &Streams) -> Res<Vec<Entry>> {
             is_dir: false,
             is_anti: false,
             mtime: mtimes[i],
+            mode: modes[i],
             folder: None,
         };
         if empty_stream[i] {

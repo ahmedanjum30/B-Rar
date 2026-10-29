@@ -2,6 +2,10 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../../assets/brar.ico");
+    // The icon and version block are Windows resources; Linux builds have neither.
+    if env::var_os("CARGO_CFG_WINDOWS").is_none() {
+        return;
+    }
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let icon = dir.join("../../assets/brar.ico").display().to_string().replace('\\', "/");
     let version = env::var("CARGO_PKG_VERSION").unwrap();

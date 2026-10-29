@@ -288,7 +288,8 @@ impl Sink {
 
     /// Streams `reader` to the entry's file on the calling thread. Fully reading the reader
     /// is what lets zip/7z verify their CRCs, so test mode and skipped files drain it too.
-    pub(crate) fn file(&self, name: &str, size: Option<u64>, mtime: Option<SystemTime>, reader: &mut dyn Read) -> Result<()> {
+    pub(crate) fn file(&self, name: &str, size: Option<u64>, stamp: impl Into<Stamp>, reader: &mut dyn Read) -> Result<()> {
+        let stamp = stamp.into();
         self.check()?;
         if !self.selected(name) {
             // Not picked, but a sequential stream still has to get past it.
@@ -302,20 +303,21 @@ impl Sink {
             shared.record_file(n);
             return Ok(());
         };
-        let Some(mut file) = shared.open(&path, size, mtime)? else {
+        let Some(mut file) = shared.open(&path, size, stamp.mtime)? else {
             // Keeping the existing file; the stream still has to be consumed in order.
             copy(reader, &mut io::sink(), shared)?;
             return Ok(());
         };
         let n = copy(reader, &mut file, shared).at(&path)?;
-        set_mtime(&file, mtime);
+        stamp.apply(&file);
         shared.record_file(n);
         Ok(())
     }
 
     /// Writes an entry already fully decoded in memory, on the calling thread, in 1 MiB
     /// writes (a single huge write measured 3-5x slower on Windows).
-    pub(crate) fn file_bytes(&self, name: &str, mtime: Option<SystemTime>, data: &[u8]) -> Result<()> {
+    pub(crate) fn file_bytes(&self, name: &str, stamp: impl Into<Stamp>, data: &[u8]) -> Result<()> {
+        let stamp = stamp.into();
         self.check()?;
         if !self.selected(name) {
             return Ok(());
@@ -328,7 +330,7 @@ impl Sink {
             shared.record_file(len);
             return Ok(());
         };
-        let Some(mut file) = shared.open(&path, Some(len), mtime)? else {
+        let Some(mut file) = shared.open(&path, Some(len), stamp.mtime)? else {
             shared.advance(len);
             return Ok(());
         };
@@ -337,7 +339,7 @@ impl Sink {
             shared.advance(chunk.len() as u64);
             shared.check_running()?;
         }
-        set_mtime(&file, mtime);
+        stamp.apply(&file);
         shared.record_file(len);
         Ok(())
     }
@@ -345,7 +347,8 @@ impl Sink {
     /// Starts a file whose bytes arrive in pieces ([`FileOut::write`]), from a decoder that
     /// streams its output. Unselected entries and test mode get a writer that drops the bytes
     /// (test mode still counts the file); so does an existing file the user chose to keep.
-    pub(crate) fn begin_file(&self, name: &str, size: Option<u64>, mtime: Option<SystemTime>) -> Result<FileOut> {
+    pub(crate) fn begin_file(&self, name: &str, size: Option<u64>, stamp: impl Into<Stamp>) -> Result<FileOut> {
+        let stamp = stamp.into();
         self.check()?;
         let shared = Arc::clone(&self.shared);
         if !self.selected(name) {
@@ -353,7 +356,7 @@ impl Sink {
                 shared,
                 file: None,
                 path: None,
-                mtime,
+                stamp,
                 len: 0,
                 report: false,
                 record: false,
@@ -365,18 +368,18 @@ impl Sink {
                 shared,
                 file: None,
                 path: None,
-                mtime,
+                stamp,
                 len: 0,
                 report: true,
                 record: true,
             });
         };
-        match self.shared.open(&path, size, mtime)? {
+        match self.shared.open(&path, size, stamp.mtime)? {
             Some(file) => Ok(FileOut {
                 shared,
                 file: Some(file),
                 path: Some(path),
-                mtime,
+                stamp,
                 len: 0,
                 report: true,
                 record: true,
@@ -385,7 +388,7 @@ impl Sink {
                 shared,
                 file: None,
                 path: None,
-                mtime,
+                stamp,
                 len: 0,
                 report: true,
                 record: false,
@@ -395,26 +398,26 @@ impl Sink {
 
     /// Like [`Sink::file`], but small files are read into memory here and written on the
     /// writer pool, so a sequential decoder never waits on file creation.
-    pub(crate) fn file_buffered(&self, name: &str, size: u64, mtime: Option<SystemTime>, reader: &mut dyn Read) -> Result<()> {
+    pub(crate) fn file_buffered(&self, name: &str, size: u64, stamp: impl Into<Stamp>, reader: &mut dyn Read) -> Result<()> {
         if self.dest.is_none() || size > SMALL_FILE || !self.selected(name) {
-            return self.file(name, Some(size), mtime, reader);
+            return self.file(name, Some(size), stamp, reader);
         }
         let mut data = Vec::with_capacity(size as usize);
         reader.read_to_end(&mut data)?;
-        self.file_owned(name, mtime, data)
+        self.file_owned(name, stamp, data)
     }
 
     /// Writes already-decoded bytes on the writer pool.
-    pub(crate) fn file_owned(&self, name: &str, mtime: Option<SystemTime>, data: Vec<u8>) -> Result<()> {
-        self.write_owned(name, mtime, data, true)
+    pub(crate) fn file_owned(&self, name: &str, stamp: impl Into<Stamp>, data: Vec<u8>) -> Result<()> {
+        self.write_owned(name, stamp.into(), data, true)
     }
 
     /// [`Sink::file_owned`] for bytes the decoder already reported to [`Progress`].
-    pub(crate) fn file_owned_reported(&self, name: &str, mtime: Option<SystemTime>, data: Vec<u8>) -> Result<()> {
-        self.write_owned(name, mtime, data, false)
+    pub(crate) fn file_owned_reported(&self, name: &str, stamp: impl Into<Stamp>, data: Vec<u8>) -> Result<()> {
+        self.write_owned(name, stamp.into(), data, false)
     }
 
-    fn write_owned(&self, name: &str, mtime: Option<SystemTime>, data: Vec<u8>, report: bool) -> Result<()> {
+    fn write_owned(&self, name: &str, stamp: Stamp, data: Vec<u8>, report: bool) -> Result<()> {
         self.check()?;
         if !self.selected(name) {
             return Ok(());
@@ -438,12 +441,12 @@ impl Sink {
         }
         let shared = Arc::clone(&self.shared);
         self.writers.spawn(move || {
-            let result = shared.open(&path, Some(len), mtime).and_then(|file| {
+            let result = shared.open(&path, Some(len), stamp.mtime).and_then(|file| {
                 let Some(mut file) = file else {
                     return Ok(false);
                 };
                 file.write_all(&data).at(&path)?;
-                set_mtime(&file, mtime);
+                stamp.apply(&file);
                 Ok(true)
             });
             if report {
@@ -547,7 +550,7 @@ pub(crate) struct FileOut {
     file: Option<File>,
     /// Where `file` is, so a failed file can be removed.
     path: Option<PathBuf>,
-    mtime: Option<SystemTime>,
+    stamp: Stamp,
     len: u64,
     /// Count the bytes toward progress / the file toward the summary.
     report: bool,
@@ -576,7 +579,7 @@ impl FileOut {
 
     pub(crate) fn finish(self) {
         if let Some(file) = &self.file {
-            set_mtime(file, self.mtime);
+            self.stamp.apply(file);
         }
         if self.record {
             self.shared.record_file(self.len);
@@ -593,10 +596,35 @@ impl FileOut {
     }
 }
 
-fn set_mtime(file: &File, mtime: Option<SystemTime>) {
-    // Best effort: a timestamp the filesystem rejects is not worth failing the extraction.
-    if let Some(t) = mtime {
-        let _ = file.set_modified(t);
+/// What an extracted file gets besides its bytes: its modification time and, on Unix, its
+/// permissions (the executable bit of a script, for one). Formats that store no permissions
+/// pass just the time.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Stamp {
+    pub mtime: Option<SystemTime>,
+    /// Unix permission bits, from archives made on Unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub mode: Option<u32>,
+}
+
+impl From<Option<SystemTime>> for Stamp {
+    fn from(mtime: Option<SystemTime>) -> Self {
+        Stamp { mtime, mode: None }
+    }
+}
+
+impl Stamp {
+    fn apply(&self, file: &File) {
+        // Best effort: a timestamp the filesystem rejects is not worth failing the extraction.
+        if let Some(t) = self.mtime {
+            let _ = file.set_modified(t);
+        }
+        #[cfg(unix)]
+        if let Some(mode) = self.mode {
+            use std::os::unix::fs::PermissionsExt;
+            // No setuid, setgid or sticky bits from an archive, as unzip and 7-Zip do.
+            let _ = file.set_permissions(fs::Permissions::from_mode(mode & 0o777));
+        }
     }
 }
 

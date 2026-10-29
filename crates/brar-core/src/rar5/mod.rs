@@ -16,7 +16,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{IoContext, Result, mmap, time, volumes::RarSet, whole};
+use crate::{IoContext, Result, mmap, sink::Stamp, time, volumes::RarSet, whole};
 use crypt::Keys;
 
 const SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
@@ -125,6 +125,8 @@ pub(crate) struct Entry {
     /// Dictionary size: how far back matches may reach.
     pub dict: u64,
     pub modified: Option<SystemTime>,
+    /// Unix permissions, for files archived on Unix.
+    pub mode: Option<u32>,
     /// Can B-Rar's own decoder handle this entry?
     pub supported: bool,
 }
@@ -190,6 +192,13 @@ impl<'a> Views<'a> {
 }
 
 impl Entry {
+    pub(crate) fn stamp(&self) -> Stamp {
+        Stamp {
+            mtime: self.modified,
+            mode: self.mode,
+        }
+    }
+
     /// [`Entry::read`] for a few bytes (block headers), through `views` where it can.
     pub(crate) fn read_small(&self, views: &mut Views, src: &Source, from: u64, to: u64, out: &mut Vec<u8>) -> unpack::Res<()> {
         let Some((keys, iv)) = &self.crypt else {
@@ -490,7 +499,7 @@ impl Parser<'_> {
         let (body, mut q, extra) = (&h.body[..], h.fields, h.extra());
         let file_flags = vint(body, &mut q)?;
         let size = vint(body, &mut q)?;
-        let _attributes = vint(body, &mut q)?;
+        let attributes = vint(body, &mut q)?;
         let mut modified = None;
         if file_flags & 0x2 != 0 {
             modified = time::unix(u32::from_le_bytes(body.get(q..q + 4)?.try_into().ok()?).into());
@@ -504,7 +513,7 @@ impl Parser<'_> {
             None
         };
         let comp = vint(body, &mut q)?;
-        let _host_os = vint(body, &mut q)?;
+        let host_os = vint(body, &mut q)?;
         let name_len = vint(body, &mut q)? as usize;
         let name = String::from_utf8_lossy(body.get(q..q.checked_add(name_len)?)?).into_owned();
 
@@ -592,6 +601,8 @@ impl Parser<'_> {
             extra_dist: version == 1,
             dict,
             modified,
+            // Host 1 is Unix, where the attributes are the file mode.
+            mode: (host_os == 1).then_some(attributes as u32),
             supported,
         };
         Some((entry, crc.is_some() || blake2.is_some()))

@@ -47,3 +47,18 @@ jobs:
       # Tests that need WinRAR's Rar.exe or 7-Zip to build their archives skip themselves.
       - name: Test
         run: cargo test --workspace
+
+  # The command line on Linux (the app window and the right-click menu are Windows only).
+  linux:
+    name: linux (command line)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -p brar-core -p brar-cli --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p brar-core -p brar-cli
