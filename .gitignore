@@ -2,3 +2,6 @@
 /bench-data
 *.profraw
 /dist
+
+# graphify knowledge graph (local)
+graphify-out/
