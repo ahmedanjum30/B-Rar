@@ -29,6 +29,7 @@ use std::{
 
 pub use create::{CreateOptions, create};
 pub use format::{Codec, Format, detect};
+pub use volumes::{FindPartFn, PartFinder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -56,7 +57,7 @@ pub enum Error {
     WrongPassword,
     #[error("\"{0}\" is damaged (checksum mismatch); the archive is corrupt or incomplete")]
     Damaged(String),
-    #[error("missing volume: {} (all parts must be in the same folder)", .0.display())]
+    #[error("missing part: {}", .0.display())]
     MissingVolume(PathBuf),
     #[error("not supported: {0}")]
     Unsupported(&'static str),
@@ -147,6 +148,8 @@ pub struct Options {
     pub on_conflict: ConflictPolicy,
     /// Extract only these entries; `None` extracts everything.
     pub selection: Option<Selection>,
+    /// Finds parts of a multi-part archive that aren't next to the first one.
+    pub find_part: PartFinder,
 }
 
 /// Part of an archive to extract, as chosen in a file browser.
@@ -344,31 +347,35 @@ pub struct Summary {
 }
 
 pub fn list(archive: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
-    let (input, format) = open(archive)?;
+    let (input, format) = open(archive, opts)?;
     let result = match format {
         Format::Zip => zip::list(&input),
         Format::SevenZ => sevenz::list(&input, opts),
-        Format::Rar => rar::list(&input.first, opts).map_err(|e| missing_rar_part(&input, e)),
+        Format::Rar => rar::list(&input.first, opts).map_err(|e| missing_rar_part(&input, opts, e)),
         Format::Stream(codec) => stream::list(&input, codec, opts),
     };
     result.map_err(Error::normalize)
 }
 
 /// unRAR reports a missing volume as a generic open or CRC error; name the part instead.
-fn missing_rar_part(input: &volumes::Input, e: Error) -> Error {
+fn missing_rar_part(input: &volumes::Input, opts: &Options, e: Error) -> Error {
     let e = e.normalize();
     if matches!(e, Error::Cancelled | Error::PasswordRequired | Error::WrongPassword) {
         return e;
     }
-    match volumes::RarSet::of(&input.first).and_then(|set| set.missing()) {
+    let missing = opts
+        .find_part
+        .declined()
+        .or_else(|| volumes::RarSet::of(&input.first).and_then(|set| set.missing()));
+    match missing {
         Some(part) => Error::MissingVolume(part),
         None => e,
     }
 }
 
 /// Resolves which part(s) to read and detects the format from the (combined) data.
-fn open(archive: &Path) -> Result<(volumes::Input, Format)> {
-    let input = volumes::resolve(archive)?;
+fn open(archive: &Path, opts: &Options) -> Result<(volumes::Input, Format)> {
+    let input = volumes::resolve(archive, &opts.find_part)?;
     let format = format::detect_bytes(&input.head(512)?).ok_or(Error::UnknownFormat)?;
     if format == Format::Rar && input.split.is_some() {
         // A RAR cut into .001/.002 pieces by a file splitter (not RAR's own volumes): unRAR
@@ -391,12 +398,12 @@ pub fn test(archive: &Path, opts: &Options) -> Result<Summary> {
 }
 
 fn run(archive: &Path, dest: Option<&Path>, opts: &Options) -> Result<Summary> {
-    let (input, format) = open(archive)?;
+    let (input, format) = open(archive, opts)?;
     let sink = sink::Sink::new(dest, opts)?;
     let result = match format {
         Format::Zip => zip::extract(&input, &sink, opts),
         Format::SevenZ => sevenz::extract(&input, &sink, opts),
-        Format::Rar => rar::extract(&input.first, &sink, opts).map_err(|e| missing_rar_part(&input, e)),
+        Format::Rar => rar::extract(&input.first, &sink, opts).map_err(|e| missing_rar_part(&input, opts, e)),
         Format::Stream(codec) => stream::extract(&input, codec, &sink, opts),
     };
     // Always drain background writes, but report the decoder's error first.

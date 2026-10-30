@@ -10,5 +10,5 @@ mod open_archive;
 pub use error::UnrarResult;
 pub use open_archive::{
     CursorBeforeFile, CursorBeforeHeader, FileHeader, List, ListSplit, OpenArchive, Process,
-    VolumeInfo, set_progress_hook,
+    VolumeInfo, set_progress_hook, set_volume_hook,
 };

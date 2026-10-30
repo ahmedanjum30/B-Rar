@@ -499,9 +499,23 @@ impl ProcessMode for Test {
 /// Progress callback for this thread's unRAR operations (brar patch).
 type ProgressHook = Box<dyn FnMut(usize) -> bool>;
 
+/// Finds a volume unRAR couldn't (brar patch).
+type VolumeHook = Box<dyn FnMut(&Path) -> Option<PathBuf>>;
+
 thread_local! {
     static PROGRESS_HOOK: std::cell::RefCell<Option<ProgressHook>> = const { std::cell::RefCell::new(None) };
+    static VOLUME_HOOK: std::cell::RefCell<Option<VolumeHook>> = const { std::cell::RefCell::new(None) };
 }
+
+/// brar patch: installs a hook that unRAR asks, on the current thread, when the next volume
+/// isn't where it expected: it gets that path and returns where the volume is, or `None` to
+/// stop. Pass `None` to remove it.
+pub fn set_volume_hook(hook: Option<VolumeHook>) {
+    VOLUME_HOOK.with_borrow_mut(|h| *h = hook);
+}
+
+/// unRAR's buffer for the next volume's name, in characters (MAXPATHSIZE in rardefs.hpp).
+const VOLUME_NAME_BUF: usize = 0x10000;
 
 /// brar patch: installs a hook that receives the size of every chunk unRAR unpacks on the
 /// current thread (extract, test or read). Returning `false` cancels the operation, which
@@ -531,12 +545,26 @@ impl<M: ProcessMode> Internal<M> {
                 // also it's the maximum path length since 5.00.
                 let next =
                     unsafe { widestring::WideCString::from_ptr_truncate(p1 as *const _, 2048) };
-                user_data.1 = Some(next);
-                match p2 {
-                    // Next volume not found. -1 means stop
-                    native::RAR_VOL_ASK => -1,
-                    // Next volume found, 0 means continue
-                    _ => 0,
+                if p2 != native::RAR_VOL_ASK {
+                    user_data.1 = Some(next);
+                    return 0; // found: continue
+                }
+                // Not found: the hook may know where it is (brar patch); -1 stops.
+                let expected = PathBuf::from(next.to_os_string());
+                let found = VOLUME_HOOK.with_borrow_mut(|hook| hook.as_mut().and_then(|f| f(&expected)));
+                match found.and_then(|p| widestring::WideCString::from_os_str(p.as_os_str()).ok()) {
+                    Some(path) if path.len() < VOLUME_NAME_BUF => {
+                        let units = path.as_slice_with_nul();
+                        // SAFETY: unRAR's name buffer holds VOLUME_NAME_BUF characters, and
+                        // `units` (with its NUL) is shorter.
+                        unsafe { std::ptr::copy_nonoverlapping(units.as_ptr(), p1 as *mut _, units.len()) };
+                        user_data.1 = Some(path);
+                        0
+                    }
+                    _ => {
+                        user_data.1 = Some(next);
+                        -1
+                    }
                 }
             }
             native::UCM_PROCESSDATA => {

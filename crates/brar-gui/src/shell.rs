@@ -169,6 +169,38 @@ pub fn pick_folder(archive: &Path, owner: isize) -> Result<Option<PathBuf>, Stri
     }
 }
 
+/// Asks where a missing part of a multi-part archive is, like WinRAR: the standard file
+/// picker, opened in the folder the part should be in with its name filled in, over the window
+/// in front (B-Rar's). `None` if cancelled. Runs on the extracting thread.
+pub fn pick_part(expected: &Path) -> Option<PathBuf> {
+    init_com();
+    let name = expected.file_name().unwrap_or_default();
+    let title = wide(format!("Where is {}? (the next part of the archive)", name.to_string_lossy()));
+    let file_name = wide(name);
+    // SAFETY: plain COM calls on a thread with COM initialised; every string passed is
+    // NUL-terminated and outlives its call, and the returned path buffer is freed with
+    // CoTaskMemFree.
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST).ok()?;
+        dialog.SetTitle(PCWSTR(title.as_ptr())).ok()?;
+        dialog.SetFileName(PCWSTR(file_name.as_ptr())).ok()?;
+        dialog.SetOkButtonLabel(w!("Use this part")).ok()?;
+        if let Some(dir) = expected.parent().filter(|d| d.is_dir()) {
+            let dir = wide(dir);
+            if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(dir.as_ptr()), None) {
+                let _ = dialog.SetFolder(&item);
+            }
+        }
+        dialog.Show(Some(GetForegroundWindow())).ok()?;
+        let raw = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = raw.to_string();
+        CoTaskMemFree(Some(raw.0 as *const _));
+        path.ok().map(PathBuf::from)
+    }
+}
+
 /// The standard Windows file picker for opening an archive, over window `owner`. `None` if
 /// cancelled.
 pub fn pick_archive(owner: isize) -> Result<Option<PathBuf>, String> {

@@ -41,7 +41,26 @@ fn open(path: &Path, opts: &Options) -> unrar::Archive<'static> {
     }
 }
 
+/// Lets unRAR find volumes that aren't next to the first ([`crate::PartFinder`]) while this
+/// thread works on the archive.
+struct VolumeHook;
+
+impl VolumeHook {
+    fn install(opts: &Options) -> Self {
+        let finder = opts.find_part.clone();
+        unrar::set_volume_hook(Some(Box::new(move |expected| finder.locate(expected))));
+        Self
+    }
+}
+
+impl Drop for VolumeHook {
+    fn drop(&mut self) {
+        unrar::set_volume_hook(None);
+    }
+}
+
 pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
+    let _volumes = VolumeHook::install(opts);
     let mut entries = Vec::new();
     for header in open(path, opts).open_for_listing()? {
         let h = header?;
@@ -62,9 +81,10 @@ pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
 }
 
 pub(crate) fn extract(path: &Path, sink: &Sink, opts: &Options) -> Result<()> {
+    let _volumes = VolumeHook::install(opts);
     // BRAR_NO_RAR5=1 forces the unRAR path (for comparing the two decoders).
     if std::env::var_os("BRAR_NO_RAR5").is_none()
-        && let Some(archive) = rar5::parse(path, opts.password.as_deref())?
+        && let Some(archive) = rar5::parse(path, opts.password.as_deref(), &opts.find_part)?
     {
         return if archive.solid {
             extract_solid(path, archive, sink, opts)

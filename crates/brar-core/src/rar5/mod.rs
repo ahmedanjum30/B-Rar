@@ -16,7 +16,13 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{IoContext, Result, mmap, sink::Stamp, time, volumes::RarSet, whole};
+use crate::{
+    IoContext, Result, mmap,
+    sink::Stamp,
+    time,
+    volumes::{PartFinder, RarSet},
+    whole,
+};
 use crypt::Keys;
 
 const SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
@@ -290,7 +296,7 @@ impl Entry {
 /// means "leave the whole archive to unRAR": not RAR5, a volume missing, encrypted headers
 /// without the right password, or anything that doesn't parse cleanly. Entries B-Rar can't
 /// decode (no or wrong password among them: unRAR reports those) aren't `supported`.
-pub(crate) fn parse(path: &Path, password: Option<&str>) -> Result<Option<Archive>> {
+pub(crate) fn parse(path: &Path, password: Option<&str>, finder: &PartFinder) -> Result<Option<Archive>> {
     let mut p = Parser {
         password,
         keys: HashMap::new(),
@@ -309,10 +315,9 @@ pub(crate) fn parse(path: &Path, password: Option<&str>) -> Result<Option<Archiv
             break;
         }
         let Some(set) = &set else { return Ok(None) };
-        let next = set.part(volumes.len() + 1);
-        if !next.is_file() {
+        let Some(next) = finder.locate(&set.part(volumes.len() + 1)) else {
             return Ok(None); // unRAR names the missing volume
-        }
+        };
         volumes.push(next);
     }
     if p.open.is_some() {
@@ -703,7 +708,9 @@ mod tests {
             "archive", "packed MB", "out MB", "MB/s", "cyc/out B", "cyc/in B", "GHz"
         );
         for path in paths.split(';').filter(|p| !p.is_empty()) {
-            let arc = parse(Path::new(path), None).unwrap().expect("not a supported RAR5 archive");
+            let arc = parse(Path::new(path), None, &PartFinder::default())
+                .unwrap()
+                .expect("not a supported RAR5 archive");
             let src = Source::open(&arc).unwrap();
             let entries: Vec<_> = arc.entries.iter().filter(|e| e.supported).collect();
             let mut u = unpack::Unpacker::default();
@@ -762,7 +769,7 @@ mod tests {
         };
         let paths = std::env::var("BRAR_BENCH_RAR").expect("set BRAR_BENCH_RAR");
         for path in paths.split(';').filter(|p| !p.is_empty()) {
-            let arc = parse(Path::new(path), None).unwrap().expect("not a RAR5 archive");
+            let arc = parse(Path::new(path), None, &PartFinder::default()).unwrap().expect("not a RAR5 archive");
             let src = Source::open(&arc).unwrap();
             let files: Vec<&Entry> = if arc.solid {
                 arc.entries.iter().filter(|e| !e.is_dir).collect()
@@ -818,7 +825,9 @@ mod tests {
         let out_path = std::env::var("BRAR_PROFILE_OUT").expect("set BRAR_PROFILE_OUT");
         let secs: u64 = std::env::var("BRAR_PROFILE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
 
-        let arc = parse(Path::new(&path), None).unwrap().expect("not a supported RAR5 archive");
+        let arc = parse(Path::new(&path), None, &PartFinder::default())
+            .unwrap()
+            .expect("not a supported RAR5 archive");
         let src = Source::open(&arc).unwrap();
         let jobs: Vec<_> = arc
             .entries

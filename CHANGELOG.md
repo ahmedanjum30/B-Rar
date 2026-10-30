@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0 (2026-10-31)
+
+- **Parts in different folders.** When the next part of a RAR set or of a split (`.001`) archive isn't next to the first, B-Rar asks where it is, like WinRAR: a file picker in the app, a question on the command line. Parts after it are then looked for in the same folder, so you point at each folder once. Works for RAR5 on B-Rar's own decoder and for RAR 4 through unRAR.
+- **Steadier "time left".** The speed is averaged over about 5 seconds and the time left updates once a second, easing toward the new estimate, instead of jumping with every burst of small or big files.
+
 ## 1.2.0 (2026-10-29)
 
 - **The command line on Linux.** `B-Rar-<version>-linux-x64.tar.gz` has `brar` for x86-64 Linux: the same extraction (ZIP, RAR, 7z, tar and the rest) and ZIP creation as on Windows. Files keep the permissions stored in the archive, and ZIPs made on Linux store them.

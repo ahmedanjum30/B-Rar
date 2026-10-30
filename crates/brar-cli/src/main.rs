@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, Resolution, Selection, Summary};
+use brar_core::{Conflict, ConflictPolicy, Decision, Error, Options, PartFinder, Resolution, Selection, Summary};
 use clap::{Args, Parser, Subcommand};
 
 /// B-Rar: a fast, parallel archive extractor (zip, 7z, rar, tar, gz, xz, zst, bz2) that also
@@ -102,6 +102,7 @@ impl Common {
         Options {
             threads: self.threads,
             password: self.password.clone(),
+            find_part: PartFinder::new(ask_part),
             ..Options::default()
         }
     }
@@ -248,6 +249,38 @@ fn with_password<T>(archive: &Path, mut opts: Options, op: impl Fn(&Options) -> 
             other => return other,
         }
     }
+}
+
+/// A part of a multi-part archive isn't next to the first: asks where it is.
+fn ask_part(expected: &Path) -> Option<PathBuf> {
+    let name = expected.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        eprint!(
+            "
+{name} (the next part of the archive) isn't in {}.
+Path to it or to its folder (Enter to stop): ",
+            folder_of(expected)
+        );
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        let answer = line.trim().trim_matches('"');
+        if answer.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(answer);
+        let path = if path.is_dir() { path.join(&*name) } else { path };
+        if path.is_file() {
+            return Some(path);
+        }
+        eprintln!("{} isn't there.", path.display());
+    }
+}
+
+fn folder_of(path: &Path) -> String {
+    path.parent().map(|p| p.display().to_string()).unwrap_or_default()
 }
 
 fn ask_conflict(c: &Conflict<'_>) -> Decision {

@@ -6,15 +6,95 @@
 //!   any format): the parts are read as one continuous file, see [`Volumes`].
 //!
 //! Whichever part the user picked, extraction starts from part 1, like WinRAR and 7-Zip.
+//! Parts are looked for next to the one picked; a part that isn't there is looked for in the
+//! folders earlier parts turned up in, then asked for ([`PartFinder`]), like WinRAR does.
 
 use std::{
+    fmt,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use crate::{Error, IoContext, Result, whole};
+
+/// Asked for a part of a multi-part archive that isn't where its name says: gets the path it
+/// should have, returns where it is, or `None` to stop. Called from the extracting thread; it
+/// may block (on a file picker, say).
+pub type FindPartFn = dyn Fn(&Path) -> Option<PathBuf> + Send + Sync;
+
+/// Finds the parts of a multi-part archive that aren't next to the first one: in folders
+/// where earlier parts turned up, else by asking [`FindPartFn`] (once per part). Clones share
+/// what they've learned.
+#[derive(Clone, Default)]
+pub struct PartFinder {
+    ask: Option<Arc<FindPartFn>>,
+    state: Arc<Mutex<Found>>,
+}
+
+#[derive(Default)]
+struct Found {
+    /// Folders to look in for a part's name.
+    dirs: Vec<PathBuf>,
+    /// Parts asked for and not given: not asked for again.
+    declined: Vec<PathBuf>,
+}
+
+impl PartFinder {
+    pub fn new(ask: impl Fn(&Path) -> Option<PathBuf> + Send + Sync + 'static) -> Self {
+        Self {
+            ask: Some(Arc::new(ask)),
+            state: Arc::default(),
+        }
+    }
+
+    /// Where part `expected` is: there, or under its name in a folder an earlier part was
+    /// found in, or wherever the user points. `None` if it can't be found.
+    pub(crate) fn locate(&self, expected: &Path) -> Option<PathBuf> {
+        if let Some(found) = self.known(expected) {
+            return Some(found);
+        }
+        if self.state.lock().unwrap().declined.iter().any(|d| d == expected) {
+            return None;
+        }
+        let found = self.ask.as_ref().and_then(|ask| ask(expected)).filter(|p| p.is_file());
+        let mut state = self.state.lock().unwrap();
+        let Some(found) = found else {
+            state.declined.push(expected.to_path_buf());
+            return None;
+        };
+        // Later parts may be next to this one, or back where the name says (unRAR looks for
+        // the part after this one next to it).
+        for dir in [found.parent(), expected.parent()].into_iter().flatten() {
+            if !state.dirs.iter().any(|d| d == dir) {
+                state.dirs.push(dir.to_path_buf());
+            }
+        }
+        Some(found)
+    }
+
+    /// [`PartFinder::locate`] without asking.
+    pub(crate) fn known(&self, expected: &Path) -> Option<PathBuf> {
+        if expected.is_file() {
+            return Some(expected.to_path_buf());
+        }
+        let name = expected.file_name()?;
+        let state = self.state.lock().unwrap();
+        state.dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+    }
+
+    /// The first part asked for and not given, for the error message.
+    pub(crate) fn declined(&self) -> Option<PathBuf> {
+        self.state.lock().unwrap().declined.first().cloned()
+    }
+}
+
+impl fmt::Debug for PartFinder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.ask.is_some() { "PartFinder(asks)" } else { "PartFinder" })
+    }
+}
 
 /// What to read for an archive the user pointed at.
 pub(crate) struct Input {
@@ -43,8 +123,8 @@ impl Input {
     }
 }
 
-pub(crate) fn resolve(path: &Path) -> Result<Input> {
-    if let Some(parts) = split_parts(path)? {
+pub(crate) fn resolve(path: &Path, finder: &PartFinder) -> Result<Input> {
+    if let Some(parts) = split_parts(path, finder)? {
         let name = parts[0].with_extension("");
         return Ok(Input {
             first: parts[0].clone(),
@@ -55,10 +135,7 @@ pub(crate) fn resolve(path: &Path) -> Result<Input> {
     let first = match RarSet::of(path) {
         Some(set) => {
             let first = set.part(1);
-            if !first.is_file() {
-                return Err(Error::MissingVolume(first));
-            }
-            first
+            finder.locate(&first).ok_or(Error::MissingVolume(first))?
         }
         None => path.to_path_buf(),
     };
@@ -69,9 +146,10 @@ pub(crate) fn resolve(path: &Path) -> Result<Input> {
     })
 }
 
-/// `name.003` -> `[name.001, name.002, name.003, ...]`, as many as exist in sequence.
-/// `None` if the name doesn't end in a part number of 3+ digits.
-fn split_parts(path: &Path) -> Result<Option<Vec<PathBuf>>> {
+/// `name.003` -> `[name.001, name.002, name.003, ...]`: every part up to the highest one next
+/// to `path` (asked for if missing), then as many more as are found. `None` if the name
+/// doesn't end in a part number of 3+ digits.
+fn split_parts(path: &Path, finder: &PartFinder) -> Result<Option<Vec<PathBuf>>> {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return Ok(None);
     };
@@ -80,21 +158,27 @@ fn split_parts(path: &Path) -> Result<Option<Vec<PathBuf>>> {
     }
     let width = ext.len();
     let part = |n: usize| path.with_extension(format!("{n:0width$}"));
-    let first = part(1);
-    if !first.is_file() {
-        return Err(Error::MissingVolume(first));
-    }
-    let parts: Vec<PathBuf> = (1..).map(part).take_while(|p| p.is_file()).collect();
-    // Any higher-numbered part beyond the run means the next one is missing (otherwise the
-    // archive would just look truncated and fail with a confusing format error).
+    // Parts up to the highest one here must all exist (otherwise the archive would just look
+    // truncated and fail with a confusing format error); beyond it, take what's found.
     let stem = path.with_extension("");
     let prefix = stem.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
     let highest = highest_number(&stem, |name| {
         let rest = name.strip_prefix(prefix.as_str())?.strip_prefix('.')?;
         (rest.len() == width).then(|| digits(rest)).flatten()
     });
-    if highest > parts.len() {
-        return Err(Error::MissingVolume(part(parts.len() + 1)));
+    let mut parts = Vec::new();
+    for n in 1.. {
+        let expected = part(n);
+        let found = if n <= highest.max(1) {
+            finder.locate(&expected)
+        } else {
+            finder.known(&expected)
+        };
+        match found {
+            Some(p) => parts.push(p),
+            None if n <= highest.max(1) => return Err(Error::MissingVolume(expected)),
+            None => break,
+        }
     }
     Ok(Some(parts))
 }
@@ -285,7 +369,7 @@ mod tests {
             std::fs::write(d.join(format!("a.bin.{n:03}")), data).unwrap();
         }
         // Picking part 2 starts from part 1 and sees all three.
-        let input = resolve(&d.join("a.bin.002")).unwrap();
+        let input = resolve(&d.join("a.bin.002"), &PartFinder::default()).unwrap();
         assert_eq!(input.first, d.join("a.bin.001"));
         assert_eq!(input.name, d.join("a.bin"));
         let mut all = String::new();
@@ -301,7 +385,7 @@ mod tests {
     fn missing_first_part_is_reported() {
         let d = temp_dir("missing");
         std::fs::write(d.join("a.7z.002"), b"x").unwrap();
-        assert!(matches!(resolve(&d.join("a.7z.002")), Err(Error::MissingVolume(p)) if p == d.join("a.7z.001")));
+        assert!(matches!(resolve(&d.join("a.7z.002"), &PartFinder::default()), Err(Error::MissingVolume(p)) if p == d.join("a.7z.001")));
     }
 
     #[test]
@@ -310,7 +394,7 @@ mod tests {
         for n in [1, 2, 4] {
             std::fs::write(d.join(format!("a.zip.{n:03}")), b"x").unwrap();
         }
-        assert!(matches!(resolve(&d.join("a.zip.001")), Err(Error::MissingVolume(p)) if p == d.join("a.zip.003")));
+        assert!(matches!(resolve(&d.join("a.zip.001"), &PartFinder::default()), Err(Error::MissingVolume(p)) if p == d.join("a.zip.003")));
     }
 
     #[test]
@@ -318,7 +402,7 @@ mod tests {
         let d = temp_dir("rar1");
         std::fs::write(d.join("x.part2.rar"), b"Rar!").unwrap();
         std::fs::write(d.join("x.part3.rar"), b"Rar!").unwrap();
-        assert!(matches!(resolve(&d.join("x.part3.rar")), Err(Error::MissingVolume(p)) if p == d.join("x.part1.rar")));
+        assert!(matches!(resolve(&d.join("x.part3.rar"), &PartFinder::default()), Err(Error::MissingVolume(p)) if p == d.join("x.part1.rar")));
         // A gap in the middle of a set.
         std::fs::write(d.join("x.part1.rar"), b"Rar!").unwrap();
         std::fs::remove_file(d.join("x.part2.rar")).unwrap();
@@ -331,8 +415,14 @@ mod tests {
         for f in ["x.part01.rar", "x.part02.rar", "old.rar", "old.r00"] {
             std::fs::write(d.join(f), b"Rar!").unwrap();
         }
-        assert_eq!(resolve(&d.join("x.part02.rar")).unwrap().first, d.join("x.part01.rar"));
-        assert_eq!(resolve(&d.join("old.r00")).unwrap().first, d.join("old.rar"));
-        assert_eq!(resolve(&d.join("x.part01.rar")).unwrap().first, d.join("x.part01.rar"));
+        assert_eq!(
+            resolve(&d.join("x.part02.rar"), &PartFinder::default()).unwrap().first,
+            d.join("x.part01.rar")
+        );
+        assert_eq!(resolve(&d.join("old.r00"), &PartFinder::default()).unwrap().first, d.join("old.rar"));
+        assert_eq!(
+            resolve(&d.join("x.part01.rar"), &PartFinder::default()).unwrap().first,
+            d.join("x.part01.rar")
+        );
     }
 }

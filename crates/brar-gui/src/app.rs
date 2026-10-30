@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use brar_core::{Conflict, ConflictPolicy, CreateOptions, Decision, Error, Options, Progress, Resolution, Summary};
+use brar_core::{Conflict, ConflictPolicy, CreateOptions, Decision, Error, Options, PartFinder, Progress, Resolution, Summary};
 use eframe::egui::{self, Align, Key, Layout, RichText, TextureHandle, Ui, Vec2, ViewportCommand, vec2};
 
 use crate::{
@@ -104,12 +104,19 @@ impl Page {
     }
 }
 
-/// Elapsed time minus pauses, and a 1.5 s sliding-window speed.
+/// Elapsed time minus pauses, the speed, and a steady "time left". Decoding comes in bursts
+/// (big and small files, disk writes), so the speed over the last moment swings a lot: it's
+/// averaged over about 5 s, and the time left moves at most once a second, easing toward the
+/// new estimate and counting down in between.
 struct Clock {
     started: Instant,
     paused_since: Option<Instant>,
     paused_total: Duration,
     samples: VecDeque<(Instant, u64)>,
+    /// Bytes per second, smoothed.
+    speed: f64,
+    /// The time left last shown, and when.
+    left: Option<(Instant, Duration)>,
 }
 
 impl Clock {
@@ -119,6 +126,8 @@ impl Clock {
             paused_since: None,
             paused_total: Duration::ZERO,
             samples: VecDeque::new(),
+            speed: 0.0,
+            left: None,
         }
     }
 
@@ -129,17 +138,47 @@ impl Clock {
 
     fn sample(&mut self, done: u64) {
         let now = Instant::now();
+        let since = self.samples.back().map(|&(t, _)| now.duration_since(t));
         self.samples.push_back((now, done));
         while self.samples.len() > 2 && now.duration_since(self.samples[0].0) > Duration::from_millis(1500) {
             self.samples.pop_front();
         }
+        let window = match (self.samples.front(), self.samples.back()) {
+            (Some(&(t0, b0)), Some(&(t1, b1))) if t1 > t0 => (b1 - b0) as f64 / (t1 - t0).as_secs_f64(),
+            _ => return,
+        };
+        // An average with a ~5 s time constant; the first measurement starts it.
+        self.speed = match since {
+            Some(dt) if self.speed > 0.0 => {
+                let weight = 1.0 - (-dt.as_secs_f64() / 5.0).exp();
+                self.speed + (window - self.speed) * weight
+            }
+            _ => window,
+        };
     }
 
     fn rate(&self) -> f64 {
-        match (self.samples.front(), self.samples.back()) {
-            (Some(&(t0, b0)), Some(&(t1, b1))) if t1 > t0 => (b1 - b0) as f64 / (t1 - t0).as_secs_f64(),
-            _ => 0.0,
+        self.speed
+    }
+
+    /// The time left for `remaining` bytes, as shown: refreshed once a second, each refresh
+    /// moving a third of the way to the new estimate, counting down in between.
+    fn left(&mut self, remaining: u64) -> Option<Duration> {
+        if self.speed <= 0.0 {
+            return None;
         }
+        let now = Instant::now();
+        let estimate = Duration::from_secs_f64(remaining as f64 / self.speed);
+        let shown = match self.left {
+            Some((at, shown)) if now.duration_since(at) < Duration::from_secs(1) => return Some(shown.saturating_sub(now.duration_since(at))),
+            Some((at, shown)) => {
+                let counted = shown.saturating_sub(now.duration_since(at));
+                counted.mul_f64(2.0 / 3.0) + estimate.mul_f64(1.0 / 3.0)
+            }
+            None => estimate,
+        };
+        self.left = Some((now, shown));
+        Some(shown)
     }
 }
 
@@ -260,6 +299,7 @@ impl App {
             password,
             progress: Some(progress),
             on_conflict: ConflictPolicy::Ask(Arc::new(ask)),
+            find_part: PartFinder::new(shell::pick_part),
             selection: match &self.mode {
                 Mode::Extract { selection, .. } => selection.clone(),
                 Mode::Test | Mode::Create { .. } => None,
@@ -479,8 +519,10 @@ impl App {
             let mut stats = format!("{} elapsed", clock(elapsed));
             if !paused && rate > 0.0 {
                 stats = format!("{}/s · {stats}", human(rate as u64));
-                if total > done && elapsed > Duration::from_secs(1) {
-                    let left = Duration::from_secs_f64((total - done) as f64 / rate);
+                if total > done
+                    && elapsed > Duration::from_secs(2)
+                    && let Some(left) = self.clock.left(total - done)
+                {
                     stats.push_str(&format!(" · {} left", clock(left)));
                 }
             }
@@ -504,6 +546,7 @@ impl App {
                         self.clock.paused_total += since.elapsed();
                     }
                     self.clock.samples.clear();
+                    self.clock.left = None;
                 } else {
                     self.clock.paused_since = Some(Instant::now());
                 }

@@ -16,7 +16,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use brar_core::{ConflictPolicy, EntryInfo, Error, Options, Resolution, Selection};
+use brar_core::{ConflictPolicy, EntryInfo, Error, Options, PartFinder, Resolution, Selection};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, PointerButton, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind,
     Ui, Vec2, ViewportCommand, pos2, vec2,
@@ -260,6 +260,8 @@ struct Browser {
     name: String,
     logo: egui::TextureHandle,
     password: Option<String>,
+    /// Where parts of a multi-part archive turned up, if not next to the first.
+    parts: PartFinder,
     inbox: Arc<Mutex<Inbox>>,
     page: Page,
     tree: Tree,
@@ -298,6 +300,7 @@ impl Browser {
             archive: PathBuf::new(),
             logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
             password,
+            parts: PartFinder::new(shell::pick_part),
             inbox: Arc::default(),
             page: Page::Home,
             tree: Tree::build(Vec::new()),
@@ -392,6 +395,7 @@ impl Browser {
             ctx.send_viewport_cmd(ViewportCommand::Title(format!("{} - B-Rar", self.name)));
         }
         self.password = None;
+        self.parts = PartFinder::new(shell::pick_part);
         self.tree = Tree::build(Vec::new());
         self.cwd = 0;
         self.rows.clear();
@@ -414,6 +418,7 @@ impl Browser {
     fn options(&self) -> Options {
         Options {
             password: self.password.clone(),
+            find_part: self.parts.clone(),
             ..Options::default()
         }
     }
