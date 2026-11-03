@@ -102,6 +102,9 @@ enum Fail {
     Retry,
     /// Writing, cancelling, a conflict prompt answered with "cancel": stop everything.
     Stop(Error),
+    /// A stored file whose checksum doesn't match: its bytes are as they are, so unRAR would
+    /// only read them again (125 GB, say) to say the same. The other files carry on.
+    Damaged,
 }
 
 /// Files at least this big may go to the two-phase engine, which spreads one file over all
@@ -144,6 +147,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     let src = Source::open(&archive)?;
     let budget = Budget::new(BUDGET);
     let failed = Mutex::new(Vec::new());
+    let damaged = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
     let big_result = std::thread::scope(|scope| -> Result<Result<Vec<usize>>> {
         // The engine runs on its own threads (it has its own workers). Several big files at
@@ -166,7 +170,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                                 }
                                 match run_engine(&src, &[big[i]], sink, per_file) {
                                     Ok(()) => {}
-                                    Err(Fail::Retry) => retry.lock().unwrap().push(big[i].index),
+                                    Err(Fail::Retry | Fail::Damaged) => retry.lock().unwrap().push(big[i].index),
                                     Err(Fail::Stop(err)) => {
                                         stop.lock().unwrap().get_or_insert(err);
                                     }
@@ -183,7 +187,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
         });
         opts.pool()?.scope_fifo(|s| {
             for e in &fast {
-                let (src, budget, failed, stop) = (&src, &budget, &failed, &stop);
+                let (src, budget, failed, damaged, stop) = (&src, &budget, &failed, &damaged, &stop);
                 s.spawn_fifo(move |_| {
                     if stop.lock().unwrap().is_some() {
                         return;
@@ -191,6 +195,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                     match extract_fast(src, e, sink, budget) {
                         Ok(()) => {}
                         Err(Fail::Retry) => failed.lock().unwrap().push(e.index),
+                        Err(Fail::Damaged) => damaged.lock().unwrap().push(e.name.clone()),
                         Err(Fail::Stop(err)) => {
                             stop.lock().unwrap().get_or_insert(err);
                         }
@@ -217,11 +222,14 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     }
     retry.extend(failed);
     retry.extend(big_failed);
-    if retry.is_empty() {
-        return Ok(());
+    if !retry.is_empty() {
+        let only: HashSet<usize> = retry.into_iter().collect();
+        extract_unrar(path, sink, opts, Some(&only))?;
     }
-    let only: HashSet<usize> = retry.into_iter().collect();
-    extract_unrar(path, sink, opts, Some(&only))
+    match damaged.into_inner().unwrap().into_iter().next() {
+        Some(name) => Err(Error::Damaged(name)),
+        None => Ok(()),
+    }
 }
 
 /// A solid archive: one stream across all compressed files, decoded by the engine in
@@ -239,6 +247,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
         sink.dir(&e.name)?;
     }
     let src = Source::open(&archive)?;
+    let counted = sink.progress_done();
     let result = if files.is_empty() {
         Ok(())
     } else {
@@ -251,25 +260,32 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
     match result {
         Ok(()) => {}
         Err(Fail::Stop(err)) => return Err(err),
-        Err(Fail::Retry) => return extract_unrar(path, sink, opts, None),
+        // unRAR does the whole archive again: what the engine counted would count twice.
+        Err(Fail::Retry | Fail::Damaged) => {
+            sink.rewind_progress(counted);
+            return extract_unrar(path, sink, opts, None);
+        }
     }
     // After the engine: had it failed, unRAR would redo everything, these too.
     let budget = Budget::new(BUDGET);
     let mut retry = HashSet::new();
+    let mut damaged = None;
     for e in stored.into_iter().filter(|e| sink.selected(&e.name)) {
         match extract_fast(&src, e, sink, &budget) {
             Ok(()) => {}
             Err(Fail::Retry) => {
                 retry.insert(e.index);
             }
+            Err(Fail::Damaged) => {
+                damaged.get_or_insert_with(|| e.name.clone());
+            }
             Err(Fail::Stop(err)) => return Err(err),
         }
     }
-    if retry.is_empty() {
-        Ok(())
-    } else {
-        extract_unrar(path, sink, opts, Some(&retry))
+    if !retry.is_empty() {
+        extract_unrar(path, sink, opts, Some(&retry))?;
     }
+    damaged.map_or(Ok(()), |name| Err(Error::Damaged(name)))
 }
 
 /// The two-phase engine over `files` (one big file, or a solid archive's files in order),
@@ -439,8 +455,13 @@ fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Resul
         at = to;
     }
     if !e.check.ok(hasher) {
-        out.discard();
-        return Err(Fail::Retry);
+        // Encrypted, a mismatch may be a wrong password: unRAR says which.
+        if e.crypt.is_some() {
+            out.discard();
+            return Err(Fail::Retry);
+        }
+        out.remove();
+        return Err(Fail::Damaged);
     }
     out.finish();
     Ok(())

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Damaged big files in RAR archives are reported once.** A stored (uncompressed) file whose checksum didn't match was checked a second time by unRAR, which for a 125 GB file meant reading it all again while the progress ran past 100%. It is now reported as damaged straight away (a 136 GB test: 90 s instead of 170 s), and the other files carry on. Whenever a file does go to unRAR for a second try, its bytes come off the progress first, so it never passes 100%.
+
 ## 1.3.0 (2026-10-31)
 
 - **Parts in different folders.** When the next part of a RAR set or of a split (`.001`) archive isn't next to the first, B-Rar asks where it is, like WinRAR: a file picker in the app, a question on the command line. Parts after it are then looked for in the same folder, so you point at each folder once. Works for RAR5 on B-Rar's own decoder and for RAR 4 through unRAR.

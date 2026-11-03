@@ -88,6 +88,12 @@ impl Shared {
         }
     }
 
+    fn take_back(&self, bytes: u64) {
+        if let Some(p) = &self.progress {
+            p.take_back(bytes);
+        }
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed) || self.progress.as_ref().is_some_and(|p| p.is_cancelled())
     }
@@ -214,6 +220,17 @@ impl Sink {
     /// Is `name` part of the selection? Everything is when there is no selection.
     pub(crate) fn selected(&self, name: &str) -> bool {
         self.pick.as_ref().is_none_or(|p| p.contains(name))
+    }
+
+    /// Bytes counted so far, for [`Sink::rewind_progress`].
+    pub(crate) fn progress_done(&self) -> u64 {
+        self.shared.progress.as_ref().map_or(0, |p| p.done())
+    }
+
+    /// Takes the progress count back to `done` (from [`Sink::progress_done`]): what was
+    /// counted since will be done again.
+    pub(crate) fn rewind_progress(&self, done: u64) {
+        self.shared.take_back(self.progress_done().saturating_sub(done));
     }
 
     pub(crate) fn progress(&self) -> Option<&Arc<Progress>> {
@@ -587,8 +604,17 @@ impl FileOut {
     }
 
     /// Removes the partly written file (the data turned out to be bad; another decoder will
-    /// try again).
+    /// try again). Its bytes come off the progress count.
     pub(crate) fn discard(self) {
+        if self.report {
+            self.shared.take_back(self.len);
+        }
+        self.remove();
+    }
+
+    /// Removes the partly written file of a damaged entry: nothing will decode it again, so
+    /// its bytes stay counted.
+    pub(crate) fn remove(self) {
         drop(self.file);
         if let Some(path) = self.path {
             let _ = fs::remove_file(path);

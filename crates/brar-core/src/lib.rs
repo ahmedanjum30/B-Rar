@@ -307,6 +307,18 @@ impl Progress {
         self.done.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Undoes [`Progress::advance`] for work that will be done again (a file handed from
+    /// B-Rar's decoder to unRAR), so the count never runs past the total.
+    pub(crate) fn take_back(&self, bytes: u64) {
+        let _ = self
+            .done
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(bytes)));
+    }
+
+    pub(crate) fn done(&self) -> u64 {
+        self.done.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn file_done(&self) {
         self.files.fetch_add(1, Ordering::Relaxed);
     }
