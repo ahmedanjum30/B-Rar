@@ -57,6 +57,8 @@ pub enum Error {
     WrongPassword,
     #[error("\"{0}\" is damaged (checksum mismatch); the archive is corrupt or incomplete")]
     Damaged(String),
+    #[error("\"{name}\" is damaged (checksum mismatch) in {}; download or copy that part again", part.file_name().unwrap_or_default().to_string_lossy())]
+    DamagedIn { name: String, part: PathBuf },
     #[error("missing part: {}", .0.display())]
     MissingVolume(PathBuf),
     #[error("not supported: {0}")]

@@ -103,8 +103,9 @@ enum Fail {
     /// Writing, cancelling, a conflict prompt answered with "cancel": stop everything.
     Stop(Error),
     /// A stored file whose checksum doesn't match: its bytes are as they are, so unRAR would
-    /// only read them again (125 GB, say) to say the same. The other files carry on.
-    Damaged,
+    /// only read them again (125 GB, say) to say the same. The other files carry on. With the
+    /// volume the bad piece is in, when that's known.
+    Damaged(Option<usize>),
 }
 
 /// Files at least this big may go to the two-phase engine, which spreads one file over all
@@ -170,7 +171,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                                 }
                                 match run_engine(&src, &[big[i]], sink, per_file) {
                                     Ok(()) => {}
-                                    Err(Fail::Retry | Fail::Damaged) => retry.lock().unwrap().push(big[i].index),
+                                    Err(Fail::Retry | Fail::Damaged(_)) => retry.lock().unwrap().push(big[i].index),
                                     Err(Fail::Stop(err)) => {
                                         stop.lock().unwrap().get_or_insert(err);
                                     }
@@ -195,7 +196,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
                     match extract_fast(src, e, sink, budget) {
                         Ok(()) => {}
                         Err(Fail::Retry) => failed.lock().unwrap().push(e.index),
-                        Err(Fail::Damaged) => damaged.lock().unwrap().push(e.name.clone()),
+                        Err(Fail::Damaged(volume)) => damaged.lock().unwrap().push((e.name.clone(), volume)),
                         Err(Fail::Stop(err)) => {
                             stop.lock().unwrap().get_or_insert(err);
                         }
@@ -227,7 +228,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
         extract_unrar(path, sink, opts, Some(&only))?;
     }
     match damaged.into_inner().unwrap().into_iter().next() {
-        Some(name) => Err(Error::Damaged(name)),
+        Some((name, volume)) => Err(damaged_in(&archive, name, volume)),
         None => Ok(()),
     }
 }
@@ -261,7 +262,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
         Ok(()) => {}
         Err(Fail::Stop(err)) => return Err(err),
         // unRAR does the whole archive again: what the engine counted would count twice.
-        Err(Fail::Retry | Fail::Damaged) => {
+        Err(Fail::Retry | Fail::Damaged(_)) => {
             sink.rewind_progress(counted);
             return extract_unrar(path, sink, opts, None);
         }
@@ -276,8 +277,8 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
             Err(Fail::Retry) => {
                 retry.insert(e.index);
             }
-            Err(Fail::Damaged) => {
-                damaged.get_or_insert_with(|| e.name.clone());
+            Err(Fail::Damaged(volume)) => {
+                damaged.get_or_insert_with(|| (e.name.clone(), volume));
             }
             Err(Fail::Stop(err)) => return Err(err),
         }
@@ -285,7 +286,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
     if !retry.is_empty() {
         extract_unrar(path, sink, opts, Some(&retry))?;
     }
-    damaged.map_or(Ok(()), |name| Err(Error::Damaged(name)))
+    damaged.map_or(Ok(()), |(name, volume)| Err(damaged_in(&archive, name, volume)))
 }
 
 /// The two-phase engine over `files` (one big file, or a solid archive's files in order),
@@ -428,6 +429,14 @@ fn extract_fast(src: &Source, e: &rar5::Entry, sink: &Sink, budget: &Budget) -> 
     written.map_err(Fail::Stop)
 }
 
+/// The damage error for `name`, naming the part the bad piece is in when that's known.
+fn damaged_in(archive: &rar5::Archive, name: String, volume: Option<usize>) -> Error {
+    match volume.and_then(|v| archive.volumes.get(v)) {
+        Some(part) => Error::DamagedIn { name, part: part.clone() },
+        None => Error::Damaged(name),
+    }
+}
+
 /// A stored file bigger than [`SMALL_FILE`], streamed to disk in pieces and checked on the
 /// way; removed again if the check fails.
 fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Result<(), Fail> {
@@ -438,6 +447,16 @@ fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Resul
     }
     let mut out = sink.begin_file(&e.name, Some(e.size), e.stamp()).map_err(Fail::Stop)?;
     let mut hasher = e.check.hasher();
+    // Split across volumes, unencrypted (so the data is the packed data): each piece but the
+    // last has its own checksum, so a mismatch can name its part. A piece's CRC32 is added to
+    // the file's when the piece ends; BLAKE2 can't be, so the file's sees the bytes as well.
+    let by_piece = e.crypt.is_none() && e.pieces.len() > 1;
+    let mut ends = e.pieces.iter().scan(0, |end, p| {
+        *end += p.len;
+        Some(*end)
+    });
+    let (mut piece_no, mut piece_end, mut piece) = (0, ends.next().unwrap_or(e.size), e.check.hasher());
+    let mut bad = None;
     let mut buf = Vec::with_capacity(PIECE as usize);
     let mut at = 0;
     while at < e.size {
@@ -447,12 +466,37 @@ fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Resul
             out.discard();
             return Err(Fail::Retry);
         }
-        hasher.update(&buf);
+        if by_piece {
+            let (mut pos, mut rest) = (at, &buf[..]);
+            while !rest.is_empty() {
+                let n = rest.len().min(piece_end.saturating_sub(pos) as usize);
+                piece.update(&rest[..n]);
+                hasher.update_beside(&rest[..n]);
+                (pos, rest) = (pos + n as u64, &rest[n..]);
+                if pos == piece_end && piece_no + 1 < e.pieces.len() {
+                    let done = std::mem::replace(&mut piece, e.check.hasher());
+                    let p = &e.pieces[piece_no];
+                    if p.check.as_ref().is_some_and(|c| !c.ok(done.clone())) {
+                        bad.get_or_insert(p.volume);
+                    }
+                    hasher.absorb(&done);
+                    piece_no += 1;
+                    piece_end = ends.next().unwrap_or(e.size);
+                } else if n == 0 {
+                    break; // pieces shorter than the file: the check below fails
+                }
+            }
+        } else {
+            hasher.update(&buf);
+        }
         if let Err(err) = out.write(&buf) {
             out.discard();
             return Err(Fail::Stop(err));
         }
         at = to;
+    }
+    if by_piece {
+        hasher.absorb(&piece);
     }
     if !e.check.ok(hasher) {
         // Encrypted, a mismatch may be a wrong password: unRAR says which.
@@ -461,7 +505,9 @@ fn copy_stored(src: &Source, e: &rar5::Entry, sink: &Sink) -> std::result::Resul
             return Err(Fail::Retry);
         }
         out.remove();
-        return Err(Fail::Damaged);
+        // Every earlier piece checked out: the damage is in the last one.
+        let last = e.pieces.last().map(|p| p.volume);
+        return Err(Fail::Damaged(if by_piece { bad.or(last) } else { None }));
     }
     out.finish();
     Ok(())

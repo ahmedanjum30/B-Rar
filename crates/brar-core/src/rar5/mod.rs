@@ -39,6 +39,9 @@ pub(crate) struct Piece {
     pub volume: usize,
     pub start: u64,
     pub len: u64,
+    /// For a piece continued in the next volume: the checksum of this piece's packed data,
+    /// which RAR5 keeps in the piece's header, so damage can be traced to a part.
+    pub check: Option<Check>,
 }
 
 /// The checksum a file's data must have: CRC32 or BLAKE2sp, stored plainly or as a MAC
@@ -56,6 +59,7 @@ enum Sum {
 }
 
 /// A checksum being computed, for [`Check::ok`].
+#[derive(Clone)]
 pub(crate) enum Hasher {
     Crc(crc32fast::Hasher),
     Blake2(Box<blake2s_simd::blake2sp::State>),
@@ -68,6 +72,21 @@ impl Hasher {
             Hasher::Blake2(h) => {
                 h.update(data);
             }
+        }
+    }
+
+    /// For a file hashed piece by piece: BLAKE2 can't be put together from its pieces, so the
+    /// file's own hash sees every byte too; CRC32 doesn't need to ([`Hasher::absorb`]).
+    pub(crate) fn update_beside(&mut self, data: &[u8]) {
+        if let Hasher::Blake2(h) = self {
+            h.update(data);
+        }
+    }
+
+    /// Appends a finished piece's CRC32 to this one, as if its bytes had been hashed here.
+    pub(crate) fn absorb(&mut self, piece: &Hasher) {
+        if let (Hasher::Crc(h), Hasher::Crc(p)) = (self, piece) {
+            h.combine(p);
         }
     }
 }
@@ -466,7 +485,11 @@ impl Parser<'_> {
     /// continued from the previous volume, 0x10 = continues in the next).
     fn file(&mut self, h: &Header, volume: usize) -> Option<()> {
         let (split_before, split_after) = (h.flags & 0x8 != 0, h.flags & 0x10 != 0);
-        let (part, has_check) = self.file_entry(h, volume)?;
+        let (mut part, has_check) = self.file_entry(h, volume)?;
+        if split_after && has_check {
+            // Continued in the next volume: this header's checksum is of this piece.
+            part.pieces[0].check = Some(part.check.clone());
+        }
         let mut e = match self.open.take() {
             Some(mut e) if split_before => {
                 if e.name != part.name {
@@ -590,6 +613,7 @@ impl Parser<'_> {
                 volume,
                 start: h.data_start,
                 len: h.data_size,
+                check: None,
             }],
             packed: h.data_size,
             crypt,
