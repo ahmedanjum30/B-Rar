@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.1 (2026-11-04)
 
 - **Damaged big files in RAR archives are reported once.** A stored (uncompressed) file whose checksum didn't match was checked a second time by unRAR, which for a 125 GB file meant reading it all again while the progress ran past 100%. It is now reported as damaged straight away (a 136 GB test: 90 s instead of 170 s), and the other files carry on. For a file split across RAR volumes, the message names the part that is damaged (each part keeps a checksum of its piece), so only that part needs downloading again. Whenever a file does go to unRAR for a second try, its bytes come off the progress first, so it never passes 100%.
 
