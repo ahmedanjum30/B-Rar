@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 (2026-11-04)
+
+- **The browser no longer jumbles its page** when the update bar appears ("Check for updates") or the page changes: moved buttons and text left copies of themselves behind.
+
 ## 1.4.0 (2026-11-04)
 
 - **New look: the Workbench, half the size.** The archive browser and the progress window are rebuilt in plain Windows controls, without a UI framework (`B-Rar-GUI.exe` 8.9 MB → 4.1 MB), in a new design (DESIGN.md): a toolbar of big icon buttons (Extract to, Test, Open, Info, Updates), an address bar with the path, a dense list with alternate rows and each file type's Windows icon, a status bar with fields, and progress shown as Elapsed / Left / Processed / Speed. It follows Windows' light or dark setting.
