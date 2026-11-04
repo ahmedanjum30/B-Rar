@@ -1,6 +1,6 @@
 # Microsoft Store listing: B-Rar
 
-Text and answers to paste into Partner Center. The package to upload is `B-Rar-<version>-store.msix`, from the release workflow's `store-package` artifact (or `installer\build.ps1 -Store`).
+Text and answers to paste into Partner Center. Updates are submitted by the release workflow (`installer\publish-store.ps1`, with the `MSSTORE_*` secrets: a Partner Center Entra app with the Manager role, shared with B-Downloader): each release's `B-Rar-<version>-store.msix` goes in as a new submission with its CHANGELOG.md entry as "What's new". To submit by hand instead, the package is the release workflow's `store-package` artifact (or `installer\build.ps1 -Store`). Actions > Store check tests the login.
 
 ## Before the first upload
 
