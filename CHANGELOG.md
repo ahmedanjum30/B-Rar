@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Native Windows look, half the size.** The archive browser and the progress window are now built from standard Windows controls instead of a UI framework: Explorer's list (with each file type's own icon, Explorer's selection and keys, sortable columns), Windows' progress bar, and the usual dialogs. `B-Rar-GUI.exe` went from 8.9 MB to 4.1 MB.
+
 ## 1.3.2 (2026-11-04)
 
 - **Microsoft Store version: no administrator prompt.** The Store doesn't allow B-Rar to ask for administrator rights, so its package no longer declares that capability. Extracting into a folder that needs them (Program Files, say) explains how to run B-Rar as administrator from the Start menu, with a button to choose another folder. The installer, portable and GitHub MSIX versions still show the Windows prompt.

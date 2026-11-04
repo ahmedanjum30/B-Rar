@@ -2,11 +2,16 @@
 //!
 //! Extraction runs in a second B-Rar-GUI process (`x ... --items`), so it gets the usual
 //! progress window, prompts and result page, and the browser stays responsive.
+//!
+//! Standard Windows controls: a virtual list view (Explorer's selection, keys and icons), a
+//! breadcrumb of links, a search field and a status bar. Anything that opens a dialog or menu
+//! runs after the state is released ([`Later`]), so the list can still draw itself meanwhile.
 
 use std::{
+    cell::RefCell,
     cmp::Ordering as Cmp,
     collections::{HashMap, HashSet},
-    ffi::OsString,
+    ffi::{OsString, c_void},
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{
@@ -17,51 +22,249 @@ use std::{
 };
 
 use brar_core::{ConflictPolicy, EntryInfo, Error, Options, PartFinder, Resolution, Selection};
-use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, PointerButton, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind,
-    Ui, Vec2, ViewportCommand, pos2, vec2,
+use windows::{
+    Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Gdi::{BeginPaint, COLOR_BTNFACE, EndPaint, FillRect, GetSysColorBrush, InvalidateRect, PAINTSTRUCT},
+        Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::{
+            Controls::{NMHDR, SetWindowTheme},
+            Input::KeyboardAndMouse::{GetFocus, GetKeyState},
+            Shell::{
+                DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+                SHGetFileInfoW, SIID_ERROR, SIID_KEY,
+            },
+            WindowsAndMessaging::*,
+        },
+    },
+    core::{HSTRING, w},
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
-    app::{LOGO_PNG, human},
+    app::human,
     shell,
-    style::{self, Icon, palette, semibold},
     update::{self, Release},
+    win::{self, Builder, Fonts, IDCANCEL, IDOK, Role},
 };
+
+// Controls.
+const ID_LIST: i32 = 200;
+const ID_SEARCH: i32 = 201;
+const ID_EXTRACT: i32 = 202;
+const ID_TEST: i32 = 203;
+const ID_UP: i32 = 204;
+const ID_CRUMBS: i32 = 205;
+const ID_STATUSBAR: i32 = 206;
+const ID_LOGO: i32 = 207;
+const ID_PASSWORD: i32 = 210;
+const ID_SHOW: i32 = 211;
+const ID_CHECK: i32 = 212;
+const ID_SUPPORT: i32 = 213;
+const ID_BAR_TEXT: i32 = 220;
+const ID_BAR_UPDATE: i32 = 221;
+const ID_BAR_NOTES: i32 = 222;
+const ID_BAR_RETRY: i32 = 223;
+const ID_BAR_CLOSE: i32 = 224;
+// Context menu.
+const MENU_OPEN: usize = 1;
+const MENU_EXTRACT: usize = 2;
+const TIMER: usize = 1;
+
+// List view, header and status bar messages and flags (commctrl.h).
+const LVS_REPORT: u32 = 0x1;
+const LVS_SHOWSELALWAYS: u32 = 0x8;
+const LVS_SHAREIMAGELISTS: u32 = 0x40;
+const LVS_OWNERDATA: u32 = 0x1000;
+const LVS_EX_FULLROWSELECT: isize = 0x20;
+const LVS_EX_DOUBLEBUFFER: isize = 0x10000;
+const LVM_SETIMAGELIST: u32 = 0x1003;
+const LVM_GETNEXTITEM: u32 = 0x100C;
+const LVM_ENSUREVISIBLE: u32 = 0x1013;
+const LVM_SETCOLUMNWIDTH: u32 = 0x101E;
+const LVM_GETHEADER: u32 = 0x101F;
+const LVM_SETITEMSTATE: u32 = 0x102B;
+const LVM_GETITEMSTATE: u32 = 0x102C;
+const LVM_SETITEMCOUNT: u32 = 0x102F;
+const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = 0x1036;
+const LVM_SETSELECTIONMARK: u32 = 0x1043;
+const LVM_INSERTCOLUMNW: u32 = 0x1061;
+const LVIF_TEXT: u32 = 0x1;
+const LVIF_IMAGE: u32 = 0x2;
+const LVIF_STATE: u32 = 0x8;
+const LVIS_FOCUSED: u32 = 0x1;
+const LVIS_SELECTED: u32 = 0x2;
+const LVNI_FOCUSED: usize = 0x1;
+const LVNI_SELECTED: usize = 0x2;
+const LVCF_FMT: u32 = 0x1;
+const LVCF_WIDTH: u32 = 0x2;
+const LVCF_TEXT: u32 = 0x4;
+const LVCFMT_RIGHT: i32 = 0x1;
+const HDM_GETITEMW: u32 = 0x120B;
+const HDM_SETITEMW: u32 = 0x120C;
+const HDI_FORMAT: u32 = 0x4;
+const HDF_SORTDOWN: i32 = 0x200;
+const HDF_SORTUP: i32 = 0x400;
+const SB_SETPARTS: u32 = WM_USER + 4;
+const SB_SETTEXTW: u32 = WM_USER + 11;
+const SBARS_SIZEGRIP: u32 = 0x100;
+const EMF_CENTERED: u32 = 0x1;
+const NM_CLICK: u32 = (-2i32) as u32;
+const NM_RETURN: u32 = (-4i32) as u32;
+const NM_RCLICK: u32 = (-5i32) as u32;
+const LVN_ITEMCHANGED: u32 = (-101i32) as u32;
+const LVN_COLUMNCLICK: u32 = (-108i32) as u32;
+const LVN_ITEMACTIVATE: u32 = (-114i32) as u32;
+const LVN_ODSTATECHANGED: u32 = (-115i32) as u32;
+const LVN_GETDISPINFOW: u32 = (-177i32) as u32;
+const LVN_GETEMPTYMARKUP: u32 = (-187i32) as u32;
+const APPCOMMAND_BROWSER_BACKWARD: usize = 1;
+
+#[repr(C)]
+struct LvItem {
+    mask: u32,
+    item: i32,
+    sub_item: i32,
+    state: u32,
+    state_mask: u32,
+    text: *mut u16,
+    text_max: i32,
+    image: i32,
+    param: isize,
+    indent: i32,
+    group_id: i32,
+    columns: u32,
+    pu_columns: *mut u32,
+    pi_col_fmt: *mut i32,
+    group: i32,
+}
+
+#[repr(C)]
+struct LvColumn {
+    mask: u32,
+    fmt: i32,
+    cx: i32,
+    text: *const u16,
+    text_max: i32,
+    sub_item: i32,
+    image: i32,
+    order: i32,
+    cx_min: i32,
+    cx_default: i32,
+    cx_ideal: i32,
+}
+
+#[repr(C)]
+struct NmLvDispInfo {
+    hdr: NMHDR,
+    item: LvItem,
+}
+
+#[repr(C)]
+struct NmListView {
+    hdr: NMHDR,
+    item: i32,
+    sub_item: i32,
+    new_state: u32,
+    old_state: u32,
+    changed: u32,
+    action: POINT,
+    param: isize,
+}
+
+#[repr(C)]
+struct NmLink {
+    hdr: NMHDR,
+    mask: u32,
+    link: i32,
+    state: u32,
+    state_mask: u32,
+    id: [u16; 48],
+}
+
+#[repr(C)]
+struct NmEmptyMarkup {
+    hdr: NMHDR,
+    flags: u32,
+    markup: [u16; 2084],
+}
+
+#[repr(C)]
+struct HdItem {
+    mask: u32,
+    cxy: i32,
+    text: *mut u16,
+    bitmap: isize,
+    text_max: i32,
+    fmt: i32,
+    param: isize,
+    image: i32,
+    order: i32,
+    kind: u32,
+    filter: *mut c_void,
+    state: u32,
+}
 
 /// Opens the browser on `archive`, or on the home page (opened from the Start menu).
 pub fn run(archive: Option<PathBuf>, password: Option<String>) -> ExitCode {
-    let title = archive
-        .as_deref()
-        .map_or_else(|| "B-Rar".to_owned(), |a| format!("{} - B-Rar", file_name(a)));
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title(title)
-        .with_inner_size(vec2(920.0, 600.0))
-        .with_min_inner_size(vec2(560.0, 320.0));
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
-        viewport = viewport.with_icon(Arc::new(icon));
-    }
-    let options = eframe::NativeOptions {
-        viewport,
-        centered: true,
-        ..Default::default()
+    win::init_controls();
+    win::register(w!("BRarBrowser"), Some(wndproc));
+    let s = win::scale();
+    let px = |v: f64| (v * s).round() as i32;
+    // SAFETY: a registered class; the window's state lives in BROWSER until WM_DESTROY.
+    let hwnd = unsafe {
+        let instance = GetModuleHandleW(None).unwrap_or_default();
+        CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            w!("BRarBrowser"),
+            w!("B-Rar"),
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            px(920.0),
+            px(600.0),
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
     };
-    let result = eframe::run_native(
-        "B-Rar",
-        options,
-        Box::new(move |cc| {
-            style::install(&cc.egui_ctx);
-            Ok(Box::new(Browser::new(&cc.egui_ctx, archive, password)))
-        }),
-    );
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            shell::error_box("B-Rar", &format!("Could not open the B-Rar window: {e}"));
-            ExitCode::FAILURE
-        }
+    let Ok(hwnd) = hwnd else {
+        shell::error_box("B-Rar", "Could not open the B-Rar window.");
+        return ExitCode::FAILURE;
+    };
+    let (cw, ch) = win::client_size(hwnd);
+    win::fit_client(hwnd, cw, ch, true);
+    let b = Browser::new(hwnd, password);
+    BROWSER.with(|cell| *cell.borrow_mut() = Some(b));
+    // SAFETY: the window just created.
+    unsafe {
+        DragAcceptFiles(hwnd, true);
+        SetTimer(Some(hwnd), TIMER, 250, None);
     }
+    with(|b| {
+        b.build_bar();
+        match archive {
+            Some(archive) => b.open_archive(archive),
+            None => b.set_page(Page::Home),
+        }
+        b.check_for_updates(false);
+    });
+    // SAFETY: the window just created.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+    win::run_loop(hwnd, |msg| key(hwnd, msg));
+    ExitCode::SUCCESS
+}
+
+thread_local! {
+    static BROWSER: RefCell<Option<Browser>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on the window's state, unless it's already in use further up the stack.
+fn with<R>(f: impl FnOnce(&mut Browser) -> R) -> Option<R> {
+    BROWSER.with(|b| b.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
 fn file_name(path: &Path) -> String {
@@ -198,6 +401,8 @@ enum Column {
     Modified,
 }
 
+const COLUMNS: [Column; 4] = [Column::Name, Column::Size, Column::Packed, Column::Modified];
+
 /// What to do once a password is known.
 #[derive(Clone, Copy)]
 enum Retry {
@@ -217,13 +422,13 @@ enum Page {
     Failed(String),
 }
 
-enum Action {
-    Open(usize),
-    Enter(usize),
-    Up,
-    /// `None`: ask for the folder.
-    Extract(Option<PathBuf>),
-    Test,
+/// Work that opens a dialog or a menu: done once the state is released (see the module docs).
+enum Later {
+    PickArchive,
+    /// Pick a folder, then extract the selection there.
+    Extract,
+    /// The list's right-click menu, for the row under the pointer if any.
+    Menu(Option<usize>),
 }
 
 /// Where people can support B-Rar.
@@ -255,81 +460,88 @@ struct Inbox {
     opened: Vec<(usize, brar_core::Result<PathBuf>)>,
 }
 
+/// The browsing controls, while an archive is shown.
+struct Ready {
+    logo: HWND,
+    extract: HWND,
+    test: HWND,
+    search: HWND,
+    up: HWND,
+    crumbs: HWND,
+    list: HWND,
+    status: HWND,
+}
+
 struct Browser {
+    hwnd: HWND,
+    fonts: Fonts,
+    s: f64,
     archive: PathBuf,
     name: String,
-    logo: egui::TextureHandle,
     password: Option<String>,
     /// Where parts of a multi-part archive turned up, if not next to the first.
     parts: PartFinder,
     inbox: Arc<Mutex<Inbox>>,
     page: Page,
+    /// The centred page's controls (home, loading, password, failed).
+    built: win::Page,
+    ready: Option<Ready>,
+    /// The update bar's height when shown (0 when not).
+    bar: i32,
     tree: Tree,
     cwd: usize,
     /// Nodes shown, in display order.
     rows: Vec<usize>,
-    stale: bool,
-    selected: HashSet<usize>,
-    anchor: Option<usize>,
-    cursor: Option<usize>,
-    reveal_cursor: bool,
     sort: (Column, bool),
-    search: String,
-    focus_search: bool,
-    password_input: String,
-    show_password: bool,
-    focus_password: bool,
+    /// Clearing the search field programmatically: don't refresh twice.
+    quiet: bool,
     status: Option<(String, Instant)>,
     opening: usize,
-    /// This window, for dialogs that open over it.
-    hwnd: isize,
     temp: PathBuf,
     jobs: u32,
+    /// System image list indexes by extension (and for folders).
+    icons: HashMap<String, i32>,
     /// How this copy updates (or doesn't: the Store's, a development build).
     update_kind: update::Kind,
     updates: Arc<Mutex<Updates>>,
 }
 
 impl Browser {
-    fn new(ctx: &egui::Context, archive: Option<PathBuf>, password: Option<String>) -> Self {
-        let logo = eframe::icon_data::from_png_bytes(LOGO_PNG)
-            .map(|i| egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba))
-            .unwrap_or_default();
-        let mut b = Self {
-            name: String::new(),
+    fn new(hwnd: HWND, password: Option<String>) -> Self {
+        Self {
+            hwnd,
+            fonts: Fonts::new(),
+            s: win::scale(),
             archive: PathBuf::new(),
-            logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
+            name: String::new(),
             password,
             parts: PartFinder::new(shell::pick_part),
             inbox: Arc::default(),
             page: Page::Home,
+            built: win::Page::default(),
+            ready: None,
+            bar: 0,
             tree: Tree::build(Vec::new()),
             cwd: 0,
             rows: Vec::new(),
-            stale: true,
-            selected: HashSet::new(),
-            anchor: None,
-            cursor: None,
-            reveal_cursor: false,
             sort: (Column::Name, true),
-            search: String::new(),
-            focus_search: false,
-            password_input: String::new(),
-            show_password: false,
-            focus_password: false,
+            quiet: false,
             status: None,
             opening: 0,
-            hwnd: 0,
             temp: std::env::temp_dir().join("B-Rar").join(std::process::id().to_string()),
             jobs: 0,
+            icons: HashMap::new(),
             update_kind: update::kind(),
             updates: Arc::new(Mutex::new(Updates::Idle)),
-        };
-        if let Some(archive) = archive {
-            b.open_archive(ctx, archive);
         }
-        b.check_for_updates(ctx, false);
-        b
+    }
+
+    fn px(&self, v: i32) -> i32 {
+        (v as f64 * self.s).round() as i32
+    }
+
+    fn handle(&self) -> isize {
+        self.hwnd.0 as isize
     }
 
     fn updatable(&self) -> bool {
@@ -339,9 +551,11 @@ impl Browser {
         )
     }
 
+    // ---- updates ----
+
     /// Looks for a newer release in the background. A check that wasn't asked for fails
     /// quietly (offline, say) and says nothing when there's no update.
-    fn check_for_updates(&mut self, ctx: &egui::Context, manual: bool) {
+    fn check_for_updates(&mut self, manual: bool) {
         if !self.updatable() {
             return;
         }
@@ -351,7 +565,8 @@ impl Browser {
         }
         *state = Updates::Checking { manual };
         drop(state);
-        let (updates, ctx, kind) = (Arc::clone(&self.updates), ctx.clone(), self.update_kind);
+        self.refresh_bar();
+        let (updates, hwnd, kind) = (Arc::clone(&self.updates), self.handle(), self.update_kind);
         std::thread::spawn(move || {
             let result = update::check(kind);
             *updates.lock().unwrap() = match result {
@@ -360,13 +575,13 @@ impl Browser {
                 Err(e) if manual => Updates::Failed(e),
                 Ok(None) | Err(_) => Updates::Idle,
             };
-            ctx.request_repaint();
+            win::post(hwnd, win::WM_WAKE);
         });
     }
 
     /// Downloads the available update, checks it and installs it; closes the window once the
     /// installer (or the new B-Rar) has started.
-    fn start_update(&mut self, ctx: &egui::Context) {
+    fn start_update(&mut self) {
         let mut state = self.updates.lock().unwrap();
         let Updates::Available(release) = &*state else { return };
         let (release, done, total) = (release.clone(), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
@@ -376,43 +591,344 @@ impl Browser {
             total: Arc::clone(&total),
         };
         drop(state);
-        let (updates, ctx, kind) = (Arc::clone(&self.updates), ctx.clone(), self.update_kind);
+        self.refresh_bar();
+        let (updates, hwnd, kind) = (Arc::clone(&self.updates), self.handle(), self.update_kind);
         std::thread::spawn(move || {
             let result = update::download(&release, &done, &total).and_then(|file| update::install(kind, &file));
             match result {
-                Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
-                Err(e) => *updates.lock().unwrap() = Updates::Failed(e),
+                Ok(()) => win::post(hwnd, WM_CLOSE),
+                Err(e) => {
+                    *updates.lock().unwrap() = Updates::Failed(e);
+                    win::post(hwnd, win::WM_WAKE);
+                }
             }
-            ctx.request_repaint();
         });
     }
 
+    /// The update bar's controls, hidden until there's something to say.
+    fn build_bar(&mut self) {
+        let f = self.fonts.normal;
+        let text = win::child(self.hwnd, win::STATIC, "", win::SS_NOPREFIX | win::SS_ENDELLIPSIS, 0, ID_BAR_TEXT, f);
+        win::show(text, false);
+        for (id, label) in [
+            (ID_BAR_UPDATE, "Update"),
+            (ID_BAR_NOTES, "What's new"),
+            (ID_BAR_RETRY, "Try again"),
+            (ID_BAR_CLOSE, "Close"),
+        ] {
+            let b = win::child(self.hwnd, win::BUTTON, label, WS_TABSTOP.0, 0, id, f);
+            win::show(b, false);
+        }
+    }
+
+    /// Shows, updates or hides the update bar for the current state.
+    fn refresh_bar(&mut self) {
+        let (text, role, buttons): (String, Role, &[i32]) = match &*self.updates.lock().unwrap() {
+            Updates::Idle | Updates::Dismissed | Updates::Checking { manual: false } => (String::new(), Role::Normal, &[]),
+            Updates::Checking { manual: true } => ("Checking for updates...".into(), Role::Normal, &[]),
+            Updates::UpToDate => (
+                format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")),
+                Role::Normal,
+                &[ID_BAR_CLOSE],
+            ),
+            Updates::Available(r) => (
+                format!("B-Rar {} is available.", r.version),
+                Role::Normal,
+                &[ID_BAR_UPDATE, ID_BAR_NOTES, ID_BAR_CLOSE],
+            ),
+            Updates::Downloading { release, done, total } => {
+                let (done, total) = (done.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
+                let percent = (done * 100).checked_div(total).unwrap_or(0);
+                (format!("Downloading B-Rar {}... {percent}%", release.version), Role::Normal, &[])
+            }
+            Updates::Failed(e) => (format!("Update failed: {e}"), Role::Error, &[ID_BAR_RETRY, ID_BAR_CLOSE]),
+        };
+        let shown = !text.is_empty();
+        let label = win::item(self.hwnd, ID_BAR_TEXT);
+        win::set_text(label, &text);
+        win::set_role(label, role);
+        win::show(label, shown);
+        for id in [ID_BAR_UPDATE, ID_BAR_NOTES, ID_BAR_RETRY, ID_BAR_CLOSE] {
+            win::show(win::item(self.hwnd, id), buttons.contains(&id));
+        }
+        let height = if shown { self.px(44) } else { 0 };
+        if height != self.bar {
+            self.bar = height;
+            self.layout();
+            // SAFETY: repaint the window (the bar's background).
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, true);
+            }
+        } else {
+            self.layout_bar();
+        }
+    }
+
+    fn layout_bar(&self) {
+        if self.bar == 0 {
+            return;
+        }
+        let (w, _) = win::client_size(self.hwnd);
+        let bh = self.fonts_button_height();
+        let y = (self.bar - bh) / 2;
+        let mut x = w - self.px(12);
+        for id in [ID_BAR_CLOSE, ID_BAR_RETRY, ID_BAR_NOTES, ID_BAR_UPDATE] {
+            let h = win::item(self.hwnd, id);
+            // SAFETY: plain call.
+            if unsafe { IsWindowVisible(h) }.as_bool() {
+                let bw = (win::measure(self.fonts.normal, &win::text(h)).0 + self.px(28)).max(self.px(80));
+                x -= bw;
+                win::place(h, x, y, bw, bh);
+                x -= self.px(8);
+            }
+        }
+        let line = win::measure(self.fonts.normal, "Ag").1;
+        win::place(
+            win::item(self.hwnd, ID_BAR_TEXT),
+            self.px(16),
+            (self.bar - line) / 2,
+            (x - self.px(24)).max(0),
+            line,
+        );
+    }
+
+    fn fonts_button_height(&self) -> i32 {
+        win::measure(self.fonts.normal, "Ag").1 + self.px(14)
+    }
+
+    // ---- pages ----
+
+    fn set_page(&mut self, page: Page) {
+        let was_ready = matches!(self.page, Page::Ready);
+        self.page = page;
+        self.built.clear();
+        if !matches!(self.page, Page::Ready) && was_ready {
+            self.drop_ready();
+        }
+        match &self.page {
+            Page::Ready => {
+                if self.ready.is_none() {
+                    self.build_ready();
+                }
+            }
+            Page::Home => self.built = self.home_page(),
+            Page::Loading => {
+                let mut b = Builder::new(self.hwnd, &self.fonts, 440);
+                b.centered(&format!("Reading {}...", self.name), self.fonts.normal, Role::Normal);
+                b.space(12);
+                b.progress(0, true);
+                self.built = b.finish();
+            }
+            Page::Password { wrong, .. } => {
+                let mut b = Builder::new(self.hwnd, &self.fonts, 440);
+                b.header(win::stock_icon(SIID_KEY), "Password required", &format!("{} is encrypted", self.name));
+                b.space(14);
+                b.edit(ID_PASSWORD, "", win::ES_PASSWORD, "Enter password", 0);
+                b.space(4);
+                b.check(ID_SHOW, "Show password", false);
+                if *wrong {
+                    b.space(4);
+                    b.label(0, "That password is incorrect. Try again.", Role::Error, false);
+                }
+                b.space(14);
+                b.buttons(&[(IDOK.0, "OK"), (IDCANCEL.0, "Cancel")]);
+                win::enable(win::item(self.hwnd, IDOK.0), false);
+                self.built = b.finish();
+            }
+            Page::Failed(message) => {
+                let mut b = Builder::new(self.hwnd, &self.fonts, 460);
+                b.header(win::stock_icon(SIID_ERROR), "Couldn't open the archive", &self.name);
+                b.space(10);
+                b.label(0, message, Role::Normal, true);
+                b.space(14);
+                b.buttons(&[(IDOK.0, "Open another..."), (IDCANCEL.0, "Close")]);
+                self.built = b.finish();
+            }
+        }
+        self.layout();
+        let focus = match self.page {
+            Page::Ready => self.ready.as_ref().map(|r| r.list),
+            Page::Password { .. } => Some(win::item(self.hwnd, ID_PASSWORD)),
+            _ => Some(win::item(self.hwnd, IDOK.0)),
+        };
+        if let Some(h) = focus.filter(|h| !h.is_invalid()) {
+            win::focus(h);
+        }
+    }
+
+    fn home_page(&self) -> win::Page {
+        let mut b = Builder::new(self.hwnd, &self.fonts, 440);
+        b.icon(win::app_icon(b.px(96)), 96);
+        b.space(10);
+        b.centered("B-Rar", self.fonts.big, Role::Normal);
+        b.centered("Open an archive to look inside and extract it.", self.fonts.normal, Role::Weak);
+        b.space(18);
+        b.buttons_centered(&[(IDOK.0, "Open archive...")]);
+        b.space(14);
+        b.centered("Or drop an archive on this window.", self.fonts.normal, Role::Weak);
+        b.centered(
+            "In File Explorer, right-click any archive for B-Rar's menu.",
+            self.fonts.normal,
+            Role::Weak,
+        );
+        if let Some((message, _)) = &self.status {
+            b.space(10);
+            b.centered(message, self.fonts.normal, Role::Error);
+        }
+        b.space(18);
+        b.centered(&format!("Version {}", env!("CARGO_PKG_VERSION")), self.fonts.normal, Role::Weak);
+        if self.updatable() {
+            b.space(2);
+            b.link(ID_CHECK, "<a>Check for updates</a>", "Check for updates");
+        }
+        b.space(2);
+        b.link(ID_SUPPORT, "<a>Support B-Rar</a>", "Support B-Rar");
+        b.finish()
+    }
+
+    fn build_ready(&mut self) {
+        let (hwnd, f) = (self.hwnd, self.fonts.normal);
+        let logo = win::child(hwnd, win::STATIC, "", win::SS_ICON | win::SS_REALSIZECONTROL, 0, ID_LOGO, f);
+        win::send(logo, win::STM_SETICON, win::app_icon(self.px(28)).0 as usize, 0);
+        let extract = win::child(hwnd, win::BUTTON, "Extract to...", WS_TABSTOP.0, 0, ID_EXTRACT, f);
+        let test = win::child(hwnd, win::BUTTON, "Test", WS_TABSTOP.0, 0, ID_TEST, f);
+        let search = win::child(hwnd, win::EDIT, "", win::ES_AUTOHSCROLL | WS_TABSTOP.0, WS_EX_CLIENTEDGE.0, ID_SEARCH, f);
+        win::cue(search, "Search this folder");
+        let up = win::child(hwnd, win::BUTTON, "Up", WS_TABSTOP.0, 0, ID_UP, f);
+        let crumbs = win::child(hwnd, win::LINK, "", WS_TABSTOP.0, 0, ID_CRUMBS, f);
+        let list = win::child(
+            hwnd,
+            w!("SysListView32"),
+            "",
+            LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | WS_TABSTOP.0,
+            0,
+            ID_LIST,
+            f,
+        );
+        // SAFETY: Explorer's look for the list (hover, selection colours).
+        unsafe {
+            let _ = SetWindowTheme(list, w!("Explorer"), None);
+        }
+        win::send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        win::send(list, LVM_SETIMAGELIST, 1 /* LVSIL_SMALL */, system_image_list());
+        for (i, column) in COLUMNS.iter().enumerate() {
+            let (title, width) = match column {
+                Column::Name => ("Name", 300),
+                Column::Size => ("Size", 92),
+                Column::Packed => ("Packed", 92),
+                Column::Modified => ("Modified", 150),
+            };
+            let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+            let col = LvColumn {
+                mask: LVCF_FMT | LVCF_WIDTH | LVCF_TEXT,
+                fmt: if matches!(column, Column::Size | Column::Packed) {
+                    LVCFMT_RIGHT
+                } else {
+                    0
+                },
+                cx: self.px(width),
+                text: title.as_ptr(),
+                text_max: 0,
+                sub_item: 0,
+                image: 0,
+                order: 0,
+                cx_min: 0,
+                cx_default: 0,
+                cx_ideal: 0,
+            };
+            win::send(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
+        }
+        let status = win::child(hwnd, w!("msctls_statusbar32"), "", SBARS_SIZEGRIP, 0, ID_STATUSBAR, f);
+        self.ready = Some(Ready {
+            logo,
+            extract,
+            test,
+            search,
+            up,
+            crumbs,
+            list,
+            status,
+        });
+    }
+
+    fn drop_ready(&mut self) {
+        if let Some(r) = self.ready.take() {
+            for h in [r.logo, r.extract, r.test, r.search, r.up, r.crumbs, r.list, r.status] {
+                win::destroy(h);
+            }
+        }
+    }
+
+    /// Places everything for the window's size.
+    fn layout(&mut self) {
+        let (w, h) = win::client_size(self.hwnd);
+        self.layout_bar();
+        let top = self.bar;
+        if let Some(r) = &self.ready {
+            let bh = self.fonts_button_height();
+            let eh = win::measure(self.fonts.normal, "Ag").1 + self.px(10);
+            let (m, y1) = (self.px(14), top + self.px(10));
+            let logo = self.px(28);
+            win::place(r.logo, m, y1 + (bh - logo) / 2, logo, logo);
+            let mut x = m + logo + self.px(10);
+            for (b, label) in [(r.extract, "Extract to..."), (r.test, "Test")] {
+                let bw = (win::measure(self.fonts.normal, label).0 + self.px(32)).max(self.px(88));
+                win::place(b, x, y1, bw, bh);
+                x += bw + self.px(8);
+            }
+            let sw = self.px(240).min(w - x - m - self.px(8)).max(self.px(80));
+            win::place(r.search, w - m - sw, y1 + (bh - eh) / 2, sw, eh);
+            let y2 = y1 + bh + self.px(8);
+            let uw = self.px(56);
+            let ubh = bh - self.px(2);
+            win::place(r.up, m, y2, uw, ubh);
+            let line = win::measure(self.fonts.normal, "Ag").1;
+            win::place(r.crumbs, m + uw + self.px(10), y2 + (ubh - line) / 2, w - m * 2 - uw - self.px(10), line);
+            // The status bar sizes itself along the bottom.
+            win::send(r.status, WM_SIZE, 0, 0);
+            let mut sr = RECT::default();
+            // SAFETY: plain call.
+            unsafe {
+                let _ = GetWindowRect(r.status, &mut sr);
+            }
+            let sh = sr.bottom - sr.top;
+            let parts = [w * 45 / 100, -1];
+            win::send(r.status, SB_SETPARTS, 2, parts.as_ptr() as isize);
+            let ly = y2 + ubh + self.px(8);
+            win::place(r.list, 0, ly, w, (h - ly - sh).max(0));
+            // The name column takes what the others leave.
+            let others = self.px(92 + 92 + 150);
+            // SAFETY: plain call.
+            let scroll = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
+            let name = (w - others - scroll - self.px(4)).max(self.px(120));
+            win::send(r.list, LVM_SETCOLUMNWIDTH, 0, name as isize);
+        } else {
+            let (pw, ph) = (self.built.width, self.built.height);
+            let x = ((w - pw) / 2).max(self.px(16));
+            let y = top + ((h - top - ph) / 2).max(self.px(20));
+            self.built.place(x, y);
+        }
+    }
+
+    // ---- archives ----
+
     /// Shows `archive` in this window (from the home page, a drop, or Ctrl+O).
-    fn open_archive(&mut self, ctx: &egui::Context, archive: PathBuf) {
+    fn open_archive(&mut self, archive: PathBuf) {
         self.name = file_name(&archive);
         self.archive = archive;
         if !self.name.is_empty() {
-            ctx.send_viewport_cmd(ViewportCommand::Title(format!("{} - B-Rar", self.name)));
+            win::set_title(self.hwnd, &format!("{} - B-Rar", self.name));
         }
         self.password = None;
         self.parts = PartFinder::new(shell::pick_part);
         self.tree = Tree::build(Vec::new());
         self.cwd = 0;
         self.rows.clear();
-        self.selected.clear();
-        (self.anchor, self.cursor) = (None, None);
-        self.search.clear();
         self.status = None;
-        self.list(ctx);
-    }
-
-    /// The Windows file picker; opens what was picked.
-    fn pick_archive(&mut self, ctx: &egui::Context) {
-        match shell::pick_archive(self.hwnd) {
-            Ok(Some(path)) => self.open_archive(ctx, path),
-            Ok(None) => {}
-            Err(e) => self.say(e),
+        if matches!(self.page, Page::Ready) {
+            self.drop_ready();
         }
+        self.list();
     }
 
     fn options(&self) -> Options {
@@ -423,31 +939,147 @@ impl Browser {
         }
     }
 
-    fn list(&mut self, ctx: &egui::Context) {
-        self.page = Page::Loading;
-        let (inbox, ctx, archive, opts) = (Arc::clone(&self.inbox), ctx.clone(), self.archive.clone(), self.options());
+    fn list(&mut self) {
+        self.set_page(Page::Loading);
+        let (inbox, hwnd, archive, opts) = (Arc::clone(&self.inbox), self.handle(), self.archive.clone(), self.options());
         std::thread::spawn(move || {
             let result = brar_core::list(&archive, &opts);
             inbox.lock().unwrap().listing = Some(result);
-            ctx.request_repaint();
+            win::post(hwnd, win::WM_WAKE);
         });
     }
 
-    fn ask_password(&mut self, wrong: bool, retry: Retry) {
-        self.password_input.clear();
-        self.focus_password = true;
-        self.page = Page::Password { wrong, retry };
+    /// Finished background work: the listing, opened files.
+    fn wake(&mut self) {
+        let (listing, opened) = {
+            let mut inbox = self.inbox.lock().unwrap();
+            (inbox.listing.take(), std::mem::take(&mut inbox.opened))
+        };
+        match listing {
+            Some(Ok(entries)) => {
+                self.tree = Tree::build(entries);
+                self.cwd = 0;
+                self.set_page(Page::Ready);
+                self.refresh_rows();
+                self.focus_row(0, false);
+            }
+            Some(Err(e @ (Error::PasswordRequired | Error::WrongPassword))) => {
+                self.set_page(Page::Password {
+                    wrong: matches!(e, Error::WrongPassword),
+                    retry: Retry::List,
+                });
+            }
+            Some(Err(e)) => self.set_page(Page::Failed(e.to_string())),
+            None => {}
+        }
+        for (node, result) in opened {
+            self.opening -= 1;
+            match result {
+                Ok(file) => {
+                    self.status = None;
+                    self.update_status();
+                    shell::open_path(&file);
+                }
+                Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
+                    self.set_page(Page::Password {
+                        wrong: matches!(e, Error::WrongPassword),
+                        retry: Retry::Open(node),
+                    });
+                }
+                Err(Error::Cancelled) => {}
+                Err(e) => {
+                    let name = self.tree.nodes[node].name.clone();
+                    self.say(format!("Couldn't open {name}: {e}"));
+                }
+            }
+        }
+        self.refresh_bar();
     }
 
     fn say(&mut self, message: impl Into<String>) {
         self.status = Some((message.into(), Instant::now()));
+        if matches!(self.page, Page::Home) {
+            self.set_page(Page::Home);
+        } else {
+            self.update_status();
+        }
+    }
+
+    /// Four times a second: the update bar while downloading, old status messages.
+    fn tick(&mut self) {
+        if matches!(*self.updates.lock().unwrap(), Updates::Downloading { .. }) {
+            self.refresh_bar();
+        }
+        if self.status.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs() > 8) && self.opening == 0 {
+            self.status = None;
+            self.update_status();
+        }
     }
 
     // ---- rows and selection ----
 
+    fn search_text(&self) -> String {
+        self.ready.as_ref().map(|r| win::text(r.search)).unwrap_or_default()
+    }
+
+    fn selected_rows(&self) -> Vec<usize> {
+        let Some(r) = &self.ready else { return Vec::new() };
+        let mut rows = Vec::new();
+        let mut i = -1isize;
+        loop {
+            i = win::send(r.list, LVM_GETNEXTITEM, i as usize, LVNI_SELECTED as isize);
+            if i < 0 {
+                return rows;
+            }
+            rows.push(i as usize);
+        }
+    }
+
+    fn selected(&self) -> Vec<usize> {
+        self.selected_rows().into_iter().filter_map(|r| self.rows.get(r).copied()).collect()
+    }
+
+    fn set_row_state(&self, row: isize, state: u32, mask: u32) {
+        if let Some(r) = &self.ready {
+            let item = LvItem {
+                mask: LVIF_STATE,
+                item: 0,
+                sub_item: 0,
+                state,
+                state_mask: mask,
+                text: std::ptr::null_mut(),
+                text_max: 0,
+                image: 0,
+                param: 0,
+                indent: 0,
+                group_id: 0,
+                columns: 0,
+                pu_columns: std::ptr::null_mut(),
+                pi_col_fmt: std::ptr::null_mut(),
+                group: 0,
+            };
+            win::send(r.list, LVM_SETITEMSTATE, row as usize, &item as *const _ as isize);
+        }
+    }
+
+    /// Puts the keyboard cursor on `row` (and selects it if asked), scrolled into view.
+    fn focus_row(&self, row: usize, select: bool) {
+        let Some(r) = &self.ready else { return };
+        if row >= self.rows.len() {
+            return;
+        }
+        let state = LVIS_FOCUSED | if select { LVIS_SELECTED } else { 0 };
+        self.set_row_state(row as isize, state, state);
+        // Where Shift+arrow selections start from.
+        win::send(r.list, LVM_SETSELECTIONMARK, 0, row as isize);
+        win::send(r.list, LVM_ENSUREVISIBLE, row, 0);
+    }
+
+    /// Recomputes the rows (folder, search, sort), keeping the selection where it still shows.
     fn refresh_rows(&mut self) {
+        let keep: HashSet<usize> = self.selected().into_iter().collect();
         let t = &self.tree;
-        let query = self.search.trim().to_lowercase();
+        let query = self.search_text().trim().to_lowercase();
         let mut rows: Vec<usize> = if query.is_empty() {
             t.nodes[self.cwd].children.clone()
         } else {
@@ -469,125 +1101,244 @@ impl Browser {
             y.is_dir.cmp(&x.is_dir).then(by).then_with(|| natural(&x.name, &y.name))
         });
         self.rows = rows;
-        let shown: HashSet<usize> = self.rows.iter().copied().collect();
-        self.selected.retain(|n| shown.contains(n));
-        self.anchor = self.anchor.filter(|n| shown.contains(n));
-        self.cursor = self.cursor.filter(|n| shown.contains(n));
-        self.stale = false;
-    }
-
-    fn row_of(&self, node: usize) -> Option<usize> {
-        self.rows.iter().position(|&n| n == node)
+        if let Some(r) = &self.ready {
+            self.set_row_state(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+            win::send(r.list, LVM_SETITEMCOUNT, self.rows.len(), 0);
+            for (row, node) in self.rows.iter().enumerate() {
+                if keep.contains(node) {
+                    self.set_row_state(row as isize, LVIS_SELECTED, LVIS_SELECTED);
+                }
+            }
+            // SAFETY: redraw the list with the new rows.
+            unsafe {
+                let _ = InvalidateRect(Some(r.list), None, false);
+            }
+            win::enable(r.up, self.cwd != 0);
+        }
+        self.sort_arrows();
+        self.update_crumbs();
+        self.update_status();
     }
 
     fn enter(&mut self, folder: usize) {
         let from = self.cwd;
         self.cwd = folder;
-        self.search.clear();
-        self.selected.clear();
+        if let Some(r) = &self.ready {
+            self.quiet = true;
+            win::set_text(r.search, "");
+            self.quiet = false;
+            self.set_row_state(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        }
         self.refresh_rows();
         // Coming back up, keep the folder we left highlighted.
         let back = std::iter::successors(Some(from), |&n| (n != 0).then(|| self.tree.nodes[n].parent))
             .find(|&n| self.tree.nodes[n].parent == folder && n != folder);
-        self.cursor = back.or(self.rows.first().copied());
-        self.anchor = self.cursor;
-        if let Some(n) = back {
-            self.selected.insert(n);
+        match back.and_then(|n| self.rows.iter().position(|&r| r == n)) {
+            Some(row) => self.focus_row(row, true),
+            None => self.focus_row(0, false),
         }
-        self.reveal_cursor = true;
     }
 
-    fn click(&mut self, node: usize, ctrl: bool, shift: bool) {
-        match (shift, self.anchor.and_then(|a| self.row_of(a)), self.row_of(node)) {
-            (true, Some(a), Some(b)) => {
-                if !ctrl {
-                    self.selected.clear();
-                }
-                self.selected.extend(&self.rows[a.min(b)..=a.max(b)]);
-            }
-            _ if ctrl => {
-                if !self.selected.remove(&node) {
-                    self.selected.insert(node);
-                }
-                self.anchor = Some(node);
-            }
-            _ => {
-                self.selected.clear();
-                self.selected.insert(node);
-                self.anchor = Some(node);
-            }
+    fn up(&mut self) {
+        if self.cwd != 0 {
+            self.enter(self.tree.nodes[self.cwd].parent);
         }
-        self.cursor = Some(node);
-    }
-
-    fn move_cursor(&mut self, to: isize, shift: bool) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let last = self.rows.len() as isize - 1;
-        let row = self.cursor.and_then(|c| self.row_of(c)).map_or(0, |r| r as isize);
-        let next = self.rows[if to == isize::MIN {
-            0
-        } else if to == isize::MAX {
-            last as usize
-        } else {
-            (row + to).clamp(0, last) as usize
-        }];
-        self.click(next, false, shift);
-        self.reveal_cursor = true;
     }
 
     /// What "extract" acts on: the selection, or everything in view when nothing is selected.
     fn picked(&self) -> Option<Vec<String>> {
-        if !self.selected.is_empty() {
-            let mut items: Vec<String> = self
-                .rows
-                .iter()
-                .filter(|n| self.selected.contains(n))
-                .map(|&n| self.tree.nodes[n].path.clone())
-                .collect();
+        let selected = self.selected();
+        if !selected.is_empty() {
+            let mut items: Vec<String> = selected.iter().map(|&n| self.tree.nodes[n].path.clone()).collect();
             items.dedup();
             return Some(items);
         }
-        if self.cwd == 0 && self.search.trim().is_empty() {
+        if self.cwd == 0 && self.search_text().trim().is_empty() {
             return None; // the whole archive: no selection at all, the fastest path
         }
         Some(self.rows.iter().map(|&n| self.tree.nodes[n].path.clone()).collect())
     }
 
+    fn sort_arrows(&self) {
+        let Some(r) = &self.ready else { return };
+        let header = HWND(win::send(r.list, LVM_GETHEADER, 0, 0) as _);
+        for (i, column) in COLUMNS.iter().enumerate() {
+            // SAFETY: a zeroed HDITEMW is valid; only the format is read and written.
+            let mut hd: HdItem = unsafe { std::mem::zeroed() };
+            hd.mask = HDI_FORMAT;
+            win::send(header, HDM_GETITEMW, i, &mut hd as *mut _ as isize);
+            hd.fmt &= !(HDF_SORTUP | HDF_SORTDOWN);
+            if *column == self.sort.0 {
+                hd.fmt |= if self.sort.1 { HDF_SORTUP } else { HDF_SORTDOWN };
+            }
+            win::send(header, HDM_SETITEMW, i, &hd as *const _ as isize);
+        }
+    }
+
+    /// The breadcrumb: archive › folder › folder, all but the last a link.
+    fn update_crumbs(&self) {
+        let Some(r) = &self.ready else { return };
+        let mut chain = vec![self.cwd];
+        while let Some(&n) = chain.last().filter(|&&n| n != 0) {
+            chain.push(self.tree.nodes[n].parent);
+        }
+        chain.reverse();
+        let mut markup = String::new();
+        for (k, &n) in chain.iter().enumerate() {
+            if k > 0 {
+                markup.push_str("  ›  ");
+            }
+            let label = if n == 0 { self.name.clone() } else { self.tree.nodes[n].name.clone() };
+            // SysLink has no escapes; a '<' in a name would start a tag.
+            let label = label.replace('<', "‹");
+            if k + 1 == chain.len() {
+                markup.push_str(&label);
+            } else {
+                markup.push_str(&format!("<a id=\"{n}\">{label}</a>"));
+            }
+        }
+        win::set_text(r.crumbs, &markup);
+    }
+
+    fn update_status(&self) {
+        let Some(r) = &self.ready else { return };
+        let t = &self.tree;
+        let selected = self.selected();
+        let summary = if selected.is_empty() {
+            let (dirs, files) = self
+                .rows
+                .iter()
+                .fold((0, 0), |(d, f), &n| if t.nodes[n].is_dir { (d + 1, f) } else { (d, f + 1) });
+            let size: u64 = self.rows.iter().map(|&n| t.nodes[n].size).sum();
+            format!("{} · {} · {}", plural(dirs, "folder"), plural(files, "file"), human(size))
+        } else {
+            let size: u64 = selected.iter().map(|&n| t.nodes[n].size).sum();
+            format!("{} selected · {}", selected.len(), human(size))
+        };
+        let total = &t.nodes[0];
+        let mut right = format!("{} in archive · {}", plural(total.files as usize, "file"), human(total.size));
+        if let Some((message, _)) = &self.status {
+            right = format!("{message}     {right}");
+        }
+        for (part, text) in [(0, summary), (1, right)] {
+            let text: Vec<u16> = format!(" {text}").encode_utf16().chain(Some(0)).collect();
+            win::send(r.status, SB_SETTEXTW, part, text.as_ptr() as isize);
+        }
+    }
+
+    /// The list's text for one cell, into the buffer the list gave.
+    fn display(&mut self, info: &mut NmLvDispInfo) {
+        let Some(&node) = self.rows.get(info.item.item as usize) else { return };
+        let column = COLUMNS.get(info.item.sub_item as usize).copied().unwrap_or(Column::Name);
+        if info.item.mask & LVIF_IMAGE != 0 && column == Column::Name {
+            info.item.image = self.icon_of(node);
+        }
+        if info.item.mask & LVIF_TEXT != 0 && !info.item.text.is_null() && info.item.text_max > 0 {
+            let n = &self.tree.nodes[node];
+            let text = match column {
+                Column::Name => {
+                    if self.search_text().trim().is_empty() {
+                        n.name.clone()
+                    } else {
+                        relative(&n.path, &self.tree.nodes[self.cwd].path).to_owned()
+                    }
+                }
+                Column::Size => human(n.size),
+                Column::Packed => n.packed.map(human).unwrap_or_default(),
+                Column::Modified => n.modified.and_then(short_time).unwrap_or_default(),
+            };
+            let max = info.item.text_max as usize - 1;
+            let wide: Vec<u16> = text.encode_utf16().take(max).collect();
+            // SAFETY: the list's buffer holds text_max characters.
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), info.item.text, wide.len());
+                *info.item.text.add(wide.len()) = 0;
+            }
+        }
+    }
+
+    /// The system's small icon for a node's type (by extension), cached.
+    fn icon_of(&mut self, node: usize) -> i32 {
+        let n = &self.tree.nodes[node];
+        let key = if n.is_dir {
+            "/".to_owned()
+        } else {
+            Path::new(&n.name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        if let Some(&i) = self.icons.get(&key) {
+            return i;
+        }
+        let (name, attr) = if n.is_dir {
+            ("folder".to_owned(), FILE_ATTRIBUTE_DIRECTORY)
+        } else {
+            (format!("file.{key}"), FILE_ATTRIBUTE_NORMAL)
+        };
+        let mut info = SHFILEINFOW::default();
+        // SAFETY: a valid struct of the size passed; the name is NUL-terminated.
+        unsafe {
+            SHGetFileInfoW(
+                &HSTRING::from(name),
+                attr,
+                Some(&mut info),
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+            );
+        }
+        self.icons.insert(key, info.iIcon);
+        info.iIcon
+    }
+
     // ---- actions ----
 
-    fn run(&mut self, ctx: &egui::Context, action: Action) {
-        match action {
-            Action::Enter(n) => self.enter(n),
-            Action::Up => {
-                if self.cwd != 0 {
-                    self.enter(self.tree.nodes[self.cwd].parent);
-                }
-            }
-            Action::Open(n) if self.tree.nodes[n].is_dir => self.enter(n),
-            Action::Open(n) => self.open(ctx, n),
-            Action::Extract(dest) => {
-                let dest = match dest {
-                    Some(d) => d,
-                    None => match shell::pick_folder(&self.archive, self.hwnd) {
-                        Ok(Some(d)) => d,
-                        Ok(None) => return,
-                        Err(e) => return self.say(e),
-                    },
-                };
-                let mut args: Vec<OsString> = vec!["x".into(), self.archive.clone().into(), "-o".into(), dest.into()];
-                if let Some(items) = self.picked() {
-                    match self.write_items(&items) {
-                        Ok(file) => args.extend(["--items".into(), file.into()]),
-                        Err(e) => return self.say(format!("Couldn't start extracting: {e}")),
-                    }
-                    args.extend(["--base".into(), self.tree.nodes[self.cwd].path.clone().into()]);
-                }
-                self.spawn(args);
-            }
-            Action::Test => self.spawn(vec!["t".into(), self.archive.clone().into()]),
+    fn open(&mut self, node: usize) {
+        if self.tree.nodes[node].is_dir {
+            return self.enter(node);
         }
+        let n = &self.tree.nodes[node];
+        self.jobs += 1;
+        let dir = self.temp.join(self.jobs.to_string());
+        let parent = n.path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
+        let target = dir.join(&n.name);
+        let opts = Options {
+            selection: Some(Selection {
+                items: vec![n.path.clone()],
+                base: parent,
+            }),
+            on_conflict: ConflictPolicy::Always(Resolution::Overwrite),
+            ..self.options()
+        };
+        let name = n.name.clone();
+        self.opening += 1;
+        self.say(format!("Opening {name}..."));
+        let (inbox, hwnd, archive) = (Arc::clone(&self.inbox), self.handle(), self.archive.clone());
+        std::thread::spawn(move || {
+            let result = brar_core::extract(&archive, &dir, &opts).map(|_| target);
+            inbox.lock().unwrap().opened.push((node, result));
+            win::post(hwnd, win::WM_WAKE);
+        });
+    }
+
+    fn open_cursor(&mut self) {
+        let Some(r) = &self.ready else { return };
+        let row = win::send(r.list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize);
+        if let Some(&node) = usize::try_from(row).ok().and_then(|row| self.rows.get(row)) {
+            self.open(node);
+        }
+    }
+
+    fn extract_to(&mut self, dest: PathBuf) {
+        let mut args: Vec<OsString> = vec!["x".into(), self.archive.clone().into(), "-o".into(), dest.into()];
+        if let Some(items) = self.picked() {
+            match self.write_items(&items) {
+                Ok(file) => args.extend(["--items".into(), file.into()]),
+                Err(e) => return self.say(format!("Couldn't start extracting: {e}")),
+            }
+            args.extend(["--base".into(), self.tree.nodes[self.cwd].path.clone().into()]);
+        }
+        self.spawn(args);
     }
 
     /// Selections can be long, so they go to the child in a file it deletes after reading.
@@ -618,29 +1369,371 @@ impl Browser {
         }
     }
 
-    /// Extracts one file to a temporary folder and opens it with its default app.
-    fn open(&mut self, ctx: &egui::Context, node: usize) {
-        let n = &self.tree.nodes[node];
-        self.jobs += 1;
-        let dir = self.temp.join(self.jobs.to_string());
-        let parent = n.path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
-        let target = dir.join(&n.name);
-        let opts = Options {
-            selection: Some(Selection {
-                items: vec![n.path.clone()],
-                base: parent,
-            }),
-            on_conflict: ConflictPolicy::Always(Resolution::Overwrite),
-            ..self.options()
-        };
-        self.opening += 1;
-        self.say(format!("Opening {}...", n.name));
-        let (inbox, ctx, archive) = (Arc::clone(&self.inbox), ctx.clone(), self.archive.clone());
-        std::thread::spawn(move || {
-            let result = brar_core::extract(&archive, &dir, &opts).map(|_| target);
-            inbox.lock().unwrap().opened.push((node, result));
-            ctx.request_repaint();
-        });
+    fn submit_password(&mut self) {
+        let Page::Password { retry, .. } = self.page else { return };
+        let password = win::text(win::item(self.hwnd, ID_PASSWORD));
+        if password.is_empty() {
+            return;
+        }
+        self.password = Some(password);
+        match retry {
+            Retry::List => self.list(),
+            Retry::Open(node) => {
+                self.set_page(Page::Ready);
+                self.refresh_rows();
+                self.open(node);
+            }
+        }
+    }
+
+    fn cancel_password(&mut self) {
+        let Page::Password { retry, .. } = self.page else { return };
+        match retry {
+            Retry::List => win::post(self.handle(), WM_CLOSE),
+            Retry::Open(_) => {
+                self.set_page(Page::Ready);
+                self.refresh_rows();
+            }
+        }
+    }
+
+    /// WM_COMMAND. Returns work that opens a dialog, for after the state is released.
+    fn command(&mut self, id: i32, code: u32) -> Option<Later> {
+        let (ok, cancel) = (id == IDOK.0, id == IDCANCEL.0);
+        match id {
+            ID_BAR_UPDATE => self.start_update(),
+            ID_BAR_NOTES => {
+                if let Updates::Available(r) = &*self.updates.lock().unwrap() {
+                    shell::open_path(Path::new(&r.page));
+                }
+            }
+            ID_BAR_RETRY => self.check_for_updates(true),
+            ID_BAR_CLOSE => {
+                *self.updates.lock().unwrap() = Updates::Dismissed;
+                self.refresh_bar();
+            }
+            ID_EXTRACT => return Some(Later::Extract),
+            ID_TEST => self.spawn(vec!["t".into(), self.archive.clone().into()]),
+            ID_UP => self.up(),
+            ID_SEARCH if code == win::EN_CHANGE && !self.quiet => self.refresh_rows(),
+            ID_SHOW => win::reveal(win::item(self.hwnd, ID_PASSWORD), win::checked(win::item(self.hwnd, ID_SHOW))),
+            ID_PASSWORD if code == win::EN_CHANGE => {
+                let typed = !win::text(win::item(self.hwnd, ID_PASSWORD)).is_empty();
+                win::enable(win::item(self.hwnd, IDOK.0), typed);
+            }
+            _ if ok => match self.page {
+                Page::Home | Page::Failed(_) => return Some(Later::PickArchive),
+                Page::Password { .. } => self.submit_password(),
+                Page::Ready => {
+                    // Enter: in the search field, go to the results; in the list, open.
+                    let focus = unsafe { GetFocus() };
+                    match &self.ready {
+                        Some(r) if focus == r.search => win::focus(r.list),
+                        Some(_) => self.open_cursor(),
+                        None => {}
+                    }
+                }
+                Page::Loading => {}
+            },
+            _ if cancel => match self.page {
+                Page::Password { .. } => self.cancel_password(),
+                Page::Failed(_) => win::post(self.handle(), WM_CLOSE),
+                Page::Ready => {
+                    if let Some(r) = &self.ready {
+                        if !self.search_text().is_empty() {
+                            win::set_text(r.search, "");
+                        } else {
+                            self.set_row_state(-1, 0, LVIS_SELECTED);
+                            self.update_status();
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        None
+    }
+
+    /// WM_NOTIFY. Returns work that opens a menu, for after the state is released.
+    fn notify(&mut self, hdr: &NMHDR, lparam: LPARAM) -> (Option<Later>, LRESULT) {
+        let id = hdr.idFrom as i32;
+        match (id, hdr.code) {
+            (ID_LIST, LVN_GETDISPINFOW) => {
+                // SAFETY: LVN_GETDISPINFOW comes with an NMLVDISPINFOW.
+                let info = unsafe { &mut *(lparam.0 as *mut NmLvDispInfo) };
+                self.display(info);
+            }
+            (ID_LIST, LVN_ITEMCHANGED | LVN_ODSTATECHANGED) => self.update_status(),
+            (ID_LIST, LVN_ITEMACTIVATE) => self.open_cursor(),
+            (ID_LIST, LVN_COLUMNCLICK) => {
+                // SAFETY: LVN_COLUMNCLICK comes with an NMLISTVIEW.
+                let nm = unsafe { &*(lparam.0 as *const NmListView) };
+                if let Some(&column) = COLUMNS.get(nm.sub_item as usize) {
+                    self.sort = if self.sort.0 == column {
+                        (column, !self.sort.1)
+                    } else {
+                        (column, column == Column::Name)
+                    };
+                    self.refresh_rows();
+                }
+            }
+            (ID_LIST, LVN_GETEMPTYMARKUP) => {
+                // SAFETY: LVN_GETEMPTYMARKUP comes with an NMLVEMPTYMARKUP.
+                let nm = unsafe { &mut *(lparam.0 as *mut NmEmptyMarkup) };
+                let text = if self.search_text().trim().is_empty() {
+                    "This folder is empty"
+                } else {
+                    "No matches"
+                };
+                let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                nm.markup[..wide.len()].copy_from_slice(&wide);
+                nm.flags = EMF_CENTERED;
+                return (None, LRESULT(1));
+            }
+            (ID_LIST, NM_RCLICK) => {
+                // SAFETY: NM_RCLICK from a list view comes with an NMITEMACTIVATE, whose
+                // first fields after the header are the item and subitem, as in NMLISTVIEW.
+                let nm = unsafe { &*(lparam.0 as *const NmListView) };
+                let row = usize::try_from(nm.item).ok().filter(|&r| r < self.rows.len());
+                if let (Some(row), Some(r)) = (row, &self.ready) {
+                    let state = win::send(r.list, LVM_GETITEMSTATE, row, LVIS_SELECTED as isize) as u32;
+                    if state & LVIS_SELECTED == 0 {
+                        self.set_row_state(-1, 0, LVIS_SELECTED);
+                        self.set_row_state(row as isize, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    }
+                }
+                return (Some(Later::Menu(row.map(|r| self.rows[r]))), LRESULT(0));
+            }
+            (ID_CRUMBS, NM_CLICK | NM_RETURN) => {
+                // SAFETY: SysLink's NM_CLICK comes with an NMLINK.
+                let nm = unsafe { &*(lparam.0 as *const NmLink) };
+                let len = nm.id.iter().position(|&c| c == 0).unwrap_or(nm.id.len());
+                if let Ok(node) = String::from_utf16_lossy(&nm.id[..len]).parse::<usize>()
+                    && node < self.tree.nodes.len()
+                {
+                    self.enter(node);
+                }
+            }
+            (ID_CHECK, NM_CLICK | NM_RETURN) => self.check_for_updates(true),
+            (ID_SUPPORT, NM_CLICK | NM_RETURN) => shell::open_path(Path::new(SUPPORT_URL)),
+            _ => {}
+        }
+        (None, LRESULT(0))
+    }
+}
+
+/// Dialogs and menus, with the state released (see the module docs).
+fn later(hwnd: HWND, work: Later) {
+    let owner = hwnd.0 as isize;
+    match work {
+        Later::PickArchive => match shell::pick_archive(owner) {
+            Ok(Some(path)) => {
+                with(|b| b.open_archive(path));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                with(|b| b.say(e));
+            }
+        },
+        Later::Extract => {
+            let Some(archive) = with(|b| b.archive.clone()) else { return };
+            match shell::pick_folder(&archive, owner) {
+                Ok(Some(dest)) => {
+                    with(|b| b.extract_to(dest));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    with(|b| b.say(e));
+                }
+            }
+        }
+        Later::Menu(node) => {
+            let is_dir = node.and_then(|n| with(|b| b.tree.nodes[n].is_dir));
+            // SAFETY: a menu created, shown and destroyed here.
+            let chosen = unsafe {
+                let Ok(menu) = CreatePopupMenu() else { return };
+                if let Some(is_dir) = is_dir {
+                    let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, if is_dir { w!("Open folder") } else { w!("Open") });
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+                }
+                let _ = AppendMenuW(menu, MF_STRING, MENU_EXTRACT, w!("Extract to..."));
+                let mut at = POINT::default();
+                let _ = GetCursorPos(&mut at);
+                let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, Some(0), hwnd, None);
+                let _ = DestroyMenu(menu);
+                chosen.0 as usize
+            };
+            match chosen {
+                MENU_OPEN => {
+                    if let Some(node) = node {
+                        with(|b| b.open(node));
+                    }
+                }
+                MENU_EXTRACT => later(hwnd, Later::Extract),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Keyboard shortcuts, before IsDialogMessage: Ctrl+O, Ctrl+F, Alt+Up, Backspace, Ctrl+A.
+fn key(hwnd: HWND, msg: &MSG) -> bool {
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return false;
+    }
+    let vk = msg.wParam.0 as u16;
+    // SAFETY: plain calls.
+    let (ctrl, alt) = unsafe { (GetKeyState(0x11) < 0, GetKeyState(0x12) < 0) };
+    if ctrl && vk == b'O' as u16 {
+        later(hwnd, Later::PickArchive);
+        return true;
+    }
+    with(|b| {
+        let Some(r) = &b.ready else { return false };
+        // SAFETY: plain call.
+        let focus = unsafe { GetFocus() };
+        if ctrl && vk == b'F' as u16 {
+            win::focus(r.search);
+            win::send(r.search, win::EM_SETSEL, 0, -1);
+            true
+        } else if (alt && vk == 0x26) || (focus == r.list && vk == 0x08) {
+            // Alt+Up anywhere, Backspace in the list: the parent folder.
+            b.up();
+            true
+        } else if focus == r.list && ctrl && vk == b'A' as u16 {
+            b.set_row_state(-1, LVIS_SELECTED, LVIS_SELECTED);
+            b.update_status();
+            true
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false)
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_CTLCOLORSTATIC => {
+            let brush = win::ctl_color(wparam, lparam);
+            // The update bar's text sits on the bar's colour.
+            if lparam.0 == win::item(hwnd, ID_BAR_TEXT).0 as isize {
+                // SAFETY: a system brush.
+                return LRESULT(unsafe { GetSysColorBrush(COLOR_BTNFACE) }.0 as isize);
+            }
+            brush
+        }
+        WM_COMMAND => {
+            let (id, code) = ((wparam.0 & 0xFFFF) as i32, ((wparam.0 >> 16) & 0xFFFF) as u32);
+            if let Some(Some(work)) = with(|b| b.command(id, code)) {
+                later(hwnd, work);
+            }
+            LRESULT(0)
+        }
+        WM_NOTIFY => {
+            // SAFETY: WM_NOTIFY's lParam is an NMHDR (or starts with one).
+            let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            match with(|b| b.notify(hdr, lparam)) {
+                Some((Some(work), result)) => {
+                    later(hwnd, work);
+                    result
+                }
+                Some((None, result)) => result,
+                None => LRESULT(0),
+            }
+        }
+        win::WM_WAKE => {
+            with(Browser::wake);
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            with(Browser::tick);
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            with(Browser::layout);
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let s = win::scale();
+            // SAFETY: WM_GETMINMAXINFO's lParam is a MINMAXINFO.
+            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+            info.ptMinTrackSize = POINT {
+                x: (560.0 * s) as i32,
+                y: (320.0 * s) as i32,
+            };
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            // SAFETY: the standard paint pair; the update bar's background.
+            unsafe {
+                let dc = BeginPaint(hwnd, &mut ps);
+                if let Some(bar) = with(|b| b.bar).filter(|&h| h > 0) {
+                    let (w, _) = win::client_size(hwnd);
+                    let r = RECT {
+                        left: 0,
+                        top: 0,
+                        right: w,
+                        bottom: bar,
+                    };
+                    FillRect(dc, &r, GetSysColorBrush(COLOR_BTNFACE));
+                }
+                let _ = EndPaint(hwnd, &ps);
+            }
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            let drop = HDROP(wparam.0 as _);
+            let mut buf = [0u16; 32768];
+            // SAFETY: the dropped files' handle and a buffer of the size passed.
+            let path = unsafe {
+                let n = DragQueryFileW(drop, 0, Some(&mut buf));
+                DragFinish(drop);
+                PathBuf::from(String::from_utf16_lossy(&buf[..n as usize]))
+            };
+            if !path.as_os_str().is_empty() {
+                with(|b| b.open_archive(path));
+            }
+            LRESULT(0)
+        }
+        WM_APPCOMMAND => {
+            // The mouse's back button: up a folder.
+            if (lparam.0 as usize >> 16) & 0x0FFF == APPCOMMAND_BROWSER_BACKWARD {
+                with(Browser::up);
+                return LRESULT(1);
+            }
+            // SAFETY: the default handling.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        // For IsDialogMessage: Enter presses the default button.
+        win::DM_GETDEFID => LRESULT((0x534B << 16) | IDOK.0 as isize),
+        WM_DESTROY => {
+            if let Some(temp) = with(|b| b.temp.clone()) {
+                // Best effort: files still open in another app stay until the next cleanup.
+                let _ = std::fs::remove_dir_all(temp);
+            }
+            // SAFETY: ends this thread's message loop.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // SAFETY: the default handling for everything else.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// The system's small icons, shared (the list doesn't own them: LVS_SHAREIMAGELISTS).
+fn system_image_list() -> isize {
+    let mut info = SHFILEINFOW::default();
+    // SAFETY: a valid struct of the size passed.
+    unsafe {
+        SHGetFileInfoW(
+            w!("file.txt"),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+        ) as isize
     }
 }
 
@@ -680,688 +1773,12 @@ fn natural(a: &str, b: &str) -> Cmp {
     }
 }
 
-// ---- egui ------------------------------------------------------------------------------------
-
-const ROW: f32 = 26.0;
-
-impl eframe::App for Browser {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // An archive dropped on the window opens in it; Ctrl+O picks one.
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
-            self.open_archive(ctx, path);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::O)) {
-            self.pick_archive(ctx);
-        }
-        let (listing, opened) = {
-            let mut inbox = self.inbox.lock().unwrap();
-            (inbox.listing.take(), std::mem::take(&mut inbox.opened))
-        };
-        match listing {
-            Some(Ok(entries)) => {
-                self.tree = Tree::build(entries);
-                self.cwd = 0;
-                self.page = Page::Ready;
-                self.refresh_rows();
-                self.cursor = self.rows.first().copied();
-            }
-            Some(Err(e @ (Error::PasswordRequired | Error::WrongPassword))) => {
-                self.ask_password(matches!(e, Error::WrongPassword), Retry::List);
-            }
-            Some(Err(e)) => self.page = Page::Failed(e.to_string()),
-            None => {}
-        }
-        for (node, result) in opened {
-            self.opening -= 1;
-            match result {
-                Ok(file) => {
-                    self.status = None;
-                    shell::open_path(&file);
-                }
-                Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
-                    self.ask_password(matches!(e, Error::WrongPassword), Retry::Open(node));
-                }
-                Err(Error::Cancelled) => {}
-                Err(e) => self.say(format!("Couldn't open {}: {e}", self.tree.nodes[node].name)),
-            }
-        }
-        if self.status.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs() > 8) && self.opening == 0 {
-            self.status = None;
-        }
-        if self.stale && matches!(self.page, Page::Ready) {
-            self.refresh_rows();
-        }
-    }
-
-    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        // For dialogs that open over this window (the folder picker).
-        if let Ok(handle) = frame.window_handle()
-            && let RawWindowHandle::Win32(w) = handle.as_raw()
-        {
-            self.hwnd = w.hwnd.get();
-        }
-        let pal = palette(ui);
-        self.update_bar(ui);
-        match &self.page {
-            Page::Home => centered(ui, pal.bg, |ui| self.home_page(ui)),
-            Page::Ready => self.browser_page(ui),
-            Page::Loading => centered(ui, pal.bg, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(20.0));
-                    ui.label(RichText::new(format!("Reading {}...", self.name)).color(pal.text));
-                });
-            }),
-            Page::Password { wrong, retry } => {
-                let (wrong, retry) = (*wrong, *retry);
-                centered(ui, pal.bg, |ui| self.password_page(ui, wrong, retry));
-            }
-            Page::Failed(message) => {
-                let message = message.clone();
-                centered(ui, pal.bg, |ui| {
-                    ui.set_max_width(460.0);
-                    ui.horizontal(|ui| {
-                        style::status_icon(ui, Icon::Error);
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("Couldn't open the archive").heading().color(pal.text));
-                            ui.add(egui::Label::new(RichText::new(&self.name).color(pal.weak)).truncate());
-                        });
-                    });
-                    ui.add_space(10.0);
-                    ui.add(egui::Label::new(RichText::new(message).color(pal.text)).wrap());
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        if style::primary_button(ui, "Open another...", true).clicked() {
-                            self.pick_archive(ui.ctx());
-                        }
-                        if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                        }
-                    });
-                });
-            }
-        }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Best effort: files still open in another app stay until the next cleanup.
-        let _ = std::fs::remove_dir_all(&self.temp);
-    }
-}
-
-/// A fixed-width block in the middle of the window.
-fn centered(ui: &mut Ui, bg: Color32, add: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(bg).inner_margin(24).show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        ui.add_space((ui.available_height() / 2.0 - 90.0).max(0.0));
-        ui.vertical_centered(|ui| {
-            ui.set_max_width(440.0);
-            ui.with_layout(Layout::top_down(Align::Min), add);
-        });
-    });
-}
-
-impl Browser {
-    fn home_page(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        ui.vertical_centered(|ui| {
-            ui.add(egui::Image::new(egui::load::SizedTexture::new(self.logo.id(), Vec2::splat(96.0))));
-            ui.add_space(10.0);
-            ui.label(RichText::new("B-Rar").heading().size(26.0).color(pal.text));
-            ui.label(RichText::new("Open an archive to look inside and extract it.").color(pal.weak));
-            ui.add_space(18.0);
-            if style::primary_button(ui, "Open archive...", true).on_hover_text("Ctrl+O").clicked() {
-                self.pick_archive(ui.ctx());
-            }
-            ui.add_space(14.0);
-            ui.label(RichText::new("Or drop an archive on this window.").small().color(pal.weak));
-            ui.label(
-                RichText::new("In File Explorer, right-click any archive for B-Rar's menu.")
-                    .small()
-                    .color(pal.weak),
-            );
-            if let Some((message, _)) = &self.status {
-                ui.add_space(10.0);
-                ui.label(RichText::new(message).color(pal.error));
-            }
-            ui.add_space(18.0);
-            ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(pal.weak));
-            if self.updatable() && ui.link(RichText::new("Check for updates").small()).clicked() {
-                self.check_for_updates(ui.ctx(), true);
-            }
-            if ui.link(RichText::new("Support B-Rar").small()).on_hover_text(SUPPORT_URL).clicked() {
-                shell::open_path(Path::new(SUPPORT_URL));
-            }
-        });
-    }
-
-    /// A bar across the top while there's something to say about updates.
-    fn update_bar(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        let (text, color) = match &*self.updates.lock().unwrap() {
-            Updates::Idle | Updates::Dismissed | Updates::Checking { manual: false } => return,
-            Updates::Checking { manual: true } => ("Checking for updates...".to_owned(), pal.text),
-            Updates::UpToDate => (format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")), pal.text),
-            Updates::Available(r) => (format!("B-Rar {} is available.", r.version), pal.text),
-            Updates::Downloading { release, done, total } => {
-                let (done, total) = (done.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
-                let percent = (done * 100).checked_div(total).unwrap_or(0);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                (format!("Downloading B-Rar {}... {percent}%", release.version), pal.text)
-            }
-            Updates::Failed(e) => (format!("Update failed: {e}"), pal.error),
-        };
-        let mut action = None;
-        egui::Panel::top("update")
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.accent.gamma_multiply(0.15))
-                    .inner_margin(egui::Margin::symmetric(16, 6)),
-            )
-            .show(ui, |ui| {
-                // One row: buttons first, from the right; the message gets what's left.
-                let row = vec2(ui.available_width(), 32.0);
-                ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
-                    {
-                        let state = self.updates.lock().unwrap();
-                        let closable = !matches!(*state, Updates::Downloading { .. } | Updates::Checking { .. });
-                        if closable && ui.button("Close").clicked() {
-                            action = Some("close");
-                        }
-                        match &*state {
-                            Updates::Available(_) => {
-                                if ui.link("What's new").clicked() {
-                                    action = Some("notes");
-                                }
-                                if style::primary_button(ui, "Update", true).clicked() {
-                                    action = Some("update");
-                                }
-                            }
-                            Updates::Failed(_) if ui.button("Try again").clicked() => action = Some("retry"),
-                            _ => {}
-                        }
-                    }
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
-                    });
-                });
-            });
-        let ctx = ui.ctx().clone();
-        match action {
-            Some("close") => *self.updates.lock().unwrap() = Updates::Dismissed,
-            Some("update") => self.start_update(&ctx),
-            Some("notes") => {
-                if let Updates::Available(r) = &*self.updates.lock().unwrap() {
-                    shell::open_path(Path::new(&r.page));
-                }
-            }
-            Some("retry") => self.check_for_updates(&ctx, true),
-            _ => {}
-        }
-    }
-
-    fn password_page(&mut self, ui: &mut Ui, wrong: bool, retry: Retry) {
-        let pal = palette(ui);
-        ui.horizontal(|ui| {
-            style::status_icon(ui, Icon::Lock);
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Password required").heading().color(pal.text));
-                ui.add(egui::Label::new(RichText::new(format!("{} is encrypted", self.name)).color(pal.weak)).truncate());
-            });
-        });
-        ui.add_space(14.0);
-        let mut submit = false;
-        ui.horizontal(|ui| {
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.password_input)
-                    .password(!self.show_password)
-                    .hint_text("Enter password")
-                    .margin(vec2(8.0, 6.0))
-                    .desired_width(ui.available_width() - 72.0),
-            );
-            if std::mem::take(&mut self.focus_password) {
-                field.request_focus();
-            }
-            submit |= field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let toggle = if self.show_password { "Hide" } else { "Show" };
-            if ui.add(egui::Button::new(toggle).min_size(vec2(64.0, 30.0))).clicked() {
-                self.show_password = !self.show_password;
-            }
-        });
-        if wrong {
-            ui.label(RichText::new("That password is incorrect. Try again.").color(pal.error));
-        }
-        ui.add_space(14.0);
-        let mut cancel = false;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            submit |= style::primary_button(ui, "OK", !self.password_input.is_empty()).clicked();
-            cancel = style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
-        });
-        if cancel {
-            match retry {
-                Retry::List => ui.ctx().send_viewport_cmd(ViewportCommand::Close),
-                Retry::Open(_) => self.page = Page::Ready,
-            }
-        } else if submit && !self.password_input.is_empty() {
-            self.password = Some(std::mem::take(&mut self.password_input));
-            match retry {
-                Retry::List => self.list(ui.ctx()),
-                Retry::Open(node) => {
-                    self.page = Page::Ready;
-                    self.open(ui.ctx(), node);
-                }
-            }
-        }
-    }
-
-    fn browser_page(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        let mut action = None;
-        self.keyboard(ui, &mut action);
-
-        egui::Panel::top("toolbar")
-            .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin {
-                left: 14,
-                right: 14,
-                top: 12,
-                bottom: 8,
-            }))
-            .show_separator_line(true)
-            .show(ui, |ui| self.toolbar(ui, &mut action));
-        egui::Panel::bottom("status")
-            .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::symmetric(14, 6)))
-            .show_separator_line(true)
-            .show(ui, |ui| self.status_bar(ui));
-        // The list is part of the window, as in File Explorer: same background, edge to edge.
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            egui::Frame::new()
-                .fill(pal.bg)
-                .inner_margin(egui::Margin {
-                    left: 6,
-                    right: 6,
-                    top: 2,
-                    bottom: 0,
-                })
-                .show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    self.table(ui, &mut action);
-                });
-        });
-
-        if let Some(action) = action {
-            self.run(ui.ctx(), action);
-        }
-    }
-
-    fn keyboard(&mut self, ui: &mut Ui, action: &mut Option<Action>) {
-        let typing = ui.ctx().egui_wants_keyboard_input();
-        ui.input_mut(|i| {
-            if i.consume_key(egui::Modifiers::COMMAND, Key::F) {
-                self.focus_search = true;
-            }
-            if i.pointer.button_pressed(PointerButton::Extra1) || i.consume_key(egui::Modifiers::ALT, Key::ArrowUp) {
-                *action = Some(Action::Up);
-            }
-            if typing {
-                return;
-            }
-            let shift = i.modifiers.shift;
-            if i.consume_key(egui::Modifiers::COMMAND, Key::A) {
-                self.selected = self.rows.iter().copied().collect();
-            }
-            if i.key_pressed(Key::ArrowDown) {
-                self.move_cursor(1, shift);
-            }
-            if i.key_pressed(Key::ArrowUp) {
-                self.move_cursor(-1, shift);
-            }
-            if i.key_pressed(Key::PageDown) {
-                self.move_cursor(15, shift);
-            }
-            if i.key_pressed(Key::PageUp) {
-                self.move_cursor(-15, shift);
-            }
-            if i.key_pressed(Key::Home) {
-                self.move_cursor(isize::MIN, shift);
-            }
-            if i.key_pressed(Key::End) {
-                self.move_cursor(isize::MAX, shift);
-            }
-            if i.key_pressed(Key::Enter)
-                && let Some(c) = self.cursor
-            {
-                *action = Some(Action::Open(c));
-            }
-            if i.key_pressed(Key::Backspace) {
-                *action = Some(Action::Up);
-            }
-            if i.key_pressed(Key::Escape) {
-                if !self.search.is_empty() {
-                    self.search.clear();
-                    self.stale = true;
-                } else {
-                    self.selected.clear();
-                }
-            }
-        });
-    }
-
-    fn toolbar(&mut self, ui: &mut Ui, action: &mut Option<Action>) {
-        let pal = palette(ui);
-        ui.horizontal(|ui| {
-            ui.add(egui::Image::new(egui::load::SizedTexture::new(self.logo.id(), Vec2::splat(28.0))));
-            ui.add_space(2.0);
-            let count = self.selected.len();
-            let what = if count > 0 { format!("{count} selected") } else { "all".to_owned() };
-            let pick = style::primary_button(ui, "Extract to...", true);
-            if pick.on_hover_text(format!("Pick a folder, then extract {what}")).clicked() {
-                *action = Some(Action::Extract(None));
-            }
-            if style::button(ui, "Test")
-                .on_hover_text("Check every file in the archive for errors")
-                .clicked()
-            {
-                *action = Some(Action::Test);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Search this folder")
-                        .margin(vec2(8.0, 6.0))
-                        .desired_width(220.0_f32.min(ui.available_width() - 8.0)),
-                );
-                if std::mem::take(&mut self.focus_search) {
-                    field.request_focus();
-                }
-                if field.changed() {
-                    self.stale = true;
-                }
-            });
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let up = ui.add_enabled(self.cwd != 0, egui::Button::new("Up").min_size(vec2(48.0, 26.0)));
-            if up.on_hover_text("Parent folder (Backspace)").clicked() {
-                *action = Some(Action::Up);
-            }
-            ui.add_space(4.0);
-            // Breadcrumb: archive > folder > folder.
-            let mut chain = vec![self.cwd];
-            while let Some(&n) = chain.last().filter(|&&n| n != 0) {
-                chain.push(self.tree.nodes[n].parent);
-            }
-            chain.reverse();
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (k, &n) in chain.iter().enumerate() {
-                if k > 0 {
-                    ui.label(RichText::new("›").color(pal.weak));
-                }
-                let label = if n == 0 { self.name.clone() } else { self.tree.nodes[n].name.clone() };
-                let last = k + 1 == chain.len();
-                let text = RichText::new(label).color(if last { pal.text } else { pal.weak });
-                let text = if last { text.family(semibold()) } else { text };
-                if ui.add(egui::Button::new(text).frame(false)).clicked() && !last {
-                    *action = Some(Action::Enter(n));
-                }
-            }
-        });
-    }
-
-    fn status_bar(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        ui.horizontal(|ui| {
-            let t = &self.tree;
-            let summary = if self.selected.is_empty() {
-                let (dirs, files) = self
-                    .rows
-                    .iter()
-                    .fold((0, 0), |(d, f), &n| if t.nodes[n].is_dir { (d + 1, f) } else { (d, f + 1) });
-                let size: u64 = self.rows.iter().map(|&n| t.nodes[n].size).sum();
-                format!("{} · {} · {}", plural(dirs, "folder"), plural(files, "file"), human(size))
-            } else {
-                let size: u64 = self.selected.iter().map(|&n| t.nodes[n].size).sum();
-                format!("{} selected · {}", self.selected.len(), human(size))
-            };
-            ui.label(RichText::new(summary).color(pal.weak));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let total = &t.nodes[0];
-                ui.label(RichText::new(format!("{} in archive · {}", plural(total.files as usize, "file"), human(total.size))).color(pal.weak));
-                if let Some((message, _)) = &self.status {
-                    ui.add_space(16.0);
-                    ui.add(egui::Label::new(RichText::new(message).color(pal.text)).truncate());
-                    if self.opening > 0 {
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
-                }
-            });
-        });
-    }
-
-    fn table(&mut self, ui: &mut Ui, action: &mut Option<Action>) {
-        let pal = palette(ui);
-        let cols = |left: f32, width: f32| {
-            let (size, packed, modified) = (92.0, 92.0, 150.0);
-            let name = (width - size - packed - modified - 24.0).max(120.0);
-            let mut x = left + 12.0;
-            let mut next = |w: f32| {
-                let r = (x, w);
-                x += w;
-                r
-            };
-            [
-                (Column::Name, next(name)),
-                (Column::Size, next(size)),
-                (Column::Packed, next(packed)),
-                (Column::Modified, next(modified)),
-            ]
-        };
-
-        // Header.
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
-        for (column, (x, w)) in cols(head.left(), head.width()) {
-            let rect = Rect::from_min_size(pos2(x, head.top()), vec2(w, ROW));
-            let response = ui.interact(rect, ui.scope_id().with(("head", column as u8)), Sense::click());
-            let label = match column {
-                Column::Name => "Name",
-                Column::Size => "Size",
-                Column::Packed => "Packed",
-                Column::Modified => "Modified",
-            };
-            let color = if response.hovered() { pal.text } else { pal.weak };
-            let right = column != Column::Name && column != Column::Modified;
-            let painter = ui.painter_at(rect);
-            let text_rect = if right {
-                painter.text(
-                    pos2(rect.right() - 10.0, rect.center().y),
-                    Align2::RIGHT_CENTER,
-                    label,
-                    FontId::new(13.0, semibold()),
-                    color,
-                )
-            } else {
-                painter.text(
-                    pos2(rect.left() + 6.0, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::new(13.0, semibold()),
-                    color,
-                )
-            };
-            if self.sort.0 == column {
-                let ax = if right { text_rect.left() - 9.0 } else { text_rect.right() + 9.0 };
-                let (cy, s) = (rect.center().y, 3.5);
-                let tri = if self.sort.1 {
-                    vec![pos2(ax - s, cy + s * 0.6), pos2(ax + s, cy + s * 0.6), pos2(ax, cy - s * 0.6)]
-                } else {
-                    vec![pos2(ax - s, cy - s * 0.6), pos2(ax + s, cy - s * 0.6), pos2(ax, cy + s * 0.6)]
-                };
-                painter.add(Shape::convex_polygon(tri, pal.weak, Stroke::NONE));
-            }
-            if response.clicked() {
-                self.sort = if self.sort.0 == column {
-                    (column, !self.sort.1)
-                } else {
-                    (column, column == Column::Name)
-                };
-                self.stale = true;
-            }
-        }
-        let line_y = head.bottom();
-        ui.painter().hline(
-            head.x_range().shrink(8.0),
-            line_y,
-            Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
-        );
-
-        if self.rows.is_empty() {
-            let message = if self.search.trim().is_empty() {
-                "This folder is empty"
-            } else {
-                "No matches"
-            };
-            ui.add_space(30.0);
-            ui.vertical_centered(|ui| ui.label(RichText::new(message).color(pal.weak)));
-            return;
-        }
-
-        let reveal = std::mem::take(&mut self.reveal_cursor)
-            .then(|| self.cursor.and_then(|c| self.row_of(c)))
-            .flatten();
-        let searching = !self.search.trim().is_empty();
-        egui::ScrollArea::vertical().auto_shrink(false).show_viewport(ui, |ui, viewport| {
-            let total = self.rows.len();
-            let origin = ui.max_rect().min;
-            let width = ui.available_width();
-            ui.set_min_height(ROW * total as f32);
-            // Under the rows, so the rows win; clicking empty space clears the selection.
-            let background = ui.interact(ui.max_rect(), ui.scope_id().with("rows-bg"), Sense::click());
-            if background.clicked() {
-                self.selected.clear();
-            }
-            if let Some(r) = reveal {
-                let rect = Rect::from_min_size(pos2(origin.x, origin.y + r as f32 * ROW), vec2(width, ROW));
-                ui.scroll_to_rect(rect, None);
-            }
-            let first = (viewport.min.y / ROW).floor().max(0.0) as usize;
-            let last = ((viewport.max.y / ROW).ceil() as usize + 1).min(total);
-            for r in first..last {
-                let node = self.rows[r];
-                let rect = Rect::from_min_size(pos2(origin.x, origin.y + r as f32 * ROW), vec2(width, ROW));
-                let response = ui.interact(rect, ui.scope_id().with(("row", node)), Sense::click());
-                self.row(ui, rect, node, &response, searching, &cols);
-                let mods = ui.input(|i| i.modifiers);
-                if response.clicked() {
-                    self.click(node, mods.command, mods.shift);
-                }
-                if response.double_clicked() {
-                    *action = Some(Action::Open(node));
-                }
-                if response.secondary_clicked() && !self.selected.contains(&node) {
-                    self.click(node, false, false);
-                }
-                response.context_menu(|ui| self.row_menu(ui, node, action));
-            }
-        });
-    }
-
-    fn row(&self, ui: &Ui, rect: Rect, node: usize, response: &Response, searching: bool, cols: &dyn Fn(f32, f32) -> [(Column, (f32, f32)); 4]) {
-        let pal = palette(ui);
-        let n = &self.tree.nodes[node];
-        let painter = ui.painter_at(rect);
-        let inner = rect.shrink2(vec2(6.0, 1.0));
-        if self.selected.contains(&node) {
-            painter.rect_filled(inner, CornerRadius::same(4), pal.accent.gamma_multiply(0.22));
-        } else if response.hovered() {
-            painter.rect_filled(inner, CornerRadius::same(4), pal.track.gamma_multiply(0.5));
-        }
-        // In a multi-selection, outline the row the arrow keys move from.
-        if self.cursor == Some(node) && self.selected.len() > 1 {
-            painter.rect_stroke(
-                inner,
-                CornerRadius::same(4),
-                Stroke::new(1.0, pal.accent.gamma_multiply(0.6)),
-                StrokeKind::Inside,
-            );
-        }
-        let font = FontId::proportional(13.5);
-        let cy = rect.center().y;
-        for (column, (x, w)) in cols(rect.left(), rect.width()) {
-            let cell = Rect::from_min_max(pos2(x, rect.top()), pos2(x + w, rect.bottom()));
-            let p = painter.with_clip_rect(cell.shrink2(vec2(2.0, 0.0)).intersect(rect));
-            match column {
-                Column::Name => {
-                    icon(&p, pos2(x + 8.0, cy), n.is_dir, &pal);
-                    let label = if searching {
-                        relative(&n.path, &self.tree.nodes[self.cwd].path)
-                    } else {
-                        n.name.as_str()
-                    };
-                    p.text(pos2(x + 30.0, cy), Align2::LEFT_CENTER, label, font.clone(), pal.text);
-                }
-                Column::Size => {
-                    p.text(pos2(cell.right() - 10.0, cy), Align2::RIGHT_CENTER, human(n.size), font.clone(), pal.text);
-                }
-                Column::Packed => {
-                    let packed = n.packed.map(human).unwrap_or_default();
-                    p.text(pos2(cell.right() - 10.0, cy), Align2::RIGHT_CENTER, packed, font.clone(), pal.weak);
-                }
-                Column::Modified => {
-                    let when = n.modified.and_then(short_time).unwrap_or_default();
-                    p.text(pos2(x + 6.0, cy), Align2::LEFT_CENTER, when, font.clone(), pal.weak);
-                }
-            }
-        }
-    }
-
-    fn row_menu(&self, ui: &mut Ui, node: usize, action: &mut Option<Action>) {
-        let is_dir = self.tree.nodes[node].is_dir;
-        if ui.button(if is_dir { "Open folder" } else { "Open" }).clicked() {
-            *action = Some(Action::Open(node));
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("Extract to...").clicked() {
-            *action = Some(Action::Extract(None));
-            ui.close();
-        }
-    }
-}
-
 /// `path` relative to the folder being browsed (search results can be deeper).
 fn relative<'a>(path: &'a str, folder: &str) -> &'a str {
     if folder.is_empty() {
         return path;
     }
     path.strip_prefix(folder).and_then(|r| r.strip_prefix('/')).unwrap_or(path)
-}
-
-/// A 16 px folder or page glyph centred vertically at `at` (left edge).
-fn icon(p: &egui::Painter, at: Pos2, is_dir: bool, pal: &style::Palette) {
-    let top = at.y - 7.0;
-    if is_dir {
-        let folder = Color32::from_rgb(240, 186, 64);
-        let tab = Rect::from_min_size(pos2(at.x, top), vec2(7.0, 4.0));
-        let body = Rect::from_min_size(pos2(at.x, top + 2.0), vec2(16.0, 12.0));
-        p.rect_filled(tab, CornerRadius::same(1), folder.gamma_multiply(0.85));
-        p.rect_filled(body, CornerRadius::same(2), folder);
-    } else {
-        let page = Rect::from_min_size(pos2(at.x + 2.0, top), vec2(12.0, 15.0));
-        p.rect_filled(page, CornerRadius::same(2), pal.track);
-        p.rect_stroke(
-            page,
-            CornerRadius::same(2),
-            Stroke::new(1.0, pal.weak.gamma_multiply(0.7)),
-            StrokeKind::Inside,
-        );
-        for k in 0..3 {
-            let y = top + 5.0 + k as f32 * 3.0;
-            p.hline(
-                egui::Rangef::new(page.left() + 3.0, page.right() - 3.0),
-                y,
-                Stroke::new(1.0, pal.weak.gamma_multiply(0.6)),
-            );
-        }
-    }
 }
 
 fn plural(n: usize, what: &str) -> String {

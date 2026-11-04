@@ -1,63 +1,106 @@
 //! The B-Rar window: progress, "file already exists", password and result pages, talking to
 //! the extraction (or the archive being created) running on a worker thread; and the "Add to
-//! archive" page that comes before creating one.
+//! archive" page that comes before creating one. Standard Windows controls; a timer polls the
+//! worker ten times a second.
 
 use std::{
+    cell::{Cell, RefCell},
     collections::VecDeque,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
 use brar_core::{Conflict, ConflictPolicy, CreateOptions, Decision, Error, Options, PartFinder, Progress, Resolution, Summary};
-use eframe::egui::{self, Align, Key, Layout, RichText, TextureHandle, Ui, Vec2, ViewportCommand, vec2};
+use windows::{
+    Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::{
+            Shell::{SIID_ERROR, SIID_INFO, SIID_KEY, SIID_WARNING},
+            WindowsAndMessaging::*,
+        },
+    },
+    core::w,
+};
 
 use crate::{
     Mode, shell,
-    style::{self, Icon, palette, semibold},
+    win::{self, Builder, Fonts, IDCANCEL, IDOK, Role},
 };
 
-pub const LOGO_PNG: &[u8] = include_bytes!("../../../assets/brar-256.png");
+const ID_PROGRESS: i32 = 100;
+const ID_AMOUNT: i32 = 101;
+const ID_STATUS: i32 = 102;
+const ID_STATS: i32 = 103;
+const ID_FILES: i32 = 104;
+const ID_CURRENT: i32 = 105;
+const ID_PAUSE: i32 = 106;
+const ID_SKIP: i32 = 107;
+const ID_RENAME: i32 = 108;
+const ID_ALL: i32 = 109;
+const ID_PASSWORD: i32 = 110;
+const ID_SHOW: i32 = 111;
+const ID_PATH: i32 = 120;
+const ID_LEVEL: i32 = 121; // ..= 124, one per LEVELS entry
+const ID_ENCRYPT: i32 = 125;
+const ID_PW1: i32 = 126;
+const ID_PW2: i32 = 127;
+const ID_PROBLEM: i32 = 128;
+const TIMER: usize = 1;
+
+/// Page margins, at 100% scaling.
+const MARGIN_X: i32 = 24;
+const MARGIN_Y: i32 = 20;
 
 pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("B-Rar")
-        .with_inner_size(vec2(Page::Running.width(), 220.0))
-        .with_resizable(false)
-        .with_maximize_button(false);
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(LOGO_PNG) {
-        viewport = viewport.with_icon(Arc::new(icon));
-    }
-    let options = eframe::NativeOptions {
-        viewport,
-        centered: true,
-        ..Default::default()
+    win::init_controls();
+    win::register(w!("BRarProgress"), Some(wndproc));
+    // SAFETY: a registered class; the window's state lives in APP until WM_DESTROY.
+    let hwnd = unsafe {
+        let instance = GetModuleHandleW(None).unwrap_or_default();
+        CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            w!("BRarProgress"),
+            w!("B-Rar"),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            0,
+            0,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
     };
-    let succeeded = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&succeeded);
-    let result = eframe::run_native(
-        "B-Rar",
-        options,
-        Box::new(move |cc| {
-            style::install(&cc.egui_ctx);
-            Ok(Box::new(App::new(&cc.egui_ctx, archive, mode, flag, password)))
-        }),
-    );
-    if let Err(e) = result {
-        shell::error_box("B-Rar", &format!("Could not open the B-Rar window: {e}"));
+    let Ok(hwnd) = hwnd else {
+        shell::error_box("B-Rar", "Could not open the B-Rar window.");
         return ExitCode::FAILURE;
+    };
+    let app = App::new(hwnd, archive, mode);
+    APP.with(|a| *a.borrow_mut() = Some(app));
+    with(|a| a.begin(password));
+    // SAFETY: the window just created.
+    unsafe {
+        SetTimer(Some(hwnd), TIMER, 100, None);
+        let _ = ShowWindow(hwnd, SW_SHOW);
     }
-    if succeeded.load(Ordering::Relaxed) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    win::run_loop(hwnd, |_| false);
+    if SUCCEEDED.get() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+thread_local! {
+    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    static SUCCEEDED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` on the window's state, unless it's already in use further up the stack (a dialog
+/// opened from a button pumps messages while the click is still being handled).
+fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|app| app.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
 /// State shared with the worker thread.
@@ -94,12 +137,12 @@ enum Page {
 }
 
 impl Page {
-    /// Window width; the height follows the content.
-    fn width(&self) -> f32 {
+    /// The page's width (without margins), at 100% scaling; the height follows the content.
+    fn width(&self) -> i32 {
         match self {
-            Page::Conflict(_) | Page::Add => 540.0,
-            Page::Password { .. } => 480.0,
-            Page::Running | Page::Done { .. } | Page::Failed(_) => 520.0,
+            Page::Conflict(_) | Page::Add => 492,
+            Page::Password { .. } => 432,
+            Page::Running | Page::Done { .. } | Page::Failed(_) => 472,
         }
     }
 }
@@ -183,81 +226,56 @@ impl Clock {
 }
 
 struct App {
+    hwnd: HWND,
     archive: PathBuf,
     name: String,
     mode: Mode,
-    logo: TextureHandle,
+    fonts: Fonts,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
-    succeeded: Arc<AtomicBool>,
     page: Page,
-    shown_size: Vec2,
+    /// The current page's controls.
+    built: win::Page,
     clock: Clock,
-    title: String,
-    password: String,
-    show_password: bool,
-    focus_password: bool,
-    apply_to_all: bool,
-    /// The "Add to archive" page's fields.
-    add: AddForm,
     /// The password the job last ran with, to run it again into another folder.
     last_password: Option<String>,
     /// Failed on a folder only administrators can write to (the Store version can't ask):
     /// the failure page offers another folder.
     protected: bool,
+    /// Placed on the screen yet (the first page centres the window; later ones keep its centre).
+    placed: bool,
 }
 
 /// Compression levels the "Add to archive" page offers: name, Deflate level.
 const LEVELS: [(&str, u32); 4] = [("Store", 0), ("Fastest", 1), ("Normal", 6), ("Best", 9)];
 
-#[derive(Default)]
-struct AddForm {
-    path: String,
-    level: u32,
-    encrypt: bool,
-    password: String,
-    confirm: String,
-    focus: bool,
-}
-
 impl App {
-    fn new(ctx: &egui::Context, archive: PathBuf, mode: Mode, succeeded: Arc<AtomicBool>, password: Option<String>) -> Self {
-        let logo = eframe::icon_data::from_png_bytes(LOGO_PNG)
-            .map(|i| egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba))
-            .unwrap_or_default();
-        let mut app = Self {
+    fn new(hwnd: HWND, archive: PathBuf, mode: Mode) -> Self {
+        Self {
+            hwnd,
             name: archive.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             archive,
             mode,
-            logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
+            fonts: Fonts::new(),
             shared: Arc::default(),
             worker: None,
-            succeeded,
             page: Page::Running,
-            shown_size: Vec2::ZERO,
+            built: win::Page::default(),
             clock: Clock::new(),
-            title: String::new(),
-            password: String::new(),
-            show_password: false,
-            focus_password: false,
-            apply_to_all: false,
-            add: AddForm::default(),
             last_password: None,
             protected: false,
-        };
-        match &app.mode {
-            Mode::Create { ask: true, level, .. } => {
-                app.add = AddForm {
-                    path: app.archive.display().to_string(),
-                    level: *level,
-                    focus: true,
-                    ..Default::default()
-                };
-                app.page = Page::Add;
-            }
-            _ => app.start(ctx, password),
+            placed: false,
         }
-        app
+    }
+
+    /// The first page: "Add to archive", or straight to work.
+    fn begin(&mut self, password: Option<String>) {
+        if matches!(self.mode, Mode::Create { ask: true, .. }) {
+            self.page = Page::Add;
+            self.show();
+        } else {
+            self.start(password);
+        }
     }
 
     fn dest(&self) -> Option<&Path> {
@@ -275,17 +293,25 @@ impl App {
         Arc::clone(&self.shared.progress.lock().unwrap())
     }
 
+    fn close(&self) {
+        // SAFETY: posting to this window.
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+
     /// (Re)starts the job, e.g. after the user typed a password.
-    fn start(&mut self, ctx: &egui::Context, password: Option<String>) {
+    fn start(&mut self, password: Option<String>) {
         self.last_password = password.clone();
         self.protected = false;
         let progress = Arc::new(Progress::default());
         *self.shared.progress.lock().unwrap() = Arc::clone(&progress);
         self.clock = Clock::new();
         self.page = Page::Running;
+        self.show();
 
         let ask = {
-            let (shared, ctx) = (Arc::clone(&self.shared), ctx.clone());
+            let shared = Arc::clone(&self.shared);
             move |c: &Conflict<'_>| {
                 let (reply, answer) = mpsc::channel();
                 let old = std::fs::metadata(c.path).ok();
@@ -297,7 +323,6 @@ impl App {
                     old_modified: old.and_then(|m| m.modified().ok()),
                     reply,
                 });
-                ctx.request_repaint();
                 answer.recv().unwrap_or(Decision {
                     resolution: Resolution::Cancel,
                     apply_to_all: false,
@@ -315,7 +340,7 @@ impl App {
             },
             ..Options::default()
         };
-        let (shared, ctx, archive, mode) = (Arc::clone(&self.shared), ctx.clone(), self.archive.clone(), self.mode.clone());
+        let (shared, archive, mode) = (Arc::clone(&self.shared), self.archive.clone(), self.mode.clone());
         self.worker = Some(std::thread::spawn(move || {
             let result = match &mode {
                 Mode::Extract { dest, .. } => brar_core::extract(&archive, dest, &opts),
@@ -338,17 +363,18 @@ impl App {
                 }
             };
             *shared.outcome.lock().unwrap() = Some(result);
-            ctx.request_repaint();
         }));
     }
 
     fn answer(&mut self, resolution: Resolution) {
+        let all = win::checked(win::item(self.hwnd, ID_ALL));
         if let Page::Conflict(ask) = std::mem::replace(&mut self.page, Page::Running) {
             let _ = ask.reply.send(Decision {
                 resolution,
-                apply_to_all: self.apply_to_all,
+                apply_to_all: all,
             });
         }
+        self.show();
     }
 
     /// Stops the worker (answering any open question with Cancel) and waits for it.
@@ -360,478 +386,244 @@ impl App {
                 apply_to_all: true,
             });
         }
-        if let Page::Conflict(_) = self.page {
-            self.answer(Resolution::Cancel);
+        if let Page::Conflict(ask) = std::mem::replace(&mut self.page, Page::Running) {
+            let _ = ask.reply.send(Decision {
+                resolution: Resolution::Cancel,
+                apply_to_all: true,
+            });
         }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 
-    fn set_title(&mut self, ctx: &egui::Context, title: String) {
-        if title != self.title {
-            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
-            self.title = title;
-        }
-    }
-}
-
-impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(outcome) = self.shared.outcome.lock().unwrap().take() {
+    /// Ten times a second: the worker's outcome or question, and the progress page's numbers.
+    fn tick(&mut self) {
+        let outcome = self.shared.outcome.lock().unwrap().take();
+        if let Some(outcome) = outcome {
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();
             }
-            self.page = match outcome {
-                Ok(summary) => {
-                    self.succeeded.store(true, Ordering::Relaxed);
-                    Page::Done {
-                        summary,
-                        secs: self.clock.active().as_secs_f64(),
-                    }
-                }
-                Err(Error::Cancelled) => {
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
-                    Page::Running
-                }
-                Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
-                    self.password.clear();
-                    self.focus_password = true;
-                    Page::Password {
-                        wrong: matches!(e, Error::WrongPassword),
-                    }
-                }
-                // Denied partway (one protected subfolder, say): the same hand-over to an
-                // elevated copy as main.rs does up front.
-                Err(e)
-                    if e.is_access_denied()
-                        && !shell::is_elevated()
-                        && !crate::can_elevate()
-                        && let Some(dest) = self.dest() =>
-                {
-                    let message = crate::protected_folder(dest);
-                    self.protected = true;
-                    Page::Failed(message)
-                }
-                Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => match crate::elevate(&self.archive, &self.mode) {
-                    Ok(true) => {
-                        self.succeeded.store(true, Ordering::Relaxed);
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
-                        Page::Running
-                    }
-                    Ok(false) => Page::Failed(crate::declined(self.dest().unwrap_or(Path::new("")))),
-                    Err(message) => Page::Failed(message),
-                },
-                Err(e) => Page::Failed(e.to_string()),
-            };
+            self.finish(outcome);
+            return;
         }
-        if matches!(self.page, Page::Running)
-            && let Some(ask) = self.shared.conflict.lock().unwrap().take()
-        {
-            self.apply_to_all = false;
-            self.page = Page::Conflict(ask);
-        }
-
-        let title = match &self.page {
-            Page::Add => "Add to archive - B-Rar".into(),
-            Page::Running => {
-                let p = self.progress();
-                if !p.is_paused() {
-                    self.clock.sample(p.done_bytes());
-                }
-                ctx.request_repaint_after(Duration::from_millis(100));
-                match p.total_bytes() {
-                    0 => format!("{} - B-Rar", self.name),
-                    total => format!("{:.0}% - {} - B-Rar", percent(p.done_bytes(), total), self.name),
-                }
-            }
-            Page::Conflict(_) => "File already exists - B-Rar".into(),
-            Page::Password { .. } => "Password - B-Rar".into(),
-            Page::Done { .. } => "Done - B-Rar".into(),
-            Page::Failed(_) => "Error - B-Rar".into(),
+        let ask = if matches!(self.page, Page::Running) {
+            self.shared.conflict.lock().unwrap().take()
+        } else {
+            None
         };
-        self.set_title(ctx, title);
-
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.shutdown();
+        if let Some(ask) = ask {
+            self.page = Page::Conflict(ask);
+            self.show();
+            return;
+        }
+        if matches!(self.page, Page::Running) {
+            self.update_running();
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let pal = palette(ui);
-        // The page lays out at its natural height; the window then takes that height, so text
-        // scaling or a long message never cuts off the buttons.
-        ui.painter().rect_filled(ui.max_rect(), 0.0, pal.bg);
-        let shown = egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
-            ui.set_width(self.page.width() - 48.0);
-            match &self.page {
-                Page::Add => self.add_page(ui),
-                Page::Running => self.running_page(ui),
-                Page::Conflict(_) => self.conflict_page(ui),
-                Page::Password { wrong } => {
-                    let wrong = *wrong;
-                    self.password_page(ui, wrong);
-                }
-                Page::Done { summary, secs } => {
-                    let (summary, secs) = (*summary, *secs);
-                    self.done_page(ui, summary, secs);
-                }
-                Page::Failed(message) => {
-                    let message = message.clone();
-                    self.failed_page(ui, &message);
+    fn finish(&mut self, outcome: brar_core::Result<Summary>) {
+        self.page = match outcome {
+            Ok(summary) => {
+                SUCCEEDED.set(true);
+                Page::Done {
+                    summary,
+                    secs: self.clock.active().as_secs_f64(),
                 }
             }
-        });
-        let size = vec2(self.page.width(), shown.response.rect.height().ceil());
-        if (size - self.shown_size).length() > 0.5 {
-            self.shown_size = size;
-            ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(size));
+            Err(Error::Cancelled) => return self.close(),
+            Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => Page::Password {
+                wrong: matches!(e, Error::WrongPassword),
+            },
+            // Denied partway (one protected subfolder, say): the Store version can't ask for
+            // administrator rights, so it says how to get them.
+            Err(e)
+                if e.is_access_denied()
+                    && !shell::is_elevated()
+                    && !crate::can_elevate()
+                    && let Some(dest) = self.dest() =>
+            {
+                let message = crate::protected_folder(dest);
+                self.protected = true;
+                Page::Failed(message)
+            }
+            // Otherwise the same hand-over to an elevated copy as main.rs does up front.
+            Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => match crate::elevate(&self.archive, &self.mode) {
+                Ok(true) => {
+                    SUCCEEDED.set(true);
+                    return self.close();
+                }
+                Ok(false) => Page::Failed(crate::declined(self.dest().unwrap_or(Path::new("")))),
+                Err(message) => Page::Failed(message),
+            },
+            Err(e) => Page::Failed(e.to_string()),
+        };
+        self.show();
+    }
+
+    // ---- pages -------------------------------------------------------------------------------
+
+    /// Replaces the window's controls with the current page's, and fits the window to it.
+    fn show(&mut self) {
+        self.built.clear();
+        let mut b = Builder::new(self.hwnd, &self.fonts, self.page.width());
+        let title = match &self.page {
+            Page::Add => self.add_page(&mut b),
+            Page::Running => self.running_page(&mut b),
+            Page::Conflict(ask) => conflict_page(&mut b, ask),
+            Page::Password { wrong } => password_page(&mut b, &self.name, *wrong),
+            Page::Done { summary, secs } => self.done_page(&mut b, *summary, *secs),
+            Page::Failed(message) => self.failed_page(&mut b, message),
+        };
+        let (mx, my) = (b.px(MARGIN_X), b.px(MARGIN_Y));
+        self.built = b.finish();
+        self.built.place(mx, my);
+        win::fit_client(self.hwnd, self.built.width + 2 * mx, self.built.height + 2 * my, !self.placed);
+        self.placed = true;
+        win::set_title(self.hwnd, &title);
+        // The field to type in, or the main button.
+        let focus = [ID_PASSWORD, ID_PATH, IDOK.0, ID_PAUSE]
+            .into_iter()
+            .map(|id| win::item(self.hwnd, id))
+            .find(|h| !h.is_invalid());
+        if let Some(h) = focus {
+            win::focus(h);
+        }
+        if matches!(self.page, Page::Add) {
+            let path = win::item(self.hwnd, ID_PATH);
+            let len = win::text(path).encode_utf16().count();
+            win::send(path, win::EM_SETSEL, len, len as isize);
+            self.validate();
+        }
+        if matches!(self.page, Page::Running) {
+            self.update_running();
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.shutdown();
-    }
-}
-
-// ---- pages ---------------------------------------------------------------------------------
-
-impl App {
-    fn running_page(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        let p = self.progress();
+    fn running_page(&self, b: &mut Builder) -> String {
         let (title, subtitle) = match (self.dest(), self.creating()) {
             (Some(dest), _) => (format!("Extracting {}", self.name), format!("to {}", dest.display())),
             (None, true) => (format!("Compressing to {}", self.name), format!("in {}", folder(&self.archive))),
             (None, false) => (format!("Testing {}", self.name), "Checking every file for errors".to_owned()),
         };
-        header(ui, |ui| logo(ui, &self.logo), &title, &subtitle);
-        ui.add_space(18.0);
+        b.header(win::app_icon(b.px(40)), &title, &subtitle);
+        b.space(18);
+        b.progress(ID_PROGRESS, false);
+        b.space(8);
+        let (_, status) = b.pair(ID_AMOUNT, ID_STATUS, Role::Normal, self.fonts.normal);
+        win::send(status, WM_SETFONT, self.fonts.bold.0 as usize, 1);
+        b.pair(ID_STATS, ID_FILES, Role::Weak, self.fonts.normal);
+        b.label(ID_CURRENT, "", Role::Weak, false);
+        b.space(16);
+        b.buttons(&[(ID_PAUSE, "Pause"), (IDCANCEL.0, "Cancel")]);
+        format!("{} - B-Rar", self.name)
+    }
 
+    /// The progress page's numbers, from the worker's counters.
+    fn update_running(&mut self) {
+        let p = self.progress();
         let (total, done) = (p.total_bytes(), p.done_bytes());
         let paused = p.is_paused();
-        let fraction = (total > 0).then(|| (done.min(total) as f64 / total as f64) as f32);
-        style::progress_bar(ui, fraction, if paused { pal.paused } else { pal.accent });
-        ui.add_space(8.0);
+        if !paused {
+            self.clock.sample(done);
+        }
+        let item = |id| win::item(self.hwnd, id);
+        let bar = item(ID_PROGRESS);
+        let fraction = if total > 0 { done.min(total) as f64 / total as f64 } else { 0.0 };
+        win::send(bar, win::PBM_SETPOS, (fraction * 10_000.0) as usize, 0);
+        win::send(bar, win::PBM_SETSTATE, if paused { win::PBST_PAUSED } else { win::PBST_NORMAL }, 0);
 
+        let amount = if total > 0 {
+            format!("{} of {}", human(done), human(total))
+        } else {
+            human(done)
+        };
+        win::set_text(item(ID_AMOUNT), &amount);
+        let status = if paused {
+            "Paused".to_owned()
+        } else if total > 0 {
+            format!("{:.0}%", percent(done, total))
+        } else {
+            String::new()
+        };
+        win::set_text(item(ID_STATUS), &status);
         let elapsed = self.clock.active();
         let rate = if paused { 0.0 } else { self.clock.rate() };
-        ui.horizontal(|ui| {
-            let amount = if total > 0 {
-                format!("{} of {}", human(done), human(total))
-            } else {
-                human(done)
-            };
-            ui.label(RichText::new(amount).color(pal.text));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let status = if paused {
-                    "Paused".to_owned()
-                } else if total > 0 {
-                    format!("{:.0}%", percent(done, total))
-                } else {
-                    String::new()
-                };
-                ui.label(RichText::new(status).family(semibold()).color(pal.text));
-            });
-        });
-        ui.horizontal(|ui| {
-            let mut stats = format!("{} elapsed", clock(elapsed));
-            if !paused && rate > 0.0 {
-                stats = format!("{}/s · {stats}", human(rate as u64));
-                if total > done
-                    && elapsed > Duration::from_secs(2)
-                    && let Some(left) = self.clock.left(total - done)
-                {
-                    stats.push_str(&format!(" · {} left", clock(left)));
-                }
+        let mut stats = format!("{} elapsed", clock(elapsed));
+        if !paused && rate > 0.0 {
+            stats = format!("{}/s · {stats}", human(rate as u64));
+            if total > done
+                && elapsed > Duration::from_secs(2)
+                && let Some(left) = self.clock.left(total - done)
+            {
+                stats.push_str(&format!(" · {} left", clock(left)));
             }
-            ui.label(RichText::new(stats).color(pal.weak));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("{} files", p.files())).color(pal.weak));
-            });
-        });
+        }
+        win::set_text(item(ID_STATS), &stats);
+        win::set_text(item(ID_FILES), &format!("{} files", p.files()));
         let current = p.current_file();
-        let current = current.rsplit(['/', '\\']).next().unwrap_or_default();
-        ui.add(egui::Label::new(RichText::new(current).small().color(pal.weak)).truncate());
-
-        buttons(ui, |ui| {
-            if style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                p.cancel();
-            }
-            if style::button(ui, if paused { "Resume" } else { "Pause" }).clicked() {
-                p.set_paused(!paused);
-                if paused {
-                    if let Some(since) = self.clock.paused_since.take() {
-                        self.clock.paused_total += since.elapsed();
-                    }
-                    self.clock.samples.clear();
-                    self.clock.left = None;
-                } else {
-                    self.clock.paused_since = Some(Instant::now());
-                }
-            }
-        });
-    }
-
-    fn conflict_page(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        let Page::Conflict(ask) = &self.page else { return };
-        let file = ask.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let folder = ask.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-        let rows = [
-            ("Existing file", describe(ask.old_size, ask.old_modified)),
-            ("From archive", describe(ask.new_size, ask.new_modified)),
-        ];
-        header(ui, |ui| style::status_icon(ui, Icon::Warning), "Replace existing file?", &file);
-        ui.add(egui::Label::new(RichText::new(format!("in {folder}")).small().color(pal.weak)).truncate());
-        ui.add_space(10.0);
-        egui::Grid::new("conflict").num_columns(2).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-            for (label, value) in rows {
-                ui.label(RichText::new(label).color(pal.weak));
-                ui.label(RichText::new(value).color(pal.text));
-                ui.end_row();
-            }
-        });
-        ui.add_space(6.0);
-        ui.checkbox(&mut self.apply_to_all, "Do this for all remaining conflicts");
-
-        let mut choice = None;
-        buttons(ui, |ui| {
-            if style::primary_button(ui, "Replace", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                choice = Some(Resolution::Overwrite);
-            }
-            if style::button(ui, "Skip").clicked() {
-                choice = Some(Resolution::Skip);
-            }
-            if style::button(ui, "Keep both").on_hover_text("Extract as \"name (1)\"").clicked() {
-                choice = Some(Resolution::Rename);
-            }
-            ui.add_space(12.0);
-            if style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                choice = Some(Resolution::Cancel);
-            }
-        });
-        if let Some(resolution) = choice {
-            self.answer(resolution);
-        }
-    }
-
-    fn password_page(&mut self, ui: &mut Ui, wrong: bool) {
-        let pal = palette(ui);
-        header(
-            ui,
-            |ui| style::status_icon(ui, Icon::Lock),
-            "Password required",
-            &format!("{} is encrypted", self.name),
-        );
-        ui.add_space(14.0);
-        let mut submit = false;
-        ui.horizontal(|ui| {
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.password)
-                    .password(!self.show_password)
-                    .hint_text("Enter password")
-                    .margin(vec2(8.0, 6.0))
-                    .desired_width(ui.available_width() - 72.0),
-            );
-            if std::mem::take(&mut self.focus_password) {
-                field.request_focus();
-            }
-            submit |= field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let toggle = if self.show_password { "Hide" } else { "Show" };
-            if ui.add(egui::Button::new(toggle).min_size(vec2(64.0, 30.0))).clicked() {
-                self.show_password = !self.show_password;
-            }
-        });
-        if wrong {
-            ui.label(RichText::new("That password is incorrect. Try again.").color(pal.error));
-        }
-        let mut cancel = false;
-        buttons(ui, |ui| {
-            submit |= style::primary_button(ui, "OK", !self.password.is_empty()).clicked();
-            cancel = style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
-        });
-        if cancel {
-            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-        } else if submit && !self.password.is_empty() {
-            let password = std::mem::take(&mut self.password);
-            self.start(ui.ctx(), Some(password));
-        }
-    }
-
-    fn done_page(&mut self, ui: &mut Ui, s: Summary, secs: f64) {
-        if self.creating() {
-            return self.created_page(ui, s, secs);
-        }
-        let pal = palette(ui);
-        let (title, subtitle) = match self.dest() {
-            Some(_) => ("Extraction complete".to_owned(), self.name.clone()),
-            None => ("No errors found".to_owned(), self.name.clone()),
+        win::set_text(item(ID_CURRENT), current.rsplit(['/', '\\']).next().unwrap_or_default());
+        win::set_text(item(ID_PAUSE), if paused { "Resume" } else { "Pause" });
+        let title = match total {
+            0 => format!("{} - B-Rar", self.name),
+            total => format!("{:.0}% - {} - B-Rar", percent(done, total), self.name),
         };
-        header(ui, |ui| style::status_icon(ui, Icon::Ok), &title, &subtitle);
-        ui.add_space(12.0);
+        win::set_title(self.hwnd, &title);
+    }
+
+    fn toggle_pause(&mut self) {
+        let p = self.progress();
+        let paused = p.is_paused();
+        p.set_paused(!paused);
+        if paused {
+            if let Some(since) = self.clock.paused_since.take() {
+                self.clock.paused_total += since.elapsed();
+            }
+            self.clock.samples.clear();
+            self.clock.left = None;
+        } else {
+            self.clock.paused_since = Some(Instant::now());
+        }
+        self.update_running();
+    }
+
+    fn done_page(&self, b: &mut Builder, s: Summary, secs: f64) -> String {
+        if self.creating() {
+            return self.created_page(b, s, secs);
+        }
+        let title = if self.dest().is_some() {
+            "Extraction complete"
+        } else {
+            "No errors found"
+        };
+        b.header(win::stock_icon(SIID_INFO), title, &self.name);
+        b.space(12);
         let mut line = format!("{} files · {} folders · {}", s.files, s.dirs, human(s.bytes));
         line.push_str(&format!("  in {} ({}/s)", seconds(secs), human((s.bytes as f64 / secs.max(1e-3)) as u64)));
-        ui.label(RichText::new(line).color(pal.text));
+        b.label(0, &line, Role::Normal, false);
         let mut notes = Vec::new();
+        if let Some(dest) = self.dest() {
+            notes.push(format!("Saved to {}", dest.display()));
+        }
         if s.kept_existing > 0 {
             notes.push(format!("kept {} existing files", s.kept_existing));
         }
         if s.skipped > 0 {
             notes.push(format!("skipped {} links", s.skipped));
         }
-        if let Some(dest) = self.dest() {
-            notes.insert(0, format!("Saved to {}", dest.display()));
-        }
-        ui.add(egui::Label::new(RichText::new(notes.join(" · ")).color(pal.weak)).truncate());
-
-        let dest = self.dest().map(Path::to_path_buf);
-        buttons(ui, |ui| {
-            if let Some(dest) = &dest {
-                if style::primary_button(ui, "Open folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                    shell::open_path(dest);
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                }
-                if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                }
-            } else if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-            }
-        });
-    }
-
-    fn failed_page(&mut self, ui: &mut Ui, message: &str) {
-        let pal = palette(ui);
-        let verb = match (self.dest(), self.creating()) {
-            (Some(_), _) => "extract",
-            (None, true) => "create",
-            (None, false) => "test",
-        };
-        header(
-            ui,
-            |ui| style::status_icon(ui, Icon::Error),
-            &format!("Couldn't {verb} the archive"),
-            &self.name,
-        );
-        ui.add_space(12.0);
-        ui.add(egui::Label::new(RichText::new(message).color(pal.text)).wrap());
-        let mut elsewhere = false;
-        buttons(ui, |ui| {
-            if self.protected {
-                elsewhere = style::primary_button(ui, "Choose another folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter));
-                if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                }
-            } else if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-            }
-        });
-        if elsewhere {
-            match shell::pick_folder(&self.archive, 0) {
-                Ok(Some(folder)) => {
-                    if let Mode::Extract { dest, .. } = &mut self.mode {
-                        *dest = folder;
-                    }
-                    let password = self.last_password.clone();
-                    self.start(ui.ctx(), password);
-                }
-                Ok(None) => {}
-                Err(e) => self.page = Page::Failed(e),
-            }
-        }
-    }
-}
-
-impl App {
-    fn add_page(&mut self, ui: &mut Ui) {
-        let pal = palette(ui);
-        let Mode::Create { inputs, .. } = &self.mode else { return };
-        let what = match inputs.as_slice() {
-            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-            many => format!("{} items", many.len()),
-        };
-        header(ui, |ui| logo(ui, &self.logo), "Add to archive", &what);
-        ui.add_space(14.0);
-
-        ui.label(RichText::new("Archive").color(pal.weak));
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut self.add.path)
-                .margin(vec2(8.0, 6.0))
-                .desired_width(ui.available_width()),
-        );
-        if std::mem::take(&mut self.add.focus) {
-            field.request_focus();
-        }
-        ui.add_space(10.0);
-        ui.label(RichText::new("Compression").color(pal.weak));
-        ui.horizontal(|ui| {
-            for (name, level) in LEVELS {
-                ui.radio_value(&mut self.add.level, level, name);
-            }
-        });
-        ui.add_space(10.0);
-        ui.checkbox(&mut self.add.encrypt, "Encrypt with a password (AES-256)");
-        if self.add.encrypt {
-            for (value, hint) in [(&mut self.add.password, "Password"), (&mut self.add.confirm, "Type it again")] {
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .password(true)
-                        .hint_text(hint)
-                        .margin(vec2(8.0, 6.0))
-                        .desired_width(ui.available_width()),
-                );
-            }
-        }
-
-        // What's wrong with the form, if anything (shown under it, and Create stays off).
-        let path = PathBuf::from(self.add.path.trim());
-        let problem = if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
-            Some("The archive's name must end in .zip.")
-        } else if self.add.encrypt && self.add.password.is_empty() {
-            Some("Enter a password.")
-        } else if self.add.encrypt && self.add.password != self.add.confirm {
-            Some("The two passwords don't match.")
+        b.label(0, &notes.join(" · "), Role::Weak, false);
+        b.space(16);
+        if self.dest().is_some() {
+            b.buttons(&[(IDOK.0, "Open folder"), (IDCANCEL.0, "Close")]);
         } else {
-            None
-        };
-        let exists = path.exists();
-        if let Some(problem) = problem.filter(|p| !p.starts_with("Enter") && !(p.starts_with("The two") && self.add.confirm.is_empty())) {
-            ui.label(RichText::new(problem).color(pal.error));
-        } else if exists {
-            ui.label(RichText::new("An archive with this name exists; it will be replaced.").color(pal.weak));
+            b.buttons(&[(IDOK.0, "Close")]);
         }
-
-        let mut create = false;
-        let mut cancel = false;
-        buttons(ui, |ui| {
-            create = style::primary_button(ui, if exists { "Replace" } else { "Create" }, problem.is_none()).clicked()
-                || (problem.is_none() && ui.input(|i| i.key_pressed(Key::Enter)));
-            cancel = style::button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
-        });
-        if cancel {
-            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-        } else if create {
-            let path = std::path::absolute(&path).unwrap_or(path);
-            if let Mode::Create {
-                level, password, overwrite, ..
-            } = &mut self.mode
-            {
-                *level = self.add.level;
-                *password = self.add.encrypt.then(|| std::mem::take(&mut self.add.password));
-                *overwrite = exists;
-            }
-            self.add.confirm.clear();
-            self.name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            self.archive = path;
-            self.start(ui.ctx(), None);
-        }
+        "Done - B-Rar".into()
     }
 
-    fn created_page(&mut self, ui: &mut Ui, s: Summary, secs: f64) {
-        let pal = palette(ui);
-        header(ui, |ui| style::status_icon(ui, Icon::Ok), "Archive created", &self.name);
-        ui.add_space(12.0);
+    fn created_page(&self, b: &mut Builder, s: Summary, secs: f64) -> String {
+        b.header(win::stock_icon(SIID_INFO), "Archive created", &self.name);
+        b.space(12);
         let packed = std::fs::metadata(&self.archive).map(|m| m.len()).unwrap_or(0);
         let ratio = if s.bytes > 0 { packed as f64 * 100.0 / s.bytes as f64 } else { 100.0 };
         let line = format!(
@@ -842,55 +634,268 @@ impl App {
             human(packed),
             seconds(secs)
         );
-        ui.label(RichText::new(line).color(pal.text));
+        b.label(0, &line, Role::Normal, false);
         let mut notes = vec![format!("Saved in {}", folder(&self.archive))];
         if s.skipped > 0 {
             notes.push(format!("skipped {} links", s.skipped));
         }
-        ui.add(egui::Label::new(RichText::new(notes.join(" · ")).color(pal.weak)).truncate());
-        let archive = self.archive.clone();
-        buttons(ui, |ui| {
-            if style::primary_button(ui, "Show in folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                shell::show_in_folder(&archive);
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        b.label(0, &notes.join(" · "), Role::Weak, false);
+        b.space(16);
+        b.buttons(&[(IDOK.0, "Show in folder"), (IDCANCEL.0, "Close")]);
+        "Done - B-Rar".into()
+    }
+
+    fn failed_page(&self, b: &mut Builder, message: &str) -> String {
+        let verb = match (self.dest(), self.creating()) {
+            (Some(_), _) => "extract",
+            (None, true) => "create",
+            (None, false) => "test",
+        };
+        b.header(win::stock_icon(SIID_ERROR), &format!("Couldn't {verb} the archive"), &self.name);
+        b.space(12);
+        b.label(0, message, Role::Normal, true);
+        b.space(16);
+        if self.protected {
+            b.buttons(&[(IDOK.0, "Choose another folder"), (IDCANCEL.0, "Close")]);
+        } else {
+            b.buttons(&[(IDOK.0, "Close")]);
+        }
+        "Error - B-Rar".into()
+    }
+
+    fn add_page(&self, b: &mut Builder) -> String {
+        let what = match &self.mode {
+            Mode::Create { inputs, .. } => match inputs.as_slice() {
+                [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                many => format!("{} items", many.len()),
+            },
+            _ => String::new(),
+        };
+        let level = match &self.mode {
+            Mode::Create { level, .. } => *level,
+            _ => 6,
+        };
+        b.header(win::app_icon(b.px(40)), "Add to archive", &what);
+        b.space(14);
+        b.label(0, "Archive", Role::Weak, false);
+        b.space(2);
+        b.edit(ID_PATH, &self.archive.display().to_string(), 0, "", 0);
+        b.space(12);
+        b.label(0, "Compression", Role::Weak, false);
+        b.space(2);
+        let names: Vec<&str> = LEVELS.iter().map(|(n, _)| *n).collect();
+        let on = LEVELS.iter().position(|(_, l)| *l == level).unwrap_or(2);
+        b.radios(ID_LEVEL, &names, on);
+        b.space(10);
+        b.check(ID_ENCRYPT, "Encrypt with a password (AES-256)", false);
+        b.space(4);
+        b.edit(ID_PW1, "", win::ES_PASSWORD, "Password", 0);
+        b.space(6);
+        b.edit(ID_PW2, "", win::ES_PASSWORD, "Type it again", 0);
+        b.space(8);
+        b.label(ID_PROBLEM, "", Role::Weak, false);
+        b.space(12);
+        b.buttons(&[(IDOK.0, "Create"), (IDCANCEL.0, "Cancel")]);
+        "Add to archive - B-Rar".into()
+    }
+
+    /// The "Add to archive" form's state: what's wrong with it, if anything (Create stays off),
+    /// and whether the archive exists (Create becomes Replace).
+    fn validate(&self) -> Option<(PathBuf, bool)> {
+        let item = |id| win::item(self.hwnd, id);
+        let path = PathBuf::from(win::text(item(ID_PATH)).trim());
+        let encrypt = win::checked(item(ID_ENCRYPT));
+        let (pw1, pw2) = (win::text(item(ID_PW1)), win::text(item(ID_PW2)));
+        win::enable(item(ID_PW1), encrypt);
+        win::enable(item(ID_PW2), encrypt);
+        let problem = if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            Some("The archive's name must end in .zip.")
+        } else if encrypt && pw1.is_empty() {
+            Some("Enter a password.")
+        } else if encrypt && pw1 != pw2 {
+            Some("The two passwords don't match.")
+        } else {
+            None
+        };
+        let exists = path.exists();
+        let label = item(ID_PROBLEM);
+        // Don't scold before there's anything to scold: no "enter a password" while the
+        // fields are still empty, no "don't match" before the second one is typed.
+        match problem.filter(|p| !p.starts_with("Enter") && !(p.starts_with("The two") && pw2.is_empty())) {
+            Some(p) => {
+                win::set_text(label, p);
+                win::set_role(label, Role::Error);
             }
-            if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            None => {
+                win::set_text(
+                    label,
+                    if exists {
+                        "An archive with this name exists; it will be replaced."
+                    } else {
+                        ""
+                    },
+                );
+                win::set_role(label, Role::Weak);
             }
-        });
+        }
+        let ok = item(IDOK.0);
+        win::enable(ok, problem.is_none());
+        win::set_text(ok, if exists { "Replace" } else { "Create" });
+        problem.is_none().then_some((path, exists))
+    }
+
+    fn create(&mut self) {
+        let Some((path, exists)) = self.validate() else { return };
+        let item = |id| win::item(self.hwnd, id);
+        let level = (0..LEVELS.len())
+            .find(|&i| win::checked(item(ID_LEVEL + i as i32)))
+            .map_or(6, |i| LEVELS[i].1);
+        let password = win::checked(item(ID_ENCRYPT)).then(|| win::text(item(ID_PW1)));
+        let path = std::path::absolute(&path).unwrap_or(path);
+        if let Mode::Create {
+            level: l,
+            password: pw,
+            overwrite,
+            ..
+        } = &mut self.mode
+        {
+            *l = level;
+            *pw = password;
+            *overwrite = exists;
+        }
+        self.name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        self.archive = path;
+        self.start(None);
+    }
+
+    // ---- buttons and keys --------------------------------------------------------------------
+
+    fn command(&mut self, id: i32, code: u32) {
+        let ok = id == IDOK.0;
+        let cancel = id == IDCANCEL.0;
+        match &self.page {
+            Page::Running if cancel => self.progress().cancel(),
+            Page::Running if id == ID_PAUSE => self.toggle_pause(),
+            Page::Conflict(_) if ok => self.answer(Resolution::Overwrite),
+            Page::Conflict(_) if id == ID_SKIP => self.answer(Resolution::Skip),
+            Page::Conflict(_) if id == ID_RENAME => self.answer(Resolution::Rename),
+            Page::Conflict(_) if cancel => self.answer(Resolution::Cancel),
+            Page::Password { .. } if id == ID_SHOW => win::reveal(win::item(self.hwnd, ID_PASSWORD), win::checked(win::item(self.hwnd, ID_SHOW))),
+            Page::Password { .. } if id == ID_PASSWORD && code == win::EN_CHANGE => {
+                let typed = !win::text(win::item(self.hwnd, ID_PASSWORD)).is_empty();
+                win::enable(win::item(self.hwnd, IDOK.0), typed);
+            }
+            Page::Password { .. } if ok => {
+                let password = win::text(win::item(self.hwnd, ID_PASSWORD));
+                if !password.is_empty() {
+                    self.start(Some(password));
+                }
+            }
+            Page::Add if ok => self.create(),
+            Page::Add if (ID_PATH..=ID_PROBLEM).contains(&id) && (code == win::EN_CHANGE || code == win::BN_CLICKED) => {
+                self.validate();
+            }
+            Page::Done { .. } if ok => {
+                if self.creating() {
+                    shell::show_in_folder(&self.archive);
+                } else if let Some(dest) = self.dest() {
+                    shell::open_path(dest);
+                }
+                self.close();
+            }
+            Page::Failed(_) if ok && self.protected => match shell::pick_folder(&self.archive, self.hwnd.0 as isize) {
+                Ok(Some(folder)) => {
+                    if let Mode::Extract { dest, .. } = &mut self.mode {
+                        *dest = folder;
+                    }
+                    let password = self.last_password.clone();
+                    self.start(password);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.page = Page::Failed(e);
+                    self.show();
+                }
+            },
+            Page::Password { .. } | Page::Add | Page::Done { .. } | Page::Failed(_) if ok || cancel => self.close(),
+            _ => {}
+        }
+    }
+}
+
+fn conflict_page(b: &mut Builder, ask: &Ask) -> String {
+    let file = ask.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let folder = ask.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    b.header(win::stock_icon(SIID_WARNING), "Replace existing file?", &file);
+    b.label(0, &format!("in {folder}"), Role::Weak, false);
+    b.space(10);
+    b.label(
+        0,
+        &format!("Existing file:   {}", describe(ask.old_size, ask.old_modified)),
+        Role::Normal,
+        false,
+    );
+    b.label(
+        0,
+        &format!("From archive:   {}", describe(ask.new_size, ask.new_modified)),
+        Role::Normal,
+        false,
+    );
+    b.space(8);
+    b.check(ID_ALL, "Do this for all remaining conflicts", false);
+    b.space(14);
+    b.buttons(&[(IDOK.0, "Replace"), (ID_SKIP, "Skip"), (ID_RENAME, "Keep both"), (IDCANCEL.0, "Cancel")]);
+    "File already exists - B-Rar".into()
+}
+
+fn password_page(b: &mut Builder, name: &str, wrong: bool) -> String {
+    b.header(win::stock_icon(SIID_KEY), "Password required", &format!("{name} is encrypted"));
+    b.space(14);
+    b.edit(ID_PASSWORD, "", win::ES_PASSWORD, "Enter password", 0);
+    b.space(4);
+    b.check(ID_SHOW, "Show password", false);
+    if wrong {
+        b.space(4);
+        b.label(0, "That password is incorrect. Try again.", Role::Error, false);
+    }
+    b.space(14);
+    b.buttons(&[(IDOK.0, "OK"), (IDCANCEL.0, "Cancel")]);
+    win::enable(win::item(b.parent, IDOK.0), false);
+    "Password - B-Rar".into()
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_CTLCOLORSTATIC => win::ctl_color(wparam, lparam),
+        WM_COMMAND => {
+            let (id, code) = ((wparam.0 & 0xFFFF) as i32, ((wparam.0 >> 16) & 0xFFFF) as u32);
+            with(|a| a.command(id, code));
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            with(App::tick);
+            LRESULT(0)
+        }
+        // For IsDialogMessage: Enter presses the default button.
+        win::DM_GETDEFID => LRESULT((0x534B << 16) | IDOK.0 as isize),
+        WM_CLOSE => {
+            with(App::shutdown);
+            win::destroy(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            // SAFETY: ends this thread's message loop.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // SAFETY: the default handling for everything else.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 /// The folder `path` is in, for display.
 fn folder(path: &Path) -> String {
     path.parent().map(|p| p.display().to_string()).unwrap_or_default()
-}
-
-// ---- layout helpers ------------------------------------------------------------------------
-
-fn header(ui: &mut Ui, icon: impl FnOnce(&mut Ui), title: &str, subtitle: &str) {
-    let pal = palette(ui);
-    ui.horizontal(|ui| {
-        icon(ui);
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.add_space(1.0);
-            ui.add(egui::Label::new(RichText::new(title).heading().color(pal.text)).truncate());
-            ui.add(egui::Label::new(RichText::new(subtitle).color(pal.weak)).truncate());
-        });
-    });
-}
-
-fn logo(ui: &mut Ui, texture: &TextureHandle) {
-    ui.add(egui::Image::new(egui::load::SizedTexture::new(texture.id(), Vec2::splat(40.0))));
-}
-
-/// The right-aligned button row that ends every page; add buttons right to left. The window is
-/// sized to the page's content (see `ui`), so this just follows the content above it.
-fn buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(16.0);
-    let row = vec2(ui.available_width(), ui.spacing().interact_size.y);
-    ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), add);
 }
 
 // ---- formatting ----------------------------------------------------------------------------

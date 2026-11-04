@@ -111,7 +111,7 @@ The programs are in `target/release`. On Linux, `cargo build --release -p brar-c
 |---|---|
 | `crates/brar-core` | The extraction engine: formats, parallel decoding, B-Rar's RAR5, Deflate and LZMA2 decoders. No UI code. |
 | `crates/brar-cli` | `B-Rar.exe`, the command line. |
-| `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, built with [egui](https://github.com/emilk/egui). |
+| `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, in plain Win32 (standard Windows controls, no UI framework). |
 | `crates/brar-shell` | `B-Rar-Shell.dll`, the Windows 11 right-click menu. |
 | `installer` | The setup's script (`b-rar.toml`, built with [B-Installer](https://github.com/ahmedanjum30/B-Installer) by `build-setup.ps1`), the MSIX manifest and the packaging scripts. |
 | `vendor` | Patched copies of the `unrar` and `unrar_sys` crates. |

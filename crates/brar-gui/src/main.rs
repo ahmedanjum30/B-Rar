@@ -24,8 +24,8 @@
 mod app;
 mod browse;
 mod shell;
-mod style;
 mod update;
+mod win;
 
 use std::{
     env,
