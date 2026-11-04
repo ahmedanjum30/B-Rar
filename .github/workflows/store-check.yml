@@ -1,0 +1,25 @@
+name: Store check
+
+# Run by hand (Actions > Store check > Run workflow) to check the Microsoft Store login: signs
+# in with the MSSTORE_* secrets and shows B-Rar's Store state. Submits nothing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  msstore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show B-Rar's Microsoft Store state
+        shell: pwsh
+        run: ./installer/publish-store.ps1 -DryRun
+        env:
+          MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+          MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+          MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}

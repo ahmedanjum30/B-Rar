@@ -1,9 +1,9 @@
 name: Release
 
-# Pushing a v* tag builds the Microsoft Store package (a workflow artifact, uploaded to Partner
-# Center by hand; Microsoft signs it) and publishes the installer (B-Rar-Setup), the portable
-# zip and the MSIX signed with B-Rar's own certificate as a GitHub release, with the website.
-# Copies outside the Store update from these releases.
+# Pushing a v* tag builds the Microsoft Store package and submits it to the Store for
+# certification (Microsoft signs it; installer\publish-store.ps1), and publishes the installer
+# (B-Rar-Setup), the portable zip and the MSIX signed with B-Rar's own certificate as a GitHub
+# release, with the website. Copies outside the Store update from these releases.
 on:
   push:
     tags: ["v*"]
@@ -110,6 +110,26 @@ jobs:
           name: linux-files
           path: dist/B-Rar-*-linux-x64.tar.gz
           if-no-files-found: error
+
+  # The Store package goes to the Microsoft Store: a new submission with this package and the
+  # version's CHANGELOG.md entry as "What's new". Skipped without the MSSTORE_* secrets, or
+  # while an earlier submission is still in certification.
+  msstore:
+    needs: [checks, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-package
+          path: dist
+      - name: Submit to the Microsoft Store
+        shell: pwsh
+        run: ./installer/publish-store.ps1 -Package (Get-ChildItem dist/B-Rar-*-store.msix | Select-Object -First 1).FullName
+        env:
+          MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+          MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+          MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
 
   publish:
     needs: [checks, build, linux]
