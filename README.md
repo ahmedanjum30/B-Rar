@@ -23,7 +23,7 @@ Free for personal and other non-commercial use. See [License](#license).
 - **Archives in parts:** RAR volumes (`name.part1.rar`, `name.r00`) and split files (`name.7z.001`, `name.zip.001`). Start from any part. A part in another folder is asked for, like WinRAR does (a file picker, or a path on the command line), and the parts after it are then found next to it.
 - **Passwords:** asks when an archive is encrypted, including archives with encrypted file names.
 - **Safe by default:** asks before replacing a file (replace, skip, keep both, for all), refuses paths that would escape the destination folder, and checks every file's checksum.
-- **Protected folders:** extracting into Program Files or another folder that needs administrator rights shows the Windows permission prompt.
+- **Protected folders:** extracting into Program Files or another folder that needs administrator rights shows the Windows permission prompt. (The Microsoft Store version isn't allowed to ask: it offers another folder, or you run B-Rar as administrator from the Start menu.)
 - **Command line:** `B-Rar x archive.rar` from any terminal.
 
 B-Rar makes ZIP archives only, not RAR or 7z.

@@ -200,6 +200,11 @@ struct App {
     apply_to_all: bool,
     /// The "Add to archive" page's fields.
     add: AddForm,
+    /// The password the job last ran with, to run it again into another folder.
+    last_password: Option<String>,
+    /// Failed on a folder only administrators can write to (the Store version can't ask):
+    /// the failure page offers another folder.
+    protected: bool,
 }
 
 /// Compression levels the "Add to archive" page offers: name, Deflate level.
@@ -237,6 +242,8 @@ impl App {
             focus_password: false,
             apply_to_all: false,
             add: AddForm::default(),
+            last_password: None,
+            protected: false,
         };
         match &app.mode {
             Mode::Create { ask: true, level, .. } => {
@@ -270,6 +277,8 @@ impl App {
 
     /// (Re)starts the job, e.g. after the user typed a password.
     fn start(&mut self, ctx: &egui::Context, password: Option<String>) {
+        self.last_password = password.clone();
+        self.protected = false;
         let progress = Arc::new(Progress::default());
         *self.shared.progress.lock().unwrap() = Arc::clone(&progress);
         self.clock = Clock::new();
@@ -394,6 +403,16 @@ impl eframe::App for App {
                 }
                 // Denied partway (one protected subfolder, say): the same hand-over to an
                 // elevated copy as main.rs does up front.
+                Err(e)
+                    if e.is_access_denied()
+                        && !shell::is_elevated()
+                        && !crate::can_elevate()
+                        && let Some(dest) = self.dest() =>
+                {
+                    let message = crate::protected_folder(dest);
+                    self.protected = true;
+                    Page::Failed(message)
+                }
                 Err(e) if e.is_access_denied() && !shell::is_elevated() && self.dest().is_some() => match crate::elevate(&self.archive, &self.mode) {
                     Ok(true) => {
                         self.succeeded.store(true, Ordering::Relaxed);
@@ -697,11 +716,30 @@ impl App {
         );
         ui.add_space(12.0);
         ui.add(egui::Label::new(RichText::new(message).color(pal.text)).wrap());
+        let mut elsewhere = false;
         buttons(ui, |ui| {
-            if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
+            if self.protected {
+                elsewhere = style::primary_button(ui, "Choose another folder", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter));
+                if style::button(ui, "Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+            } else if style::primary_button(ui, "Close", true).clicked() || ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
             }
         });
+        if elsewhere {
+            match shell::pick_folder(&self.archive, 0) {
+                Ok(Some(folder)) => {
+                    if let Mode::Extract { dest, .. } = &mut self.mode {
+                        *dest = folder;
+                    }
+                    let password = self.last_password.clone();
+                    self.start(ui.ctx(), password);
+                }
+                Ok(None) => {}
+                Err(e) => self.page = Page::Failed(e),
+            }
+        }
     }
 }
 

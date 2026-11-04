@@ -146,8 +146,10 @@ fn run(password: Option<String>) -> Result<ExitCode, String> {
         }
     };
     // A folder only administrators can write to (Program Files, another user's folder):
-    // hand the job to an elevated copy straight away, before anything is extracted.
+    // hand the job to an elevated copy straight away, before anything is extracted. (The
+    // Store version can't; its extraction fails and says what to do.)
     if let Mode::Extract { dest, .. } = &mode
+        && can_elevate()
         && needs_admin(dest)
     {
         return match elevate(&archive, &mode)? {
@@ -267,6 +269,20 @@ pub fn elevate(archive: &Path, mode: &Mode) -> Result<bool, String> {
         args.extend(["--items".into(), file.into(), "--base".into(), s.base.clone().into()]);
     }
     shell::run_elevated(&args)
+}
+
+/// Can B-Rar ask for administrator rights? Not as the Microsoft Store version: the Store
+/// doesn't allow it the capability for that (allowElevation), so `run_elevated` would fail.
+pub fn can_elevate() -> bool {
+    !matches!(update::kind(), update::Kind::Store)
+}
+
+/// The Store version's answer to a folder only administrators can write to.
+pub fn protected_folder(dest: &Path) -> String {
+    format!(
+        "Windows needs administrator rights to write to\n{}\n\nChoose another folder, or open B-Rar as administrator: right-click B-Rar in the Start menu, choose Run as administrator, then open the archive there and extract it.",
+        dest.display()
+    )
 }
 
 pub fn declined(dest: &Path) -> String {

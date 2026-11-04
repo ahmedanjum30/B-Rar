@@ -38,7 +38,7 @@ Right-click any archive in File Explorer for B-Rar's menu, in the short Windows 
 • Archives in parts: RAR volumes (.part1.rar, .r00) and split archives (.001). Start from any part.
 • Passwords: asks when an archive is encrypted, including archives with encrypted file names.
 • Safe: asks before replacing files (replace, skip, keep both), keeps files inside the folder you chose, and checks every file's checksum.
-• Protected folders: extracting into Program Files or other folders that need administrator rights shows the Windows permission prompt.
+• Protected folders: to extract into Program Files or other folders that need administrator rights, run B-Rar as administrator from the Start menu (right-click B-Rar, Run as administrator), or pick another folder.
 • Command line: B-Rar x archive.rar from any terminal.
 • Light: a native app with no bundled browser engine. No ads, no tracking, no internet connection.
 
@@ -76,17 +76,21 @@ brar, rar, zip, 7z, unzip, unrar, archive
 ## What's new in this version
 
 ```
-B-Rar 1.0 is here: fast extraction of ZIP, RAR, 7z and tar archives, right from File Explorer.
+B-Rar 1.3: make ZIP archives, faster 7z, smarter multi-part archives.
 
-• Extract here, extract to a folder, or pick where, from the Windows 11 right-click menu
-• Browse an archive before extracting, and take out just the files you need
-• RAR archives extract twice as fast as with WinRAR; archives full of small files three to four times as fast
-• Passwords, multi-part archives and protected folders are all handled for you
+• Make ZIP archives: right-click files or folders > B-Rar > Add to archive, with an optional AES-256 password
+• One B-Rar submenu in the right-click menu, like WinRAR's: extract commands on archives, add commands on everything else
+• 7z archives extract faster, on all cores
+• A part of a multi-part archive in another folder? B-Rar asks where it is
+• A damaged multi-part RAR names the part to download again
+• A steadier "time left" while extracting
 ```
+
+(As submitted for 1.0: "B-Rar 1.0 is here: fast extraction of ZIP, RAR, 7z and tar archives, right from File Explorer. • Extract here, extract to a folder, or pick where, from the Windows 11 right-click menu • Browse an archive before extracting, and take out just the files you need • RAR archives extract twice as fast as with WinRAR; archives full of small files three to four times as fast • Passwords, multi-part archives and protected folders are all handled for you")
 
 ## Restricted capabilities (Submission options)
 
-Partner Center asks why the package declares these. As submitted for 1.0:
+Partner Center asks why the package declares these. The Store package declares only runFullTrust since 1.3.2: allowElevation was denied twice (10.6.3, 2026-10 and 2026-11) and is left out of the Store build (`installer\build.ps1 -Store`). The Store version shows how to run B-Rar as administrator instead of asking for elevation.
 
 **runFullTrust**
 
@@ -95,14 +99,14 @@ B-Rar is a Win32 desktop app (written in Rust) packaged as MSIX. It needs full t
 
 1. Reading archives and writing extracted files anywhere on disk. Users open archives from any folder or drive (Downloads, external disks, network shares) and extract them to a folder they choose. B-Rar reads only the archive the user opened and writes only to the destination the user picked.
 
-2. The File Explorer right-click menu. The package registers a context-menu handler (windows.fileExplorerContextMenus with a COM surrogate server, B-Rar-Shell.dll). When the user right-clicks an archive, it shows "Open in B-Rar", "Extract files...", "Extract to folder", "Extract here" and "Test archive", and starts B-Rar-GUI.exe for the chosen action.
+2. The File Explorer right-click menu. The package registers a context-menu handler (windows.fileExplorerContextMenus with a COM surrogate server, B-Rar-Shell.dll). On an archive it shows "Open in B-Rar", "Extract files...", "Extract to folder", "Extract here" and "Test archive"; on other files and folders, "Add to archive..." and "Add to ZIP". It starts B-Rar-GUI.exe for the chosen action.
 
 3. The command line. The app execution alias B-Rar.exe lets users extract archives from any terminal.
 
 B-Rar doesn't connect to the internet, collects no data, and changes nothing outside the folders the user picks.
 ```
 
-**allowElevation**
+**allowElevation** (as submitted for 1.0; denied, and no longer declared)
 
 ```
 B-Rar uses elevation for one case only: when the user chooses to extract an archive into a folder that only administrators can write to, such as C:\Program Files.

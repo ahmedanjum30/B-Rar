@@ -59,6 +59,9 @@ try {
     if ($Store) {
         $manifest = $manifest.Replace("Name=`"$package`"", "Name=`"$($identity.Name)`"").Replace("Publisher=`"$subject`"", "Publisher=`"$($identity.Publisher)`"")
         $manifest = $manifest -replace '<PublisherDisplayName>[^<]*</PublisherDisplayName>', "<PublisherDisplayName>$($identity.PublisherDisplayName)</PublisherDisplayName>"
+        # The Store denied allowElevation (10.6.3); its copy says how to run as administrator
+        # instead of asking (can_elevate in brar-gui).
+        $manifest = $manifest -replace '\s*<rescap:Capability Name="allowElevation" />', ''
     }
     $manifest | Set-Content -Encoding utf8 "$layout\AppxManifest.xml"
 
