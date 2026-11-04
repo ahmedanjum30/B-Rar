@@ -146,4 +146,4 @@ B-Rar has no account or sign-in. To try it: right-click any .zip or .rar file in
 
 ## winget
 
-Nothing to submit: once the app is live, winget's built-in `msstore` source lists it, so `winget install B-Rar` (or `winget install <Store product ID>`) works.
+Nothing to submit: winget's built-in `msstore` source lists the Store app. Store product ID **9MZKQXC7PFCH** (https://apps.microsoft.com/detail/9MZKQXC7PFCH); `winget install 9MZKQXC7PFCH` works, and `winget install B-Rar` once the name search indexes it.

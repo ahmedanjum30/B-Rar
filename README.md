@@ -11,12 +11,12 @@
 
 Free for personal and other non-commercial use. See [License](#license).
 
-**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11, or visit the [website](https://ahmedanjum30.github.io/B-Rar/). Microsoft Store: coming soon. The command line also runs on [Linux](#linux).
+**[Download the latest version](https://github.com/ahmedanjum30/B-Rar/releases/latest)** for Windows 10 and 11, get it from the **[Microsoft Store](https://apps.microsoft.com/detail/9MZKQXC7PFCH)**, or visit the [website](https://ahmedanjum30.github.io/B-Rar/). The command line also runs on [Linux](#linux).
 
 ## Features
 
 - **Fast.** Archives are extracted in parallel, file by file, on all cores. B-Rar has its own RAR5 decoder (faster than 7-Zip's on one core), its own Deflate decoder for ZIP, which also splits one big file across all cores (3.5–4.4x libdeflate on one core), and its own 7z engine, which decodes the parts of an archive 7-Zip made on several threads on all cores at once.
-- **Right-click menu.** One **B-Rar** entry, like WinRAR's. On an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**; on any other file or folder: **Add to archive...** or **Add to "name.zip"**. On Windows 11 it's under **Show more options**; the Microsoft Store version (coming soon) puts it in the short menu.
+- **Right-click menu.** One **B-Rar** entry, like WinRAR's. On an archive: **Open in B-Rar**, **Extract files...**, **Extract to "name\\"**, **Extract here** or **Test archive**; on any other file or folder: **Add to archive...** or **Add to "name.zip"**. On Windows 11 it's under **Show more options**; the [Microsoft Store version](https://apps.microsoft.com/detail/9MZKQXC7PFCH) puts it in the short menu.
 - **Make ZIP archives.** Right-click files or folders, **B-Rar**: **Add to archive...** (the archive's name, compression level, and an AES-256 password if you want one) or **Add to "name.zip"**. Every core compresses at once, a big file in pieces, and files that are already compressed (photos, videos, archives) are stored as they are.
 - **Look inside first.** Open an archive to browse its folders, search it, open single files, and extract only the files and folders you pick.
 - **Formats:** ZIP (Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd, AES and ZipCrypto), RAR 4 and 5, 7z (LZMA, LZMA2, PPMd, BZip2, Deflate, Deflate64, Zstandard, LZ4, Brotli, the BCJ, BCJ2, ARM, ARM64, PowerPC, SPARC, IA-64, RISC-V and Delta filters, and AES, including encrypted file names), tar and tar.gz, tar.xz, tar.zst, tar.bz2, and single .gz, .xz, .zst and .bz2 files.
@@ -60,7 +60,7 @@ The installer on the Releases page is built by this repository's [release workfl
 
 ### Other ways to get it
 
-**Microsoft Store:** coming soon. It's the full app with the Windows 11 short right-click menu, and it updates itself. Once it's in the Store, `winget install B-Rar` installs it too.
+**[Microsoft Store](https://apps.microsoft.com/detail/9MZKQXC7PFCH):** the full app, signed by Microsoft (no "Windows protected your PC" warning), with B-Rar in the Windows 11 short right-click menu, and it updates itself. `winget install 9MZKQXC7PFCH` installs it from a terminal. It can't ask for administrator rights: to extract into Program Files, run B-Rar as administrator from the Start menu.
 
 **Portable:** `B-Rar-<version>-portable-x64.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `B-Rar.exe` (command line) and `B-Rar-GUI.exe` (the window) with nothing to install, and no right-click menu. Run `B-Rar-GUI.exe archive.zip` to browse an archive. The zip is built by this repository's [release workflow](.github/workflows/release.yml) from the source you see here; to check yours, compare its SHA-256 (`Get-FileHash <file>` in PowerShell) with `SHA256SUMS.txt` on the same release.
 

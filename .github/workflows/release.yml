@@ -141,7 +141,7 @@ jobs:
 
             **Linux:** the `-linux-x64.tar.gz` has the command line, `brar` (x86-64, glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 and later). Unpack it and put `brar` on your PATH, for example `sudo install brar /usr/local/bin/`. Then `brar x archive.rar`, `brar a backup.zip folder`, `brar --help`.
 
-            **Microsoft Store:** coming soon, with the Windows 11 short right-click menu and updates through the Store (and `winget install B-Rar`).
+            **Microsoft Store:** [B-Rar on the Microsoft Store](https://apps.microsoft.com/detail/9MZKQXC7PFCH), signed by Microsoft (no SmartScreen warning), with the Windows 11 short right-click menu and updates through the Store. Or `winget install 9MZKQXC7PFCH`.
           generate_release_notes: true
 
   # The website (docs/) on GitHub Pages, served from the gh-pages branch, with this version's
