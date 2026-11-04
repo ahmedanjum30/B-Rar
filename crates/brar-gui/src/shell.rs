@@ -42,6 +42,20 @@ pub fn error_box(title: &str, message: &str) {
     }
 }
 
+/// An information message box over window `owner`.
+pub fn info_box(title: &str, message: &str, owner: isize) {
+    let (title, message) = (wide(title), wide(message));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            Some(HWND(owner as *mut _)),
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+        );
+    }
+}
+
 /// Opens a folder in Explorer, or a file in its default app.
 pub fn open_path(path: &Path) {
     let path = wide(path);

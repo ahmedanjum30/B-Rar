@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B-Rar screens</title>
+<style>
+  /* Everything here is drawable by the native app: solid fills, rounded rectangles and
+     circles (GDI+, anti-aliased), Segoe UI text, Segoe Fluent Icons glyphs, the system
+     title bar, Windows' list view and progress bar with custom colours. No shadows, blur,
+     translucency or gradients inside the windows (the page's own canvas aside). */
+  :root { font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px; color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 24px 80px; background: #E6E6E9; color: #1A1A1A; }
+  @media (prefers-color-scheme: dark) { body:not(.light) { background: #0E0E10; color: #F0F0F0; } }
+  body.dark { background: #0E0E10; color: #F0F0F0; }
+  .page-head { max-width: 1260px; margin: 0 auto 8px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  .page-head h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  .page-head p { margin: 0; opacity: .72; max-width: 70ch; }
+  .page-head button { margin-left: auto; font: inherit; padding: 6px 14px; border-radius: 4px; border: 1px solid #8888; background: transparent; color: inherit; }
+  section.dir { max-width: 1260px; margin: 40px auto 0; }
+  section.dir > h2 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  section.dir > p { margin: 0 0 18px; opacity: .72; max-width: 80ch; }
+  .shots { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; opacity: .65; margin-top: 8px; }
+  .ico { font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-style: normal; font-weight: normal; line-height: 1; display: inline-block; }
+
+  /* ---- Shared window anatomy; each direction sets the variables. ---- */
+  .win { width: var(--w, 520px); background: var(--surface); color: var(--text); border: 1px solid var(--frame); border-radius: 8px; overflow: hidden; }
+  .tb { height: 32px; display: flex; align-items: center; gap: 8px; padding-left: 10px; font-size: 12px; background: var(--titlebar); color: var(--titletext); }
+  .tb img, .tb svg { width: 16px; height: 16px; }
+  .tb .caps { margin-left: auto; display: flex; }
+  .tb .caps i { width: 46px; height: 32px; display: grid; place-items: center; font-size: 10px; }
+  .btn { font: inherit; height: var(--btn-h, 32px); min-width: 88px; padding: 0 16px; border-radius: var(--r); border: 1px solid var(--border); background: var(--field); color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .weak { color: var(--weak); }
+  .num { font-variant-numeric: tabular-nums; }
+  input.field { font: inherit; height: 32px; border: 1px solid var(--border); border-radius: var(--r); background: var(--field); color: var(--text); padding: 0 10px 0 32px; width: 240px; }
+  input.field::placeholder { color: var(--weak); }
+  .search { position: relative; margin-left: auto; }
+  .search .ico { position: absolute; left: 10px; top: 9px; font-size: 14px; color: var(--weak); }
+  .bar { height: var(--bar-h, 4px); border-radius: 99px; background: var(--track); overflow: hidden; }
+  .bar > b { display: block; height: 100%; border-radius: 99px; background: var(--accent); }
+  .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .status-ico { font-size: 32px; flex: none; }
+  .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+  .grid2 { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; }
+  .chk { display: flex; align-items: center; gap: 8px; }
+  .chk span.box { width: 18px; height: 18px; border: 1px solid var(--weak); border-radius: 3px; background: var(--field); }
+
+  /* Browser list (Windows' list view, custom-coloured). */
+  .browser { --w: 900px; height: 560px; display: flex; flex-direction: column; }
+  .list { flex: 1; background: var(--listbg); overflow: hidden; }
+  .lh, .lr { display: grid; grid-template-columns: 1fr 96px 96px 150px; align-items: center; padding: 0 14px; }
+  .lh { height: var(--head-h, 32px); font-size: 12px; color: var(--weak); }
+  .lr { height: var(--row-h, 32px); }
+  .lr .n { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .lr .n .ico { font-size: 16px; }
+  .lr .n .fold { color: #E8A93A; }
+  .lr .n .doc { color: var(--weak); }
+  .lh .r, .lr .r { text-align: right; padding-right: 14px; }
+  .lr .w { color: var(--weak); }
+  .lr.sel { background: var(--selbg); }
+  .sb { height: 28px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-size: 12px; color: var(--weak); background: var(--surface); }
+
+  /* =========== A · Windows 11 =========== */
+  .A { --surface:#F3F3F3; --titlebar:#F3F3F3; --titletext:#1A1A1A; --frame:#D6D6D6; --field:#FFFFFF; --border:#D1D1D1;
+       --text:#1A1A1A; --weak:#5F5F5F; --accent:#005FB8; --on-accent:#FFFFFF; --track:#D6D6D6; --listbg:#FFFFFF;
+       --selbg:#E3EEFA; --ok:#0F7B0F; --err:#C42B1C; --warn:#9D5D00; --r:4px; }
+  .dark .A, .A.dk { --surface:#202020; --titlebar:#202020; --titletext:#F0F0F0; --frame:#3A3A3A; --field:#2D2D2D; --border:#3F3F3F;
+       --text:#F0F0F0; --weak:#A8A8A8; --accent:#60CDFF; --on-accent:#000000; --track:#404040; --listbg:#272727;
+       --selbg:#33404D; --ok:#6CCB5F; --err:#FF99A4; --warn:#FCE100; }
+  .A .cmd { display: flex; align-items: center; gap: 4px; padding: 8px 12px; }
+  .A .cmd .btn { border-color: transparent; background: transparent; min-width: 0; padding: 0 12px; }
+  .A .cmd .btn.primary { background: var(--accent); }
+  .A .cmd .sep { width: 1px; height: 20px; background: var(--border); margin: 0 6px; }
+  .A .crumbs { display: flex; align-items: center; gap: 6px; padding: 0 14px 8px; }
+  .A .crumbs .ico { font-size: 10px; color: var(--weak); }
+  .A .crumbs .up { width: 32px; height: 28px; min-width: 0; padding: 0; }
+  .A .list { margin: 0 8px; border-radius: 8px 8px 0 0; border: 1px solid var(--border); border-bottom: 0; }
+  .A .lh { border-bottom: 1px solid var(--border); }
+  .A .lr.sel { margin: 0 4px; border-radius: 4px; padding: 0 10px; }
+  .A .dlg { padding: 24px; }
+  .A .dlg .h { display: flex; gap: 14px; align-items: center; }
+  .A .dlg .t { font-size: 20px; font-weight: 600; line-height: 1.2; }
+  .A .footer { background: var(--surface2, #EBEBEB); padding: 16px 24px; margin-top: 20px; }
+  .dark .A .footer, .A.dk .footer { --surface2:#1A1A1A; }
+
+  /* =========== B · Workbench =========== */
+  .B { --surface:#F0F0F0; --titlebar:#FFFFFF; --titletext:#1A1A1A; --frame:#C8C8C8; --field:#FFFFFF; --border:#BDBDBD;
+       --text:#141414; --weak:#5A5A5A; --accent:#1F6FEB; --on-accent:#FFFFFF; --track:#D9D9D9; --listbg:#FFFFFF;
+       --selbg:#CCE3FF; --ok:#107C10; --err:#C42B1C; --warn:#A35A00; --r:3px; --row-h:24px; --head-h:26px; --btn-h:28px; --bar-h:14px; }
+  .dark .B, .B.dk { --surface:#252526; --titlebar:#1E1E1E; --titletext:#E8E8E8; --frame:#3C3C3C; --field:#1E1E1E; --border:#4A4A4A;
+       --text:#E8E8E8; --weak:#A0A0A0; --accent:#4C9AFF; --on-accent:#000000; --track:#3A3A3A; --listbg:#1E1E1E;
+       --selbg:#264F78; --ok:#6CCB5F; --err:#F48771; --warn:#E5C07B; }
+  .B .tools { display: flex; align-items: stretch; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .B .tool { width: 74px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; border-radius: 3px; font-size: 12px; }
+  .B .tool .ico { font-size: 24px; color: var(--accent); }
+  .B .tool.on { background: var(--selbg); }
+  .B .tools .search { align-self: center; }
+  .B .path { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .B .path .box { flex: 1; height: 24px; border: 1px solid var(--border); background: var(--field); display: flex; align-items: center; gap: 6px; padding: 0 8px; font-size: 13px; }
+  .B .lh { background: var(--surface); border-bottom: 1px solid var(--border); font-weight: 600; color: var(--text); }
+  .B .lh span + span { border-left: 1px solid var(--border); padding-left: 8px; }
+  .B .lr:nth-child(odd):not(.sel) { background: color-mix(in srgb, var(--listbg) 96%, var(--text)); }
+  .B .sb { border-top: 1px solid var(--border); }
+  .B .sb span + span { border-left: 1px solid var(--border); padding-left: 12px; }
+  .B .dlg { padding: 16px 18px; }
+  .B .dlg .t { font-size: 15px; font-weight: 600; }
+  .B .bar { border-radius: 2px; border: 1px solid var(--border); background: var(--field); }
+  .B .bar > b { border-radius: 0; }
+  .B .kv { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 12px; font-size: 13px; }
+
+  /* =========== C · Navy band =========== */
+  .C { --surface:#F5F7FA; --titlebar:#0B1B33; --titletext:#E6EEF8; --frame:#0B1B33; --field:#FFFFFF; --border:#CBD3DE;
+       --text:#13202F; --weak:#5B6878; --accent:#2F8BFF; --on-accent:#FFFFFF; --track:#21324D; --listbg:#FFFFFF;
+       --selbg:#DCEBFF; --ok:#1B8A3A; --err:#C93A2E; --warn:#A86200; --r:6px; --band:#0B1B33; --bandtext:#FFFFFF; --bandweak:#9FB2CC; }
+  .dark .C, .C.dk { --surface:#0F1A2A; --titlebar:#081322; --titletext:#E6EEF8; --frame:#081322; --field:#16243A; --border:#2A3B55;
+       --text:#E6EEF8; --weak:#93A4BC; --accent:#4D9DFF; --on-accent:#00142E; --track:#1B2B45; --listbg:#0F1A2A;
+       --selbg:#1E3A63; --ok:#5CD08A; --err:#FF8A80; --warn:#F7C04A; --band:#081322; }
+  .C .band { background: var(--band); color: var(--bandtext); }
+  .C .band .weak { color: var(--bandweak); }
+  .C .band .btn { background: transparent; border-color: #2C4366; color: var(--bandtext); }
+  .C .band .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .C .band input.field { background: #13284A; border-color: #2C4366; color: #fff; }
+  .C .band .search .ico { color: var(--bandweak); }
+  .C .bandrow { display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
+  .C .crumbs { display: flex; gap: 8px; align-items: center; padding: 0 14px 12px; color: var(--bandweak); }
+  .C .crumbs b { color: #fff; font-weight: 600; }
+  .C .lh { border-bottom: 1px solid var(--border); }
+  .C .lr.sel { margin: 0 6px; border-radius: 6px; padding: 0 8px; }
+  .C .hero { padding: 20px 24px 0; }
+  .C .hero .pct { font-size: 40px; font-weight: 600; line-height: 1; }
+  .C .hero .bar { margin-top: 18px; border-radius: 0; height: 4px; background: var(--track); margin-left: -24px; margin-right: -24px; }
+  .C .hero .bar b { border-radius: 0; }
+  .C .dlg { padding: 18px 24px 22px; }
+  .C .dlg .t { font-size: 19px; font-weight: 600; }
+  .C .sb { border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="logo" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0B1B33"/><path d="M22 14h16c7 0 11 4 11 9 0 4-2 6-5 7 4 1 7 4 7 9 0 7-5 11-13 11H22z" fill="#2F8BFF"/><path d="M29 21v9h8c3 0 4-2 4-4.5S40 21 37 21zM29 36v9h9c3 0 5-2 5-4.5S41 36 38 36z" fill="#0B1B33"/><rect x="13" y="12" width="6" height="40" rx="3" fill="#B9C2CF"/></symbol>
+  </defs>
+</svg>
+
+<div class="page-head">
+  <h1>B-Rar · three directions</h1>
+  <p>Each one is buildable with Windows' own tools: solid colours, rounded shapes, Segoe UI, the Fluent icon font, Windows' list and progress bar. The logo stays. Pick a direction (or a screen within one) and I'll build every screen in it.</p>
+  <button id="theme" type="button">Light / dark</button>
+</div>
+
+<!-- ============================ A ============================ -->
+<section class="dir" id="dir-a">
+  <h2>A · Windows 11</h2>
+  <p>Looks like Explorer and Settings: a command bar, the list as a white layer with rounded top corners, Windows' accent blue, filled Fluent status icons, buttons in a darker footer strip like Windows 11 dialogs. The closest to "part of Windows".</p>
+  <div class="shots">
+    <figure>
+      <div class="win browser A">
+        <div class="tb"><svg><use href="#logo"/></svg>Holiday 2026.zip - B-Rar<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE922;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="cmd">
+          <button class="btn primary"><i class="ico">&#xF012;</i>Extract to</button>
+          <button class="btn"><i class="ico">&#xE9D5;</i>Test</button>
+          <span class="sep"></span>
+          <button class="btn"><i class="ico">&#xE8E5;</i>Open</button>
+          <div class="search"><i class="ico">&#xE721;</i><input class="field" placeholder="Search Photos"></div>
+        </div>
+        <div class="crumbs"><button class="btn up"><i class="ico">&#xE74A;</i></button><span>Holiday 2026.zip</span><i class="ico">&#xE76C;</i><span>Photos</span></div>
+        <div class="list">
+          <div class="lh"><span>Name</span><span class="r">Size</span><span class="r">Packed</span><span>Modified</span></div>
+          <div class="lr"><span class="n"><i class="ico fold">&#xE8B7;</i>Beach</span><span class="r num">48.2 MB</span><span class="r num w">47.9 MB</span><span class="w num">26/08/2026 21:40</span></div>
+          <div class="lr sel"><span class="n"><i class="ico fold">&#xE8B7;</i>Mountains</span><span class="r num">63.1 MB</span><span class="r num w">62.8 MB</span><span class="w num">26/08/2026 21:40</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2041.jpg</span><span class="r num">4.1 MB</span><span class="r num w">4.1 MB</span><span class="w num">14/08/2026 10:02</span></div>
+          <div class="lr sel"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2042.jpg</span><span class="r num">3.8 MB</span><span class="r num w">3.8 MB</span><span class="w num">14/08/2026 10:03</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xE8A5;</i>notes.txt</span><span class="r num">1.2 KB</span><span class="r num w">612 B</span><span class="w num">15/08/2026 19:11</span></div>
+        </div>
+        <div class="sb"><span>2 selected · 66.9 MB</span><span>214 files · 1.1 GB</span></div>
+      </div>
+      <figcaption>Browse (the app shows each file type's real Windows icon)</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win A" style="--w:520px">
+        <div class="tb"><svg><use href="#logo"/></svg>27% - Holiday 2026.zip<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg" style="padding-bottom:0">
+          <div class="h"><svg width="40" height="40"><use href="#logo"/></svg><div><div class="t">Extracting Holiday 2026.zip</div><div class="weak">to D:\Pictures\Holiday 2026</div></div></div>
+          <div style="display:flex;justify-content:space-between;margin-top:22px"><span class="num">1.2 GB of 4.5 GB</span><strong class="num">27%</strong></div>
+          <div class="bar" style="margin-top:8px"><b style="width:27%"></b></div>
+          <div class="weak num" style="margin-top:8px">612 MB/s · 6 s left · 58 files</div>
+          <div class="weak" style="font-size:12px;margin-top:2px">Mountains\IMG_2042.jpg</div>
+        </div>
+        <div class="footer buttons"><button class="btn"><i class="ico">&#xE769;</i>Pause</button><button class="btn">Cancel</button></div>
+      </div>
+      <figcaption>Working</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win A" style="--w:540px">
+        <div class="tb"><svg><use href="#logo"/></svg>File already exists<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg" style="padding-bottom:0">
+          <div class="h"><i class="ico status-ico warn">&#xE7BA;</i><div><div class="t">Replace IMG_2042.jpg?</div><div class="weak">in Mountains</div></div></div>
+          <div class="grid2" style="margin-top:16px"><span class="weak">Existing</span><span class="num">3.8 MB · 14 Aug 2026, 10:03</span><span class="weak">From archive</span><span class="num">3.9 MB · 26 Aug 2026, 21:40</span></div>
+          <label class="chk" style="margin-top:14px"><span class="box"></span>Do this for the remaining files</label>
+        </div>
+        <div class="footer buttons"><button class="btn primary">Replace</button><button class="btn">Skip</button><button class="btn">Keep both</button><button class="btn">Cancel</button></div>
+      </div>
+      <figcaption>File already exists</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win A" style="--w:520px">
+        <div class="tb"><svg><use href="#logo"/></svg>Done<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg" style="padding-bottom:0">
+          <div class="h"><i class="ico status-ico ok">&#xEC61;</i><div><div class="t">Extraction complete</div><div class="weak">Holiday 2026.zip</div></div></div>
+          <div class="num" style="margin-top:16px">214 files · 12 folders · 1.1 GB in 1.8 s</div>
+          <div class="weak">Saved to D:\Pictures\Holiday 2026</div>
+        </div>
+        <div class="footer buttons"><button class="btn primary"><i class="ico">&#xE838;</i>Open folder</button><button class="btn">Close</button></div>
+      </div>
+      <figcaption>Extraction complete</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================ B ============================ -->
+<section class="dir" id="dir-b">
+  <h2>B · Workbench</h2>
+  <p>For people who live in archives, in WinRAR's tradition: a toolbar of big icon buttons, an address bar, a dense list with column dividers and alternate rows, a status bar with fields. The progress window shows two bars (total and current file) and the numbers in a grid.</p>
+  <div class="shots">
+    <figure>
+      <div class="win browser B">
+        <div class="tb"><svg><use href="#logo"/></svg>Holiday 2026.zip - B-Rar<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE922;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="tools">
+          <div class="tool on"><i class="ico">&#xF012;</i>Extract to</div>
+          <div class="tool"><i class="ico">&#xE9D5;</i>Test</div>
+          <div class="tool"><i class="ico">&#xE8E5;</i>Open</div>
+          <div class="tool"><i class="ico">&#xE946;</i>Info</div>
+          <div class="search"><i class="ico">&#xE721;</i><input class="field" placeholder="Search this folder"></div>
+        </div>
+        <div class="path"><i class="ico" style="font-size:14px">&#xE74A;</i><div class="box"><svg width="14" height="14"><use href="#logo"/></svg>Holiday 2026.zip\Photos</div></div>
+        <div class="list">
+          <div class="lh"><span>Name</span><span class="r">Size</span><span class="r">Packed</span><span>Modified</span></div>
+          <div class="lr"><span class="n"><i class="ico fold">&#xE8B7;</i>Beach</span><span class="r num">48.2 MB</span><span class="r num w">47.9 MB</span><span class="w num">26/08/2026 21:40</span></div>
+          <div class="lr sel"><span class="n"><i class="ico fold">&#xE8B7;</i>Mountains</span><span class="r num">63.1 MB</span><span class="r num w">62.8 MB</span><span class="w num">26/08/2026 21:40</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2041.jpg</span><span class="r num">4.1 MB</span><span class="r num w">4.1 MB</span><span class="w num">14/08/2026 10:02</span></div>
+          <div class="lr sel"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2042.jpg</span><span class="r num">3.8 MB</span><span class="r num w">3.8 MB</span><span class="w num">14/08/2026 10:03</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xE8A5;</i>notes.txt</span><span class="r num">1.2 KB</span><span class="r num w">612 B</span><span class="w num">15/08/2026 19:11</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2043.jpg</span><span class="r num">4.0 MB</span><span class="r num w">4.0 MB</span><span class="w num">14/08/2026 10:05</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2044.jpg</span><span class="r num">3.6 MB</span><span class="r num w">3.6 MB</span><span class="w num">14/08/2026 10:06</span></div>
+        </div>
+        <div class="sb"><span>2 of 7 selected · 66.9 MB</span><span>ZIP · 214 files · 1.1 GB → 1.0 GB</span></div>
+      </div>
+      <figcaption>Browse</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win B" style="--w:480px">
+        <div class="tb"><svg><use href="#logo"/></svg>27% Extracting Holiday 2026.zip<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg">
+          <div class="t">Extracting to D:\Pictures\Holiday 2026</div>
+          <div class="weak" style="font-size:13px;margin-top:10px">Mountains\IMG_2042.jpg</div>
+          <div class="bar" style="margin-top:4px"><b style="width:64%"></b></div>
+          <div class="weak" style="font-size:13px;margin-top:10px">Total</div>
+          <div class="bar" style="margin-top:4px"><b style="width:27%"></b></div>
+          <div class="kv num" style="margin-top:12px"><span class="weak">Elapsed</span><span>0:02</span><span class="weak">Processed</span><span>1.2 GB of 4.5 GB</span><span class="weak">Left</span><span>0:06</span><span class="weak">Speed</span><span>612 MB/s</span></div>
+          <div class="buttons" style="margin-top:14px"><button class="btn">Pause</button><button class="btn">Cancel</button></div>
+        </div>
+      </div>
+      <figcaption>Working</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win B" style="--w:500px">
+        <div class="tb"><svg><use href="#logo"/></svg>Confirm file replace<div class="caps"><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg">
+          <div style="display:flex;gap:12px"><i class="ico status-ico warn" style="font-size:28px">&#xE7BA;</i><div><div class="t">The folder already has IMG_2042.jpg</div><div class="weak" style="font-size:13px">D:\Pictures\Holiday 2026\Mountains</div></div></div>
+          <div class="grid2 num" style="margin-top:12px;font-size:13px"><span class="weak">Replace</span><span>3.8 MB, 14/08/2026 10:03</span><span class="weak">with</span><span>3.9 MB, 26/08/2026 21:40</span></div>
+          <label class="chk" style="margin-top:10px;font-size:13px"><span class="box"></span>Apply to all</label>
+          <div class="buttons" style="margin-top:14px"><button class="btn primary">Yes</button><button class="btn">No</button><button class="btn">Rename</button><button class="btn">Cancel</button></div>
+        </div>
+      </div>
+      <figcaption>File already exists</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win B" style="--w:480px">
+        <div class="tb"><svg><use href="#logo"/></svg>B-Rar<div class="caps"><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg">
+          <div style="display:flex;gap:12px;align-items:center"><i class="ico status-ico ok" style="font-size:28px">&#xEC61;</i><div class="t">Done: 214 files extracted, no errors</div></div>
+          <div class="kv num" style="margin-top:12px"><span class="weak">Size</span><span>1.1 GB</span><span class="weak">Time</span><span>1.8 s</span><span class="weak">Folders</span><span>12</span><span class="weak">Speed</span><span>611 MB/s</span></div>
+          <div class="buttons" style="margin-top:14px"><button class="btn primary">Open folder</button><button class="btn">Close</button></div>
+        </div>
+      </div>
+      <figcaption>Extraction complete</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================ C ============================ -->
+<section class="dir" id="dir-c">
+  <h2>C · Navy band</h2>
+  <p>The logo's navy becomes a band across the top of every window: the toolbar and breadcrumb in the browser, a large percentage over an edge-to-edge bar in the progress window. Underneath, a calm blue-grey surface. The most "B-Rar", the least like stock Windows.</p>
+  <div class="shots">
+    <figure>
+      <div class="win browser C">
+        <div class="tb"><svg><use href="#logo"/></svg>Holiday 2026.zip - B-Rar<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE922;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="band">
+          <div class="bandrow"><svg width="28" height="28"><use href="#logo"/></svg><button class="btn primary"><i class="ico">&#xF012;</i>Extract to</button><button class="btn"><i class="ico">&#xE9D5;</i>Test</button><div class="search"><i class="ico">&#xE721;</i><input class="field" placeholder="Search this folder"></div></div>
+          <div class="crumbs"><i class="ico">&#xE74A;</i><span>Holiday 2026.zip</span><i class="ico" style="font-size:10px">&#xE76C;</i><b>Photos</b></div>
+        </div>
+        <div class="list">
+          <div class="lh"><span>Name</span><span class="r">Size</span><span class="r">Packed</span><span>Modified</span></div>
+          <div class="lr"><span class="n"><i class="ico fold">&#xE8B7;</i>Beach</span><span class="r num">48.2 MB</span><span class="r num w">47.9 MB</span><span class="w num">26 Aug 2026</span></div>
+          <div class="lr sel"><span class="n"><i class="ico fold">&#xE8B7;</i>Mountains</span><span class="r num">63.1 MB</span><span class="r num w">62.8 MB</span><span class="w num">26 Aug 2026</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2041.jpg</span><span class="r num">4.1 MB</span><span class="r num w">4.1 MB</span><span class="w num">14 Aug 2026</span></div>
+          <div class="lr sel"><span class="n"><i class="ico doc">&#xEB9F;</i>IMG_2042.jpg</span><span class="r num">3.8 MB</span><span class="r num w">3.8 MB</span><span class="w num">14 Aug 2026</span></div>
+          <div class="lr"><span class="n"><i class="ico doc">&#xE8A5;</i>notes.txt</span><span class="r num">1.2 KB</span><span class="r num w">612 B</span><span class="w num">15 Aug 2026</span></div>
+        </div>
+        <div class="sb"><span>2 selected · 66.9 MB</span><span>214 files · 1.1 GB</span></div>
+      </div>
+      <figcaption>Browse</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win C" style="--w:520px">
+        <div class="tb"><svg><use href="#logo"/></svg>27% - Holiday 2026.zip<div class="caps"><i class="ico">&#xE921;</i><i class="ico">&#xE8BB;</i></div></div>
+        <div class="band hero">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px"><div><div style="font-size:15px;font-weight:600">Extracting Holiday 2026.zip</div><div class="weak">to D:\Pictures\Holiday 2026</div></div><div class="pct num">27%</div></div>
+          <div class="bar"><b style="width:27%"></b></div>
+        </div>
+        <div class="dlg">
+          <div style="display:flex;justify-content:space-between" class="num"><span>1.2 GB of 4.5 GB</span><span class="weak">6 s left</span></div>
+          <div class="weak num" style="margin-top:2px">612 MB/s · 58 files · Mountains\IMG_2042.jpg</div>
+          <div class="buttons" style="margin-top:16px"><button class="btn">Pause</button><button class="btn">Cancel</button></div>
+        </div>
+      </div>
+      <figcaption>Working</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win C" style="--w:540px">
+        <div class="tb"><svg><use href="#logo"/></svg>File already exists<div class="caps"><i class="ico">&#xE8BB;</i></div></div>
+        <div class="dlg">
+          <div style="display:flex;gap:14px;align-items:center"><i class="ico status-ico warn">&#xE7BA;</i><div><div class="t">Replace IMG_2042.jpg?</div><div class="weak">in D:\Pictures\Holiday 2026\Mountains</div></div></div>
+          <div class="grid2 num" style="margin-top:14px"><span class="weak">Existing</span><span>3.8 MB · 14 Aug 2026, 10:03</span><span class="weak">From archive</span><span>3.9 MB · 26 Aug 2026, 21:40</span></div>
+          <label class="chk" style="margin-top:12px"><span class="box"></span>Do this for the remaining files</label>
+          <div class="buttons" style="margin-top:18px"><button class="btn primary">Replace</button><button class="btn">Skip</button><button class="btn">Keep both</button><button class="btn">Cancel</button></div>
+        </div>
+      </div>
+      <figcaption>File already exists</figcaption>
+    </figure>
+
+    <figure>
+      <div class="win C" style="--w:520px">
+        <div class="tb"><svg><use href="#logo"/></svg>Done<div class="caps"><i class="ico">&#xE8BB;</i></div></div>
+        <div class="band hero" style="padding-bottom:20px">
+          <div style="display:flex;align-items:center;gap:14px"><i class="ico status-ico" style="color:#5CD08A">&#xEC61;</i><div><div style="font-size:19px;font-weight:600">Extraction complete</div><div class="weak">Holiday 2026.zip</div></div></div>
+        </div>
+        <div class="dlg">
+          <div class="num">214 files · 12 folders · 1.1 GB in 1.8 s (611 MB/s)</div>
+          <div class="weak">Saved to D:\Pictures\Holiday 2026</div>
+          <div class="buttons" style="margin-top:16px"><button class="btn primary">Open folder</button><button class="btn">Close</button></div>
+        </div>
+      </div>
+      <figcaption>Extraction complete</figcaption>
+    </figure>
+  </div>
+</section>
+
+<script>
+  document.getElementById('theme').addEventListener('click', () => {
+    const b = document.body;
+    const dark = b.classList.contains('dark') || (!b.classList.contains('light') && matchMedia('(prefers-color-scheme: dark)').matches);
+    b.classList.toggle('dark', !dark);
+    b.classList.toggle('light', dark);
+  });
+  // Follow the system theme until the button is used.
+  if (matchMedia('(prefers-color-scheme: dark)').matches) document.body.classList.add('dark');
+</script>
+</body>
+</html>

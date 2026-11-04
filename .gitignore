@@ -5,3 +5,6 @@
 
 # graphify knowledge graph (local)
 graphify-out/
+
+# Impeccable (design tool) working files
+.impeccable/

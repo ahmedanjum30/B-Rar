@@ -25,15 +25,15 @@ use brar_core::{ConflictPolicy, EntryInfo, Error, Options, PartFinder, Resolutio
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-        Graphics::Gdi::{BeginPaint, COLOR_BTNFACE, EndPaint, FillRect, GetSysColorBrush, InvalidateRect, PAINTSTRUCT},
+        Graphics::Gdi::{BeginPaint, DT_LEFT, EndPaint, InvalidateRect, PAINTSTRUCT},
         Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Controls::{NMHDR, SetWindowTheme},
+            Controls::NMHDR,
             Input::KeyboardAndMouse::{GetFocus, GetKeyState},
             Shell::{
                 DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
-                SHGetFileInfoW, SIID_ERROR, SIID_KEY,
+                SHGetFileInfoW,
             },
             WindowsAndMessaging::*,
         },
@@ -44,6 +44,7 @@ use windows::{
 use crate::{
     app::human,
     shell,
+    theme::{self, Kind, Tone},
     update::{self, Release},
     win::{self, Builder, Fonts, IDCANCEL, IDOK, Role},
 };
@@ -55,8 +56,10 @@ const ID_EXTRACT: i32 = 202;
 const ID_TEST: i32 = 203;
 const ID_UP: i32 = 204;
 const ID_CRUMBS: i32 = 205;
-const ID_STATUSBAR: i32 = 206;
 const ID_LOGO: i32 = 207;
+const ID_OPEN: i32 = 208;
+const ID_INFO: i32 = 209;
+const ID_UPDATES: i32 = 214;
 const ID_PASSWORD: i32 = 210;
 const ID_SHOW: i32 = 211;
 const ID_CHECK: i32 = 212;
@@ -105,9 +108,10 @@ const HDM_SETITEMW: u32 = 0x120C;
 const HDI_FORMAT: u32 = 0x4;
 const HDF_SORTDOWN: i32 = 0x200;
 const HDF_SORTUP: i32 = 0x400;
-const SB_SETPARTS: u32 = WM_USER + 4;
-const SB_SETTEXTW: u32 = WM_USER + 11;
-const SBARS_SIZEGRIP: u32 = 0x100;
+const LVM_SETBKCOLOR: u32 = 0x1001;
+const LVM_SETTEXTCOLOR: u32 = 0x1024;
+const LVM_SETTEXTBKCOLOR: u32 = 0x1026;
+const NM_CUSTOMDRAW: u32 = (-12i32) as u32;
 const EMF_CENTERED: u32 = 0x1;
 const NM_CLICK: u32 = (-2i32) as u32;
 const NM_RETURN: u32 = (-4i32) as u32;
@@ -235,7 +239,9 @@ pub fn run(archive: Option<PathBuf>, password: Option<String>) -> ExitCode {
     };
     let (cw, ch) = win::client_size(hwnd);
     win::fit_client(hwnd, cw, ch, true);
+    theme::dress_window(hwnd);
     let b = Browser::new(hwnd, password);
+    theme::set_fonts(b.fonts.paint());
     BROWSER.with(|cell| *cell.borrow_mut() = Some(b));
     // SAFETY: the window just created.
     unsafe {
@@ -425,6 +431,8 @@ enum Page {
 /// Work that opens a dialog or a menu: done once the state is released (see the module docs).
 enum Later {
     PickArchive,
+    /// The Info button's summary, in a message box.
+    Info(String),
     /// Pick a folder, then extract the selection there.
     Extract,
     /// The list's right-click menu, for the row under the pointer if any.
@@ -462,14 +470,37 @@ struct Inbox {
 
 /// The browsing controls, while an archive is shown.
 struct Ready {
-    logo: HWND,
-    extract: HWND,
-    test: HWND,
+    /// Extract to, Test, Open, Info, Updates.
+    tools: [HWND; 5],
     search: HWND,
     up: HWND,
+    logo: HWND,
     crumbs: HWND,
     list: HWND,
-    status: HWND,
+}
+
+/// Where the browser's self-painted parts are (set by `layout`).
+#[derive(Default)]
+struct Chrome {
+    /// The toolbar's bottom edge.
+    toolbar: i32,
+    /// The path box around the logo and the breadcrumb.
+    path: RECT,
+    status: RECT,
+}
+
+#[repr(C)]
+struct NmLvCustomDraw {
+    hdr: NMHDR,
+    stage: u32,
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    rc: RECT,
+    item_spec: usize,
+    item_state: u32,
+    item_param: isize,
+    text: u32,
+    text_bk: u32,
+    sub_item: i32,
 }
 
 struct Browser {
@@ -488,6 +519,9 @@ struct Browser {
     ready: Option<Ready>,
     /// The update bar's height when shown (0 when not).
     bar: i32,
+    chrome: Chrome,
+    /// The status bar's two fields.
+    status_text: (String, String),
     tree: Tree,
     cwd: usize,
     /// Nodes shown, in display order.
@@ -521,6 +555,8 @@ impl Browser {
             built: win::Page::default(),
             ready: None,
             bar: 0,
+            chrome: Chrome::default(),
+            status_text: (String::new(), String::new()),
             tree: Tree::build(Vec::new()),
             cwd: 0,
             rows: Vec::new(),
@@ -721,10 +757,10 @@ impl Browser {
             }
             Page::Password { wrong, .. } => {
                 let mut b = Builder::new(self.hwnd, &self.fonts, 440);
-                b.header(win::stock_icon(SIID_KEY), "Password required", &format!("{} is encrypted", self.name));
+                b.header_glyph(0xE72E, Tone::Accent, "Password required", &format!("{} is encrypted", self.name));
                 b.space(14);
                 b.edit(ID_PASSWORD, "", win::ES_PASSWORD, "Enter password", 0);
-                b.space(4);
+                b.space(6);
                 b.check(ID_SHOW, "Show password", false);
                 if *wrong {
                     b.space(4);
@@ -737,7 +773,7 @@ impl Browser {
             }
             Page::Failed(message) => {
                 let mut b = Builder::new(self.hwnd, &self.fonts, 460);
-                b.header(win::stock_icon(SIID_ERROR), "Couldn't open the archive", &self.name);
+                b.header_glyph(0xEB90, Tone::Error, "Couldn't open the archive", &self.name);
                 b.space(10);
                 b.label(0, message, Role::Normal, true);
                 b.space(14);
@@ -787,15 +823,22 @@ impl Browser {
     }
 
     fn build_ready(&mut self) {
-        let (hwnd, f) = (self.hwnd, self.fonts.normal);
-        let logo = win::child(hwnd, win::STATIC, "", win::SS_ICON | win::SS_REALSIZECONTROL, 0, ID_LOGO, f);
-        win::send(logo, win::STM_SETICON, win::app_icon(self.px(28)).0 as usize, 0);
-        let extract = win::child(hwnd, win::BUTTON, "Extract to...", WS_TABSTOP.0, 0, ID_EXTRACT, f);
-        let test = win::child(hwnd, win::BUTTON, "Test", WS_TABSTOP.0, 0, ID_TEST, f);
+        let (hwnd, f, small) = (self.hwnd, self.fonts.normal, self.fonts.small);
+        let tool = |id, glyph, label| win::painted(hwnd, label, Kind::Tool, glyph, 0, id, small);
+        let tools = [
+            tool(ID_EXTRACT, 0xF012, "Extract to"),
+            tool(ID_TEST, 0xE9D5, "Test"),
+            tool(ID_OPEN, 0xE8E5, "Open"),
+            tool(ID_INFO, 0xE946, "Info"),
+            tool(ID_UPDATES, 0xE895, "Updates"),
+        ];
         let search = win::child(hwnd, win::EDIT, "", win::ES_AUTOHSCROLL | WS_TABSTOP.0, WS_EX_CLIENTEDGE.0, ID_SEARCH, f);
+        theme::dark_control(search, "DarkMode_CFD");
         win::cue(search, "Search this folder");
-        let up = win::child(hwnd, win::BUTTON, "Up", WS_TABSTOP.0, 0, ID_UP, f);
-        let crumbs = win::child(hwnd, win::LINK, "", WS_TABSTOP.0, 0, ID_CRUMBS, f);
+        let up = win::painted(hwnd, "Up", Kind::Icon, 0xE74A, 0, ID_UP, f);
+        let logo = win::child(hwnd, win::STATIC, "", win::SS_ICON | win::SS_REALSIZECONTROL, 0, ID_LOGO, f);
+        win::send(logo, win::STM_SETICON, win::app_icon(self.px(16)).0 as usize, 0);
+        let crumbs = win::child(hwnd, win::LINK, "", WS_TABSTOP.0 | 0x1 /* LWS_TRANSPARENT */, 0, ID_CRUMBS, f);
         let list = win::child(
             hwnd,
             w!("SysListView32"),
@@ -805,10 +848,13 @@ impl Browser {
             ID_LIST,
             f,
         );
-        // SAFETY: Explorer's look for the list (hover, selection colours).
-        unsafe {
-            let _ = SetWindowTheme(list, w!("Explorer"), None);
-        }
+        let p = theme::palette();
+        // Workbench colours (rows are tinted per item in NM_CUSTOMDRAW); in dark, Windows' dark
+        // scroll bars and header.
+        theme::dark_control(list, "DarkMode_Explorer");
+        win::send(list, LVM_SETBKCOLOR, 0, p.field as isize);
+        win::send(list, LVM_SETTEXTBKCOLOR, 0, p.field as isize);
+        win::send(list, LVM_SETTEXTCOLOR, 0, p.text as isize);
         win::send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
         win::send(list, LVM_SETIMAGELIST, 1 /* LVSIL_SMALL */, system_image_list());
         for (i, column) in COLUMNS.iter().enumerate() {
@@ -838,25 +884,25 @@ impl Browser {
             };
             win::send(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
         }
-        let status = win::child(hwnd, w!("msctls_statusbar32"), "", SBARS_SIZEGRIP, 0, ID_STATUSBAR, f);
+        theme::dark_control(HWND(win::send(list, LVM_GETHEADER, 0, 0) as _), "DarkMode_ItemsView");
+        theme::header_text(list);
         self.ready = Some(Ready {
-            logo,
-            extract,
-            test,
+            tools,
             search,
             up,
+            logo,
             crumbs,
             list,
-            status,
         });
     }
 
     fn drop_ready(&mut self) {
         if let Some(r) = self.ready.take() {
-            for h in [r.logo, r.extract, r.test, r.search, r.up, r.crumbs, r.list, r.status] {
+            for h in r.tools.into_iter().chain([r.search, r.up, r.logo, r.crumbs, r.list]) {
                 win::destroy(h);
             }
         }
+        self.chrome = Chrome::default();
     }
 
     /// Places everything for the window's size.
@@ -865,49 +911,203 @@ impl Browser {
         self.layout_bar();
         let top = self.bar;
         if let Some(r) = &self.ready {
-            let bh = self.fonts_button_height();
+            // Toolbar: big icon buttons, the search field on the right.
+            let (tw, th, gap) = (self.px(70), self.px(56), self.px(2));
+            let mut x = self.px(6);
+            let y1 = top + self.px(5);
+            for &t in &r.tools {
+                win::place(t, x, y1, tw, th);
+                x += tw + gap;
+            }
             let eh = win::measure(self.fonts.normal, "Ag").1 + self.px(10);
-            let (m, y1) = (self.px(14), top + self.px(10));
-            let logo = self.px(28);
-            win::place(r.logo, m, y1 + (bh - logo) / 2, logo, logo);
-            let mut x = m + logo + self.px(10);
-            for (b, label) in [(r.extract, "Extract to..."), (r.test, "Test")] {
-                let bw = (win::measure(self.fonts.normal, label).0 + self.px(32)).max(self.px(88));
-                win::place(b, x, y1, bw, bh);
-                x += bw + self.px(8);
-            }
-            let sw = self.px(240).min(w - x - m - self.px(8)).max(self.px(80));
-            win::place(r.search, w - m - sw, y1 + (bh - eh) / 2, sw, eh);
-            let y2 = y1 + bh + self.px(8);
-            let uw = self.px(56);
-            let ubh = bh - self.px(2);
-            win::place(r.up, m, y2, uw, ubh);
+            let sw = self.px(240).min(w - x - self.px(16)).max(self.px(80));
+            win::place(r.search, w - self.px(10) - sw, y1 + (th - eh) / 2, sw, eh);
+            let toolbar = y1 + th + self.px(5);
+            // Address row: Up, then the path in a field-coloured box.
+            let ah = self.px(26);
+            let y2 = toolbar + self.px(5);
+            win::place(r.up, self.px(6), y2, ah, ah);
+            let path = RECT {
+                left: self.px(6) + ah + self.px(6),
+                top: y2,
+                right: w - self.px(10),
+                bottom: y2 + ah,
+            };
+            let logo = self.px(16);
+            win::place(r.logo, path.left + self.px(6), y2 + (ah - logo) / 2, logo, logo);
             let line = win::measure(self.fonts.normal, "Ag").1;
-            win::place(r.crumbs, m + uw + self.px(10), y2 + (ubh - line) / 2, w - m * 2 - uw - self.px(10), line);
-            // The status bar sizes itself along the bottom.
-            win::send(r.status, WM_SIZE, 0, 0);
-            let mut sr = RECT::default();
-            // SAFETY: plain call.
-            unsafe {
-                let _ = GetWindowRect(r.status, &mut sr);
-            }
-            let sh = sr.bottom - sr.top;
-            let parts = [w * 45 / 100, -1];
-            win::send(r.status, SB_SETPARTS, 2, parts.as_ptr() as isize);
-            let ly = y2 + ubh + self.px(8);
-            win::place(r.list, 0, ly, w, (h - ly - sh).max(0));
+            let cx = path.left + self.px(6) + logo + self.px(8);
+            win::place(r.crumbs, cx, y2 + (ah - line) / 2, (path.right - cx - self.px(6)).max(0), line);
+            // Status bar along the bottom, painted by the window.
+            let sh = self.px(26);
+            let status = RECT {
+                left: 0,
+                top: h - sh,
+                right: w,
+                bottom: h,
+            };
+            let ly = y2 + ah + self.px(5);
+            win::place(r.list, 0, ly, w, (status.top - ly).max(0));
             // The name column takes what the others leave.
             let others = self.px(92 + 92 + 150);
             // SAFETY: plain call.
             let scroll = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
             let name = (w - others - scroll - self.px(4)).max(self.px(120));
             win::send(r.list, LVM_SETCOLUMNWIDTH, 0, name as isize);
+            self.chrome = Chrome { toolbar, path, status };
         } else {
             let (pw, ph) = (self.built.width, self.built.height);
             let x = ((w - pw) / 2).max(self.px(16));
             let y = top + ((h - top - ph) / 2).max(self.px(20));
             self.built.place(x, y);
         }
+        // SAFETY: repaint the window's own parts (toolbar line, path box, status bar).
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+        }
+    }
+
+    /// The parts of the window it paints itself: the update bar, the toolbar's bottom line, the
+    /// path box, the status bar.
+    fn paint(&self, dc: windows::Win32::Graphics::Gdi::HDC) {
+        let p = theme::palette();
+        let (w, _) = win::client_size(self.hwnd);
+        if self.bar > 0 {
+            theme::fill(
+                dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: w,
+                    bottom: self.bar,
+                },
+                p.hover,
+            );
+        }
+        if self.ready.is_none() {
+            return;
+        }
+        let c = &self.chrome;
+        theme::fill(
+            dc,
+            &RECT {
+                left: 0,
+                top: c.toolbar,
+                right: w,
+                bottom: c.toolbar + 1,
+            },
+            p.border,
+        );
+        // The box takes the toolbar colour: the breadcrumb (a SysLink) paints its own background.
+        theme::round(dc, &c.path, 2, p.surface, p.border);
+        let s = c.status;
+        theme::fill(dc, &s, p.surface);
+        theme::fill(dc, &RECT { bottom: s.top + 1, ..s }, p.border);
+        let split = s.left + (s.right - s.left) * 45 / 100;
+        theme::fill(
+            dc,
+            &RECT {
+                left: split,
+                right: split + 1,
+                top: s.top + self.px(5),
+                bottom: s.bottom - self.px(5),
+            },
+            p.border,
+        );
+        let pad = self.px(10);
+        let (left, right) = &self.status_text;
+        theme::text(
+            dc,
+            &RECT {
+                left: s.left + pad,
+                right: split - pad,
+                ..s
+            },
+            left,
+            self.fonts.small,
+            p.weak,
+            DT_LEFT,
+        );
+        theme::text(
+            dc,
+            &RECT {
+                left: split + pad,
+                right: s.right - pad,
+                ..s
+            },
+            right,
+            self.fonts.small,
+            p.weak,
+            DT_LEFT,
+        );
+    }
+
+    /// Alternate row tints and Workbench selection colours (NM_CUSTOMDRAW from the list).
+    fn custom_draw(&self, cd: &mut NmLvCustomDraw) -> LRESULT {
+        const CDDS_PREPAINT: u32 = 0x1;
+        const CDDS_ITEMPREPAINT: u32 = 0x10001;
+        const CDDS_SUBITEMPREPAINT: u32 = 0x30001;
+        const CDRF_NOTIFYITEMDRAW: isize = 0x20;
+        const CDRF_NOTIFYSUBITEMDRAW: isize = 0x20;
+        const CDIS_SELECTED: u32 = 0x1;
+        const CDIS_FOCUS: u32 = 0x10;
+        let p = theme::palette();
+        match cd.stage {
+            CDDS_PREPAINT => LRESULT(CDRF_NOTIFYITEMDRAW),
+            CDDS_ITEMPREPAINT | CDDS_SUBITEMPREPAINT => {
+                let row = cd.item_spec;
+                let selected = self
+                    .ready
+                    .as_ref()
+                    .is_some_and(|r| win::send(r.list, LVM_GETITEMSTATE, row, LVIS_SELECTED as isize) as u32 & LVIS_SELECTED != 0);
+                // Draw selection ourselves, in the theme's colour.
+                cd.item_state &= !(CDIS_SELECTED | CDIS_FOCUS);
+                cd.text_bk = if selected {
+                    p.select
+                } else if row % 2 == 1 {
+                    p.alt
+                } else {
+                    p.field
+                };
+                let weak = cd.stage == CDDS_SUBITEMPREPAINT && cd.sub_item >= 2 && !selected;
+                cd.text = if weak { p.weak } else { p.text };
+                LRESULT(if cd.stage == CDDS_ITEMPREPAINT { CDRF_NOTIFYSUBITEMDRAW } else { 0 })
+            }
+            _ => LRESULT(0),
+        }
+    }
+
+    /// A summary of the archive (the Info button).
+    fn info(&self) -> String {
+        let root = &self.tree.nodes[0];
+        let folders = self.tree.nodes.iter().skip(1).filter(|n| n.is_dir).count();
+        let format = Path::new(&self.name)
+            .extension()
+            .map(|e| e.to_string_lossy().to_uppercase())
+            .unwrap_or_default();
+        let mut lines = vec![
+            format!("{}", self.archive.display()),
+            String::new(),
+            format!("Format: {format}"),
+            format!("Files: {}", root.files),
+            format!("Folders: {folders}"),
+            format!("Size: {}", human(root.size)),
+        ];
+        if let Some(packed) = root.packed.filter(|&p| p > 0) {
+            let ratio = if root.size > 0 {
+                packed as f64 * 100.0 / root.size as f64
+            } else {
+                100.0
+            };
+            lines.push(format!("Packed: {} ({ratio:.0}%)", human(packed)));
+        }
+        if let Ok(m) = std::fs::metadata(&self.archive) {
+            lines.push(format!("Archive file: {}", human(m.len())));
+        }
+        if self.password.is_some() {
+            lines.push("Encrypted".into());
+        }
+        lines.join("\n")
     }
 
     // ---- archives ----
@@ -1200,8 +1400,10 @@ impl Browser {
         win::set_text(r.crumbs, &markup);
     }
 
-    fn update_status(&self) {
-        let Some(r) = &self.ready else { return };
+    fn update_status(&mut self) {
+        if self.ready.is_none() {
+            return;
+        }
         let t = &self.tree;
         let selected = self.selected();
         let summary = if selected.is_empty() {
@@ -1216,13 +1418,21 @@ impl Browser {
             format!("{} selected · {}", selected.len(), human(size))
         };
         let total = &t.nodes[0];
-        let mut right = format!("{} in archive · {}", plural(total.files as usize, "file"), human(total.size));
+        let format = Path::new(&self.name)
+            .extension()
+            .map(|e| e.to_string_lossy().to_uppercase())
+            .unwrap_or_default();
+        let mut right = format!("{format} · {} · {}", plural(total.files as usize, "file"), human(total.size));
+        if let Some(packed) = total.packed.filter(|&p| p > 0) {
+            right.push_str(&format!(" → {}", human(packed)));
+        }
         if let Some((message, _)) = &self.status {
             right = format!("{message}     {right}");
         }
-        for (part, text) in [(0, summary), (1, right)] {
-            let text: Vec<u16> = format!(" {text}").encode_utf16().chain(Some(0)).collect();
-            win::send(r.status, SB_SETTEXTW, part, text.as_ptr() as isize);
+        self.status_text = (summary, right);
+        // SAFETY: repaint the status bar.
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), Some(&self.chrome.status), false);
         }
     }
 
@@ -1413,6 +1623,13 @@ impl Browser {
                 self.refresh_bar();
             }
             ID_EXTRACT => return Some(Later::Extract),
+            ID_OPEN => self.open_cursor(),
+            ID_INFO => return Some(Later::Info(self.info())),
+            ID_UPDATES => match self.update_kind {
+                _ if self.updatable() => self.check_for_updates(true),
+                update::Kind::Store => self.say("The Microsoft Store keeps B-Rar up to date."),
+                _ => self.say("This copy of B-Rar doesn't update itself (a development build)."),
+            },
             ID_TEST => self.spawn(vec!["t".into(), self.archive.clone().into()]),
             ID_UP => self.up(),
             ID_SEARCH if code == win::EN_CHANGE && !self.quiet => self.refresh_rows(),
@@ -1459,6 +1676,11 @@ impl Browser {
     fn notify(&mut self, hdr: &NMHDR, lparam: LPARAM) -> (Option<Later>, LRESULT) {
         let id = hdr.idFrom as i32;
         match (id, hdr.code) {
+            (ID_LIST, NM_CUSTOMDRAW) => {
+                // SAFETY: NM_CUSTOMDRAW from a list view comes with an NMLVCUSTOMDRAW.
+                let cd = unsafe { &mut *(lparam.0 as *mut NmLvCustomDraw) };
+                return (None, self.custom_draw(cd));
+            }
             (ID_LIST, LVN_GETDISPINFOW) => {
                 // SAFETY: LVN_GETDISPINFOW comes with an NMLVDISPINFOW.
                 let info = unsafe { &mut *(lparam.0 as *mut NmLvDispInfo) };
@@ -1536,6 +1758,10 @@ fn later(hwnd: HWND, work: Later) {
                 with(|b| b.say(e));
             }
         },
+        Later::Info(text) => {
+            let name = with(|b| b.name.clone()).unwrap_or_default();
+            shell::info_box(&name, &text, owner);
+        }
         Later::Extract => {
             let Some(archive) = with(|b| b.archive.clone()) else { return };
             match shell::pick_folder(&archive, owner) {
@@ -1616,15 +1842,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_CTLCOLORSTATIC => {
             let brush = win::ctl_color(wparam, lparam);
+            let id = win::id_of(HWND(lparam.0 as _));
             // The update bar's text sits on the bar's colour.
-            if lparam.0 == win::item(hwnd, ID_BAR_TEXT).0 as isize {
-                // SAFETY: a system brush.
-                return LRESULT(unsafe { GetSysColorBrush(COLOR_BTNFACE) }.0 as isize);
+            if id == ID_BAR_TEXT {
+                return LRESULT(theme::hover_brush().0 as isize);
             }
             brush
         }
+        WM_CTLCOLOREDIT => win::edit_color(wparam),
+        WM_DRAWITEM if theme::draw_item(lparam) => LRESULT(1),
         WM_COMMAND => {
             let (id, code) = ((wparam.0 & 0xFFFF) as i32, ((wparam.0 >> 16) & 0xFFFF) as u32);
+            if code == win::BN_CLICKED && lparam.0 != 0 {
+                theme::clicked(hwnd, HWND(lparam.0 as _));
+            }
             if let Some(Some(work)) = with(|b| b.command(id, code)) {
                 later(hwnd, work);
             }
@@ -1666,19 +1897,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
-            // SAFETY: the standard paint pair; the update bar's background.
+            // SAFETY: the standard paint pair; the window's own parts.
             unsafe {
                 let dc = BeginPaint(hwnd, &mut ps);
-                if let Some(bar) = with(|b| b.bar).filter(|&h| h > 0) {
-                    let (w, _) = win::client_size(hwnd);
-                    let r = RECT {
-                        left: 0,
-                        top: 0,
-                        right: w,
-                        bottom: bar,
-                    };
-                    FillRect(dc, &r, GetSysColorBrush(COLOR_BTNFACE));
-                }
+                with(|b| b.paint(dc));
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)

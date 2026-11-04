@@ -18,23 +18,19 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
-        UI::{
-            Shell::{SIID_ERROR, SIID_INFO, SIID_KEY, SIID_WARNING},
-            WindowsAndMessaging::*,
-        },
+        UI::WindowsAndMessaging::*,
     },
     core::w,
 };
 
 use crate::{
     Mode, shell,
+    theme::{self, Tone},
     win::{self, Builder, Fonts, IDCANCEL, IDOK, Role},
 };
 
 const ID_PROGRESS: i32 = 100;
 const ID_AMOUNT: i32 = 101;
-const ID_STATUS: i32 = 102;
-const ID_STATS: i32 = 103;
 const ID_FILES: i32 = 104;
 const ID_CURRENT: i32 = 105;
 const ID_PAUSE: i32 = 106;
@@ -49,6 +45,15 @@ const ID_ENCRYPT: i32 = 125;
 const ID_PW1: i32 = 126;
 const ID_PW2: i32 = 127;
 const ID_PROBLEM: i32 = 128;
+const ID_ELAPSED: i32 = 112;
+const ID_LEFT: i32 = 113;
+const ID_SPEED: i32 = 114;
+
+// Status glyphs (Segoe Fluent Icons / MDL2 Assets).
+const GLYPH_OK: u16 = 0xEC61;
+const GLYPH_ERROR: u16 = 0xEB90;
+const GLYPH_WARNING: u16 = 0xE7BA;
+const GLYPH_LOCK: u16 = 0xE72E;
 const TIMER: usize = 1;
 
 /// Page margins, at 100% scaling.
@@ -80,7 +85,9 @@ pub fn run(archive: PathBuf, mode: Mode, password: Option<String>) -> ExitCode {
         shell::error_box("B-Rar", "Could not open the B-Rar window.");
         return ExitCode::FAILURE;
     };
+    theme::dress_window(hwnd);
     let app = App::new(hwnd, archive, mode);
+    theme::set_fonts(app.fonts.paint());
     APP.with(|a| *a.borrow_mut() = Some(app));
     with(|a| a.begin(password));
     // SAFETY: the window just created.
@@ -501,22 +508,39 @@ impl App {
     }
 
     fn running_page(&self, b: &mut Builder) -> String {
-        let (title, subtitle) = match (self.dest(), self.creating()) {
-            (Some(dest), _) => (format!("Extracting {}", self.name), format!("to {}", dest.display())),
-            (None, true) => (format!("Compressing to {}", self.name), format!("in {}", folder(&self.archive))),
-            (None, false) => (format!("Testing {}", self.name), "Checking every file for errors".to_owned()),
+        let title = match (self.dest(), self.creating()) {
+            (Some(dest), _) => format!("Extracting to {}", dest.display()),
+            (None, true) => format!("Compressing to {}", self.name),
+            (None, false) => format!("Testing {}", self.name),
         };
-        b.header(win::app_icon(b.px(40)), &title, &subtitle);
-        b.space(18);
-        b.progress(ID_PROGRESS, false);
-        b.space(8);
-        let (_, status) = b.pair(ID_AMOUNT, ID_STATUS, Role::Normal, self.fonts.normal);
-        win::send(status, WM_SETFONT, self.fonts.bold.0 as usize, 1);
-        b.pair(ID_STATS, ID_FILES, Role::Weak, self.fonts.normal);
+        let t = b.label(0, &title, Role::Normal, false);
+        win::send(t, WM_SETFONT, self.fonts.heading.0 as usize, 1);
+        b.space(10);
         b.label(ID_CURRENT, "", Role::Weak, false);
-        b.space(16);
+        b.space(4);
+        b.progress(ID_PROGRESS, false);
+        b.space(12);
+        b.grid(&[
+            [("Elapsed", ID_ELAPSED, ""), ("Processed", ID_AMOUNT, "")],
+            [("Left", ID_LEFT, ""), ("Speed", ID_SPEED, "")],
+            [("Files", ID_FILES, ""), ("", 0, "")],
+        ]);
+        b.space(10);
         b.buttons(&[(ID_PAUSE, "Pause"), (IDCANCEL.0, "Cancel")]);
-        format!("{} - B-Rar", self.name)
+        self.running_title(0, 0)
+    }
+
+    /// "27% Extracting name.zip", the window's title while working.
+    fn running_title(&self, done: u64, total: u64) -> String {
+        let verb = match (self.dest(), self.creating()) {
+            (Some(_), _) => "Extracting",
+            (None, true) => "Compressing",
+            (None, false) => "Testing",
+        };
+        match total {
+            0 => format!("{verb} {} - B-Rar", self.name),
+            total => format!("{:.0}% {verb} {} - B-Rar", percent(done, total), self.name),
+        }
     }
 
     /// The progress page's numbers, from the worker's counters.
@@ -528,10 +552,8 @@ impl App {
             self.clock.sample(done);
         }
         let item = |id| win::item(self.hwnd, id);
-        let bar = item(ID_PROGRESS);
         let fraction = if total > 0 { done.min(total) as f64 / total as f64 } else { 0.0 };
-        win::send(bar, win::PBM_SETPOS, (fraction * 10_000.0) as usize, 0);
-        win::send(bar, win::PBM_SETSTATE, if paused { win::PBST_PAUSED } else { win::PBST_NORMAL }, 0);
+        theme::set_bar(item(ID_PROGRESS), (fraction * 10_000.0) as u32, paused, false);
 
         let amount = if total > 0 {
             format!("{} of {}", human(done), human(total))
@@ -539,35 +561,28 @@ impl App {
             human(done)
         };
         win::set_text(item(ID_AMOUNT), &amount);
-        let status = if paused {
+        let elapsed = self.clock.active();
+        win::set_text(item(ID_ELAPSED), &clock(elapsed));
+        let rate = if paused { 0.0 } else { self.clock.rate() };
+        let speed = if paused {
             "Paused".to_owned()
-        } else if total > 0 {
-            format!("{:.0}%", percent(done, total))
+        } else if rate > 0.0 {
+            format!("{}/s", human(rate as u64))
         } else {
             String::new()
         };
-        win::set_text(item(ID_STATUS), &status);
-        let elapsed = self.clock.active();
-        let rate = if paused { 0.0 } else { self.clock.rate() };
-        let mut stats = format!("{} elapsed", clock(elapsed));
-        if !paused && rate > 0.0 {
-            stats = format!("{}/s · {stats}", human(rate as u64));
-            if total > done
-                && elapsed > Duration::from_secs(2)
-                && let Some(left) = self.clock.left(total - done)
-            {
-                stats.push_str(&format!(" · {} left", clock(left)));
-            }
-        }
-        win::set_text(item(ID_STATS), &stats);
-        win::set_text(item(ID_FILES), &format!("{} files", p.files()));
+        win::set_text(item(ID_SPEED), &speed);
+        let left = (!paused && total > done && elapsed > Duration::from_secs(2))
+            .then(|| self.clock.left(total - done))
+            .flatten()
+            .map(clock)
+            .unwrap_or_default();
+        win::set_text(item(ID_LEFT), &left);
+        win::set_text(item(ID_FILES), &p.files().to_string());
         let current = p.current_file();
         win::set_text(item(ID_CURRENT), current.rsplit(['/', '\\']).next().unwrap_or_default());
         win::set_text(item(ID_PAUSE), if paused { "Resume" } else { "Pause" });
-        let title = match total {
-            0 => format!("{} - B-Rar", self.name),
-            total => format!("{:.0}% - {} - B-Rar", percent(done, total), self.name),
-        };
+        let title = self.running_title(done, total);
         win::set_title(self.hwnd, &title);
     }
 
@@ -591,16 +606,19 @@ impl App {
         if self.creating() {
             return self.created_page(b, s, secs);
         }
+        let files = plural(s.files, "file");
         let title = if self.dest().is_some() {
-            "Extraction complete"
+            format!("Done: {files} extracted, no errors")
         } else {
-            "No errors found"
+            format!("No errors found in {files}")
         };
-        b.header(win::stock_icon(SIID_INFO), title, &self.name);
+        b.header_glyph(GLYPH_OK, Tone::Ok, &title, &self.name);
         b.space(12);
-        let mut line = format!("{} files · {} folders · {}", s.files, s.dirs, human(s.bytes));
-        line.push_str(&format!("  in {} ({}/s)", seconds(secs), human((s.bytes as f64 / secs.max(1e-3)) as u64)));
-        b.label(0, &line, Role::Normal, false);
+        let speed = format!("{}/s", human((s.bytes as f64 / secs.max(1e-3)) as u64));
+        b.grid(&[
+            [("Size", 0, &human(s.bytes)), ("Time", 0, &seconds(secs))],
+            [("Folders", 0, &s.dirs.to_string()), ("Speed", 0, &speed)],
+        ]);
         let mut notes = Vec::new();
         if let Some(dest) = self.dest() {
             notes.push(format!("Saved to {}", dest.display()));
@@ -611,8 +629,11 @@ impl App {
         if s.skipped > 0 {
             notes.push(format!("skipped {} links", s.skipped));
         }
-        b.label(0, &notes.join(" · "), Role::Weak, false);
-        b.space(16);
+        if !notes.is_empty() {
+            b.space(4);
+            b.label(0, &notes.join(" · "), Role::Weak, false);
+        }
+        b.space(14);
         if self.dest().is_some() {
             b.buttons(&[(IDOK.0, "Open folder"), (IDCANCEL.0, "Close")]);
         } else {
@@ -622,25 +643,27 @@ impl App {
     }
 
     fn created_page(&self, b: &mut Builder, s: Summary, secs: f64) -> String {
-        b.header(win::stock_icon(SIID_INFO), "Archive created", &self.name);
+        b.header_glyph(
+            GLYPH_OK,
+            Tone::Ok,
+            &format!("Archive created: {}", self.name),
+            &format!("in {}", folder(&self.archive)),
+        );
         b.space(12);
         let packed = std::fs::metadata(&self.archive).map(|m| m.len()).unwrap_or(0);
         let ratio = if s.bytes > 0 { packed as f64 * 100.0 / s.bytes as f64 } else { 100.0 };
-        let line = format!(
-            "{} files · {} folders · {} to {} ({ratio:.0}%)  in {}",
-            s.files,
-            s.dirs,
-            human(s.bytes),
-            human(packed),
-            seconds(secs)
-        );
-        b.label(0, &line, Role::Normal, false);
-        let mut notes = vec![format!("Saved in {}", folder(&self.archive))];
+        b.grid(&[
+            [
+                ("Size", 0, &format!("{} → {}", human(s.bytes), human(packed))),
+                ("Time", 0, &seconds(secs)),
+            ],
+            [("Files", 0, &s.files.to_string()), ("Ratio", 0, &format!("{ratio:.0}%"))],
+        ]);
         if s.skipped > 0 {
-            notes.push(format!("skipped {} links", s.skipped));
+            b.space(4);
+            b.label(0, &format!("skipped {} links", s.skipped), Role::Weak, false);
         }
-        b.label(0, &notes.join(" · "), Role::Weak, false);
-        b.space(16);
+        b.space(14);
         b.buttons(&[(IDOK.0, "Show in folder"), (IDCANCEL.0, "Close")]);
         "Done - B-Rar".into()
     }
@@ -651,7 +674,7 @@ impl App {
             (None, true) => "create",
             (None, false) => "test",
         };
-        b.header(win::stock_icon(SIID_ERROR), &format!("Couldn't {verb} the archive"), &self.name);
+        b.header_glyph(GLYPH_ERROR, Tone::Error, &format!("Couldn't {verb} the archive"), &self.name);
         b.space(12);
         b.label(0, message, Role::Normal, true);
         b.space(16);
@@ -826,33 +849,24 @@ impl App {
 fn conflict_page(b: &mut Builder, ask: &Ask) -> String {
     let file = ask.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let folder = ask.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-    b.header(win::stock_icon(SIID_WARNING), "Replace existing file?", &file);
-    b.label(0, &format!("in {folder}"), Role::Weak, false);
-    b.space(10);
-    b.label(
-        0,
-        &format!("Existing file:   {}", describe(ask.old_size, ask.old_modified)),
-        Role::Normal,
-        false,
-    );
-    b.label(
-        0,
-        &format!("From archive:   {}", describe(ask.new_size, ask.new_modified)),
-        Role::Normal,
-        false,
-    );
-    b.space(8);
-    b.check(ID_ALL, "Do this for all remaining conflicts", false);
-    b.space(14);
-    b.buttons(&[(IDOK.0, "Replace"), (ID_SKIP, "Skip"), (ID_RENAME, "Keep both"), (IDCANCEL.0, "Cancel")]);
-    "File already exists - B-Rar".into()
+    b.header_glyph(GLYPH_WARNING, Tone::Warn, &format!("The folder already has {file}"), &folder);
+    b.space(12);
+    b.rows(&[
+        ("Replace", &describe(ask.old_size, ask.old_modified)),
+        ("with", &describe(ask.new_size, ask.new_modified)),
+    ]);
+    b.space(6);
+    b.check(ID_ALL, "Apply to all", false);
+    b.space(12);
+    b.buttons(&[(IDOK.0, "Yes"), (ID_SKIP, "No"), (ID_RENAME, "Rename"), (IDCANCEL.0, "Cancel")]);
+    "Confirm file replace - B-Rar".into()
 }
 
 fn password_page(b: &mut Builder, name: &str, wrong: bool) -> String {
-    b.header(win::stock_icon(SIID_KEY), "Password required", &format!("{name} is encrypted"));
+    b.header_glyph(GLYPH_LOCK, Tone::Accent, "Password required", &format!("{name} is encrypted"));
     b.space(14);
     b.edit(ID_PASSWORD, "", win::ES_PASSWORD, "Enter password", 0);
-    b.space(4);
+    b.space(6);
     b.check(ID_SHOW, "Show password", false);
     if wrong {
         b.space(4);
@@ -867,8 +881,13 @@ fn password_page(b: &mut Builder, name: &str, wrong: bool) -> String {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_CTLCOLORSTATIC => win::ctl_color(wparam, lparam),
+        WM_CTLCOLOREDIT => win::edit_color(wparam),
+        WM_DRAWITEM if theme::draw_item(lparam) => LRESULT(1),
         WM_COMMAND => {
             let (id, code) = ((wparam.0 & 0xFFFF) as i32, ((wparam.0 >> 16) & 0xFFFF) as u32);
+            if code == win::BN_CLICKED && lparam.0 != 0 {
+                theme::clicked(hwnd, HWND(lparam.0 as _));
+            }
             with(|a| a.command(id, code));
             LRESULT(0)
         }
@@ -899,6 +918,10 @@ fn folder(path: &Path) -> String {
 }
 
 // ---- formatting ----------------------------------------------------------------------------
+
+fn plural(n: u64, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
 
 fn percent(done: u64, total: u64) -> f64 {
     done.min(total) as f64 * 100.0 / total.max(1) as f64

@@ -24,6 +24,7 @@
 mod app;
 mod browse;
 mod shell;
+mod theme;
 mod update;
 mod win;
 

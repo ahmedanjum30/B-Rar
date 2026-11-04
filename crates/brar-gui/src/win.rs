@@ -1,6 +1,6 @@
 //! Small helpers over Win32 for B-Rar's two windows (progress and browser): fonts, child
 //! controls and their text, icons, a message loop, and [`Builder`], which stacks controls down a
-//! page the way a dialog lays them out.
+//! page the way a dialog lays them out, in the Workbench look ([`crate::theme`]).
 
 use std::ffi::c_void;
 
@@ -8,9 +8,8 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
-            COLOR_GRAYTEXT, COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetSysColor,
-            GetSysColorBrush, GetTextExtentPoint32W, GetTextMetricsW, HDC, HFONT, HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-            TEXTMETRICW, TRANSPARENT,
+            CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetTextExtentPoint32W, GetTextMetricsW, HDC,
+            HFONT, HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -20,7 +19,6 @@ use windows::{
             },
             HiDpi::GetDpiForSystem,
             Input::KeyboardAndMouse::EnableWindow,
-            Shell::{SHGSI_ICON, SHGSI_LARGEICON, SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO},
             WindowsAndMessaging::*,
         },
     },
@@ -34,13 +32,11 @@ pub const WM_WAKE: u32 = WM_APP + 1;
 /// Answer to IsDialogMessage's DM_GETDEFID: Enter presses IDOK.
 pub const DM_GETDEFID: u32 = WM_USER;
 
-pub const BS_DEFPUSHBUTTON: u32 = 0x1;
-pub const BS_AUTOCHECKBOX: u32 = 0x3;
-pub const BS_AUTORADIOBUTTON: u32 = 0x9;
+pub const BS_OWNERDRAW: u32 = 0xB;
+pub const SS_OWNERDRAW: u32 = 0xD;
 pub const ES_AUTOHSCROLL: u32 = 0x80;
 pub const ES_PASSWORD: u32 = 0x20;
 pub const SS_NOPREFIX: u32 = 0x80;
-pub const SS_RIGHT: u32 = 0x2;
 pub const SS_ENDELLIPSIS: u32 = 0x4000;
 pub const SS_PATHELLIPSIS: u32 = 0x8000;
 pub const SS_ICON: u32 = 0x3;
@@ -49,13 +45,6 @@ pub const STM_SETICON: u32 = 0x170;
 pub const EM_SETCUEBANNER: u32 = 0x1501;
 pub const EM_SETPASSWORDCHAR: u32 = 0xCC;
 pub const EM_SETSEL: u32 = 0xB1;
-pub const PBM_SETRANGE32: u32 = WM_USER + 6;
-pub const PBM_SETPOS: u32 = WM_USER + 2;
-pub const PBM_SETSTATE: u32 = WM_USER + 16;
-pub const PBM_SETMARQUEE: u32 = WM_USER + 10;
-pub const PBS_MARQUEE: u32 = 0x08;
-pub const PBST_NORMAL: usize = 1;
-pub const PBST_PAUSED: usize = 3;
 pub const BST_CHECKED: usize = 1;
 pub const BN_CLICKED: u32 = 0;
 pub const EN_CHANGE: u32 = 0x300;
@@ -78,6 +67,8 @@ pub fn init_controls() {
             dwICC: ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LINK_CLASS | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES,
         });
     }
+    crate::theme::register_bar();
+    crate::theme::allow_dark_controls();
 }
 
 /// Pixels at 100% scaling to pixels at the system's scaling (the GUI is system DPI aware).
@@ -86,12 +77,16 @@ pub fn scale() -> f64 {
     (unsafe { GetDpiForSystem() }) as f64 / 96.0
 }
 
-/// The fonts both windows use: Windows' message font (Segoe UI), and bigger and semibold kinds.
+/// The fonts both windows use: Windows' message font (Segoe UI), bigger, smaller and semibold
+/// kinds, and Windows' icon font for glyphs.
 pub struct Fonts {
     pub normal: HFONT,
+    pub small: HFONT,
     pub bold: HFONT,
     pub heading: HFONT,
     pub big: HFONT,
+    pub glyph: HFONT,
+    pub glyph_big: HFONT,
 }
 
 impl Fonts {
@@ -115,12 +110,36 @@ impl Fonts {
                 f.lfWeight = weight;
                 CreateFontIndirectW(&f)
             };
+            let icons = |px: f64| {
+                let mut f = base;
+                f.lfHeight = -(px * scale()).round() as i32;
+                f.lfWeight = 400;
+                let face: Vec<u16> = crate::theme::icon_face().encode_utf16().collect();
+                f.lfFaceName = [0; 32];
+                f.lfFaceName[..face.len()].copy_from_slice(&face);
+                CreateFontIndirectW(&f)
+            };
             Fonts {
                 normal: CreateFontIndirectW(&base),
+                small: with(0.9, 400),
                 bold: with(1.0, 600),
-                heading: with(1.35, 600),
+                heading: with(1.15, 600),
                 big: with(2.0, 600),
+                glyph: icons(14.0),
+                glyph_big: icons(24.0),
             }
+        }
+    }
+}
+
+impl Fonts {
+    /// The fonts painted controls draw with.
+    pub fn paint(&self) -> crate::theme::PaintFonts {
+        crate::theme::PaintFonts {
+            text: self.normal,
+            small: self.small,
+            glyph: self.glyph,
+            glyph_big: self.glyph_big,
         }
     }
 }
@@ -129,7 +148,7 @@ impl Drop for Fonts {
     fn drop(&mut self) {
         // SAFETY: fonts this struct created; no control uses them once the window is gone.
         unsafe {
-            for f in [self.normal, self.bold, self.heading, self.big] {
+            for f in [self.normal, self.small, self.bold, self.heading, self.big, self.glyph, self.glyph_big] {
                 let _ = DeleteObject(HGDIOBJ(f.0));
             }
         }
@@ -162,6 +181,12 @@ pub fn child(parent: HWND, class: PCWSTR, text: &str, style: u32, ex: u32, id: i
     }
 }
 
+/// A control's ID.
+pub fn id_of(h: HWND) -> i32 {
+    // SAFETY: plain call.
+    unsafe { GetDlgCtrlID(h) }
+}
+
 pub fn item(parent: HWND, id: i32) -> HWND {
     // SAFETY: plain call.
     unsafe { GetDlgItem(Some(parent), id).unwrap_or_default() }
@@ -188,11 +213,17 @@ pub fn set_text(h: HWND, s: &str) {
 }
 
 pub fn checked(h: HWND) -> bool {
+    if crate::theme::kind_of(h).is_some() {
+        return crate::theme::is_checked(h);
+    }
     // SAFETY: plain message.
     unsafe { SendMessageW(h, BM_GETCHECK, None, None).0 as usize == BST_CHECKED }
 }
 
 pub fn set_check(h: HWND, on: bool) {
+    if crate::theme::kind_of(h).is_some() {
+        return crate::theme::set_checked(h, on);
+    }
     // SAFETY: plain message.
     unsafe {
         SendMessageW(h, BM_SETCHECK, Some(WPARAM(on as usize)), None);
@@ -255,35 +286,33 @@ pub fn app_icon(size: i32) -> HICON {
     }
 }
 
-/// One of Windows' own icons (warning, error, lock...), at the large icon size.
-pub fn stock_icon(id: SHSTOCKICONID) -> HICON {
-    let mut info = SHSTOCKICONINFO {
-        cbSize: size_of::<SHSTOCKICONINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: the struct is the size it says.
-    unsafe {
-        let _ = SHGetStockIconInfo(id, SHGSI_ICON | SHGSI_LARGEICON, &mut info);
-    }
-    info.hIcon
-}
-
-/// Colours a static (and check box, radio button) by its [`Role`] on the window background.
+/// Colours a static by its [`Role`] on the window background (WM_CTLCOLORSTATIC).
 pub fn ctl_color(wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let p = crate::theme::palette();
     // SAFETY: WM_CTLCOLORSTATIC's arguments: the control's DC and handle.
     unsafe {
         let hdc = HDC(wparam.0 as _);
         SetBkMode(hdc, TRANSPARENT);
         let role = GetWindowLongPtrW(HWND(lparam.0 as _), GWLP_USERDATA);
         let color = match role {
-            1 => Some(GetSysColor(COLOR_GRAYTEXT)),
-            2 => Some(0x0000_28C4), // red (BGR)
-            _ => None,
+            1 => p.weak,
+            2 => p.error,
+            _ => p.text,
         };
-        if let Some(c) = color {
-            SetTextColor(hdc, COLORREF(c));
-        }
-        LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+        SetTextColor(hdc, COLORREF(color));
+        LRESULT(crate::theme::surface_brush().0 as isize)
+    }
+}
+
+/// Text fields in the theme's colours (WM_CTLCOLOREDIT).
+pub fn edit_color(wparam: WPARAM) -> LRESULT {
+    let p = crate::theme::palette();
+    // SAFETY: WM_CTLCOLOREDIT's DC.
+    unsafe {
+        let hdc = HDC(wparam.0 as _);
+        SetTextColor(hdc, COLORREF(p.text));
+        windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.field));
+        LRESULT(crate::theme::field_brush().0 as isize)
     }
 }
 
@@ -342,7 +371,7 @@ pub fn register(class: PCWSTR, wndproc: WNDPROC) {
             lpfnWndProc: wndproc,
             hInstance: instance.into(),
             lpszClassName: class,
-            hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+            hbrBackground: crate::theme::surface_brush(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hIcon: app_icon(32),
             hIconSm: app_icon(16),
@@ -430,10 +459,20 @@ pub fn post(hwnd: isize, msg: u32) {
     }
 }
 
+/// A button B-Rar paints itself ([`crate::theme::draw_item`]), with hover tracking.
+pub fn painted(parent: HWND, text: &str, kind: crate::theme::Kind, glyph: u16, group: u8, id: i32, font: HFONT) -> HWND {
+    let b = child(parent, BUTTON, text, BS_OWNERDRAW | WS_TABSTOP.0, 0, id, font);
+    // SAFETY: B-Rar's own control's user data.
+    unsafe {
+        SetWindowLongPtrW(b, GWLP_USERDATA, crate::theme::pack(kind, glyph, 0, group));
+    }
+    crate::theme::track(b);
+    b
+}
+
 pub const STATIC: PCWSTR = w!("STATIC");
 pub const BUTTON: PCWSTR = w!("BUTTON");
 pub const EDIT: PCWSTR = w!("EDIT");
-pub const PROGRESS: PCWSTR = w!("msctls_progress32");
 pub const LINK: PCWSTR = w!("SysLink");
 
 /// Controls stacked down a page of fixed width, dialog style. Positions are relative to the
@@ -526,6 +565,67 @@ impl<'a> Builder<'a> {
         self.y += size.max(th + sh);
     }
 
+    /// A status glyph (Fluent icon font) and two lines beside it: a title, and a subtitle in grey.
+    pub fn header_glyph(&mut self, glyph: u16, tone: crate::theme::Tone, title: &str, subtitle: &str) {
+        let size = self.px(32);
+        let ic = child(self.parent, STATIC, "", SS_OWNERDRAW, 0, 0, self.fonts.normal);
+        // SAFETY: B-Rar's own control's user data.
+        unsafe {
+            SetWindowLongPtrW(ic, GWLP_USERDATA, crate::theme::pack(crate::theme::Kind::Glyph, glyph, tone as u8, 0));
+        }
+        let (th, sh) = (self.line(self.fonts.heading), self.line(self.fonts.normal));
+        let block = if subtitle.is_empty() { th } else { th + sh };
+        let height = size.max(block);
+        self.add(ic, 0, self.y + (height - size) / 2, size, size);
+        let x = size + self.px(12);
+        let w = self.width - x;
+        let top = self.y + (height - block) / 2;
+        let t = child(self.parent, STATIC, title, SS_NOPREFIX | SS_ENDELLIPSIS, 0, 0, self.fonts.heading);
+        self.add(t, x, top, w, th);
+        if !subtitle.is_empty() {
+            let st = child(self.parent, STATIC, subtitle, SS_NOPREFIX | SS_PATHELLIPSIS, 0, 0, self.fonts.normal);
+            set_role(st, Role::Weak);
+            self.add(st, x, top + th, w, sh);
+        }
+        self.y += height;
+    }
+
+    /// Label-value pairs, one to a row, the values getting the rest of the width.
+    pub fn rows(&mut self, rows: &[(&str, &str)]) {
+        let h = self.line(self.fonts.normal);
+        let label_w = rows.iter().map(|(l, _)| measure(self.fonts.normal, l).0).max().unwrap_or(0) + self.px(16);
+        for (label, value) in rows {
+            let l = child(self.parent, STATIC, label, SS_NOPREFIX, 0, 0, self.fonts.normal);
+            set_role(l, Role::Weak);
+            self.add(l, 0, self.y, label_w, h);
+            let v = child(self.parent, STATIC, value, SS_NOPREFIX | SS_ENDELLIPSIS, 0, 0, self.fonts.normal);
+            self.add(v, label_w, self.y, self.width - label_w, h);
+            self.y += h + self.px(4);
+        }
+    }
+
+    /// Label-value pairs, two to a row (Elapsed 0:02 · Processed 1.2 GB of 4.5 GB). The
+    /// values' ids come back in order, for updating them later.
+    pub fn grid(&mut self, rows: &[[(&str, i32, &str); 2]]) {
+        let h = self.line(self.fonts.normal);
+        let label_w = self.px(84);
+        let half = self.width / 2;
+        for row in rows {
+            for (k, (label, id, value)) in row.iter().enumerate() {
+                if label.is_empty() {
+                    continue;
+                }
+                let x = k as i32 * half;
+                let l = child(self.parent, STATIC, label, SS_NOPREFIX, 0, 0, self.fonts.normal);
+                set_role(l, Role::Weak);
+                self.add(l, x, self.y, label_w, h);
+                let v = child(self.parent, STATIC, value, SS_NOPREFIX | SS_ENDELLIPSIS, 0, *id, self.fonts.normal);
+                self.add(v, x + label_w, self.y, half - label_w - self.px(8), h);
+            }
+            self.y += h + self.px(4);
+        }
+    }
+
     /// A line of text, or a wrapped paragraph.
     pub fn label(&mut self, id: i32, text: &str, role: Role, wrap: bool) -> HWND {
         let font = self.fonts.normal;
@@ -540,20 +640,6 @@ impl<'a> Builder<'a> {
         self.add(l, 0, self.y, self.width, h);
         self.y += h;
         l
-    }
-
-    /// Two labels on one line: one on the left, one on the right.
-    pub fn pair(&mut self, left: i32, right: i32, role: Role, font: HFONT) -> (HWND, HWND) {
-        let h = self.line(font);
-        let half = self.width * 2 / 3;
-        let l = child(self.parent, STATIC, "", SS_NOPREFIX | SS_ENDELLIPSIS, 0, left, font);
-        set_role(l, role);
-        self.add(l, 0, self.y, half, h);
-        let r = child(self.parent, STATIC, "", SS_NOPREFIX | SS_RIGHT, 0, right, font);
-        set_role(r, role);
-        self.add(r, half, self.y, self.width - half, h);
-        self.y += h;
-        (l, r)
     }
 
     pub fn edit_height(&self) -> i32 {
@@ -576,6 +662,7 @@ impl<'a> Builder<'a> {
             id,
             self.fonts.normal,
         );
+        crate::theme::dark_control(e, "DarkMode_CFD");
         if !hint.is_empty() {
             cue(e, hint);
         }
@@ -585,8 +672,8 @@ impl<'a> Builder<'a> {
     }
 
     pub fn check(&mut self, id: i32, text: &str, on: bool) -> HWND {
-        let h = self.line(self.fonts.normal) + self.px(6);
-        let c = child(self.parent, BUTTON, text, BS_AUTOCHECKBOX | WS_TABSTOP.0, 0, id, self.fonts.normal);
+        let h = self.line(self.fonts.normal) + self.px(8);
+        let c = painted(self.parent, text, crate::theme::Kind::Check, 0, 0, id, self.fonts.normal);
         set_check(c, on);
         self.add(c, 0, self.y, self.width, h);
         self.y += h;
@@ -595,26 +682,31 @@ impl<'a> Builder<'a> {
 
     /// Radio buttons in a row; `on` is the index of the selected one.
     pub fn radios(&mut self, first_id: i32, labels: &[&str], on: usize) {
-        let h = self.line(self.fonts.normal) + self.px(6);
+        let h = self.line(self.fonts.normal) + self.px(8);
         let mut x = 0;
         for (i, label) in labels.iter().enumerate() {
-            let style = BS_AUTORADIOBUTTON | if i == 0 { WS_GROUP.0 | WS_TABSTOP.0 } else { 0 };
-            let r = child(self.parent, BUTTON, label, style, 0, first_id + i as i32, self.fonts.normal);
+            let r = painted(
+                self.parent,
+                label,
+                crate::theme::Kind::Radio,
+                0,
+                first_id as u8,
+                first_id + i as i32,
+                self.fonts.normal,
+            );
             set_check(r, i == on);
-            let w = measure(self.fonts.normal, label).0 + self.px(28);
+            let w = measure(self.fonts.normal, label).0 + self.px(30);
             self.add(r, x, self.y, w, h);
             x += w + self.px(12);
         }
         self.y += h;
     }
 
-    pub fn progress(&mut self, id: i32, marquee: bool) -> HWND {
-        let h = self.px(if marquee { 6 } else { 8 });
-        let p = child(self.parent, PROGRESS, "", if marquee { PBS_MARQUEE } else { 0 }, 0, id, self.fonts.normal);
-        send(p, PBM_SETRANGE32, 0, 10_000);
-        if marquee {
-            send(p, PBM_SETMARQUEE, 1, 30);
-        }
+    /// The Workbench progress bar ([`crate::theme::set_bar`]); `sweep` while the total is unknown.
+    pub fn progress(&mut self, id: i32, sweep: bool) -> HWND {
+        let h = self.px(14);
+        let p = child(self.parent, crate::theme::BAR_CLASS, "", 0, 0, id, self.fonts.normal);
+        crate::theme::set_bar(p, 0, false, sweep);
         self.add(p, 0, self.y, self.width, h);
         self.y += h;
         p
@@ -630,8 +722,12 @@ impl<'a> Builder<'a> {
             .collect();
         let mut x = self.width - widths.iter().sum::<i32>() - gap * (buttons.len() as i32 - 1).max(0);
         for ((id, label), w) in buttons.iter().zip(widths) {
-            let style = WS_TABSTOP.0 | if *id == IDOK.0 { BS_DEFPUSHBUTTON } else { 0 };
-            let b = child(self.parent, BUTTON, label, style, 0, *id, self.fonts.normal);
+            let kind = if *id == IDOK.0 {
+                crate::theme::Kind::Primary
+            } else {
+                crate::theme::Kind::Button
+            };
+            let b = painted(self.parent, label, kind, 0, 0, *id, self.fonts.normal);
             self.add(b, x, self.y, w, h);
             x += w + gap;
         }
