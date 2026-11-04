@@ -84,8 +84,8 @@ try {
     }
 
     # Screenshots: store\images\<n>-*.png, in order, captioned from listing.md's table.
-    $listing = Get-Content (Join-Path $root 'store\listing.md') -Raw
-    $shots = Get-ChildItem (Join-Path $root 'store\images') -Filter '*.png' | Where-Object Name -Match '^\d-' | Sort-Object Name
+    $listing = Get-Content (Join-Path $root 'store/listing.md') -Raw
+    $shots = Get-ChildItem (Join-Path $root 'store/images') -Filter '*.png' | Where-Object Name -Match '^\d-' | Sort-Object Name
     foreach ($s in $shots) { Copy-Item $s.FullName (Join-Path $stage 'images') }
     foreach ($lang in $submission.listings.PSObject.Properties.Name) {
         $base = $submission.listings.$lang.baseListing
