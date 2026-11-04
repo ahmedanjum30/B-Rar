@@ -1,6 +1,6 @@
 # Microsoft Store listing: B-Rar
 
-Text and answers to paste into Partner Center. Updates are submitted by the release workflow (`installer\publish-store.ps1`, with the `MSSTORE_*` secrets: a Partner Center Entra app with the Manager role, shared with B-Downloader): each release's `B-Rar-<version>-store.msix` goes in as a new submission with its CHANGELOG.md entry as "What's new". To submit by hand instead, the package is the release workflow's `store-package` artifact (or `installer\build.ps1 -Store`). Actions > Store check tests the login.
+Text and answers to paste into Partner Center. Updates are submitted by the release workflow (`installer\publish-store.ps1`, with the `MSSTORE_*` secrets: a Partner Center Entra app with the Manager role, shared with B-Downloader): each release's `B-Rar-<version>-store.msix` goes in as a new submission with its CHANGELOG.md entry as "What's new" and the screenshots below (`-ListingOnly` sends just the screenshots). To submit by hand instead, the package is the release workflow's `store-package` artifact (or `installer\build.ps1 -Store`). Actions > Store check tests the login.
 
 ## Before the first upload
 
@@ -121,13 +121,13 @@ Category: **Utility, productivity or other app**. No user-generated content shar
 
 ## Images
 
-All in `store/images/` (screenshots 1920×1080; made from a demo archive, see the captions):
+All in `store/images/` (screenshots 1366×768 in the dark theme, made from demo archives; `installer\publish-store.ps1` uploads them with each submission, with these captions):
 
 | File | Used for | Caption |
 |---|---|---|
 | `logo-300.png` | 1:1 app tile icon (300×300) | |
 | `1-browse.png` | Screenshot 1 | Look inside an archive and extract only what you pick |
-| `2-extracting.png` | Screenshot 2 | Extracts on every core: 1.2 GB in under 2 seconds |
+| `2-extracting.png` | Screenshot 2 | Extracts on every core: 9.6 GB in about 10 seconds |
 | `3-done.png` | Screenshot 3 | Every file checked as it's extracted |
 | `4-home.png` | Screenshot 4 | Open an archive, or right-click one in File Explorer |
 
