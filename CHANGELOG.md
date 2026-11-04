@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 (2026-11-04)
 
 - **New look: the Workbench, half the size.** The archive browser and the progress window are rebuilt in plain Windows controls, without a UI framework (`B-Rar-GUI.exe` 8.9 MB → 4.1 MB), in a new design (DESIGN.md): a toolbar of big icon buttons (Extract to, Test, Open, Info, Updates), an address bar with the path, a dense list with alternate rows and each file type's Windows icon, a status bar with fields, and progress shown as Elapsed / Left / Processed / Speed. It follows Windows' light or dark setting.
 - **Info and Updates buttons.** Info shows the archive's format, files, sizes and ratio; Updates checks for a new version on demand.
