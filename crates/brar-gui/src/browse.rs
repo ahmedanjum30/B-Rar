@@ -961,10 +961,9 @@ impl Browser {
             let y = top + ((h - top - ph) / 2).max(self.px(20));
             self.built.place(x, y);
         }
-        // SAFETY: repaint the window's own parts (toolbar line, path box, status bar).
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, true);
-        }
+        // Everything moved: repaint the window and its controls (the window's own parts too:
+        // toolbar line, path box, status bar).
+        win::redraw(self.hwnd);
     }
 
     /// The parts of the window it paints itself: the update bar, the toolbar's bottom line, the

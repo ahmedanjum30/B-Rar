@@ -487,6 +487,7 @@ impl App {
         self.built.place(mx, my);
         win::fit_client(self.hwnd, self.built.width + 2 * mx, self.built.height + 2 * my, !self.placed);
         self.placed = true;
+        win::redraw(self.hwnd);
         win::set_title(self.hwnd, &title);
         // The field to type in, or the main button.
         let focus = [ID_PASSWORD, ID_PATH, IDOK.0, ID_PAUSE]

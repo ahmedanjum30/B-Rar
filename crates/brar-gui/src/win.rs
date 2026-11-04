@@ -422,7 +422,18 @@ pub fn client_size(hwnd: HWND) -> (i32, i32) {
 pub fn place(h: HWND, x: i32, y: i32, w: i32, height: i32) {
     // SAFETY: plain call.
     unsafe {
-        let _ = SetWindowPos(h, None, x, y, w, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        // No copying of the old pixels: the window is repainted after a layout ([`redraw`]),
+        // and copied bits left ghosts of moved controls behind.
+        let _ = SetWindowPos(h, None, x, y, w, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    }
+}
+
+/// Repaints the whole window, background and every control, after its controls moved.
+pub fn redraw(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::{RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow};
+    // SAFETY: plain call on a live window.
+    unsafe {
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
 }
 
