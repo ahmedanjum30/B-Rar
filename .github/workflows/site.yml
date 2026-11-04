@@ -1,0 +1,49 @@
+name: Website
+
+# Publishes the website (docs/) to the gh-pages branch when it changes on main, or when run by
+# hand (Actions > Website > Run workflow), without a release. Downloads under download/ stay
+# as the release workflow left them.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# One writer to gh-pages at a time (the release workflow uses the same group).
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: main
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+      - name: Update the site
+        shell: bash
+        run: |
+          cd site
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name download -exec rm -rf {} +
+          cp -r ../main/docs/. .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The site is already up to date."
+            exit 0
+          fi
+          git commit -m "Site from main ${GITHUB_SHA::7}"
+          git push

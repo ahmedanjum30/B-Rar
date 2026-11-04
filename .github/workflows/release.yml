@@ -151,6 +151,10 @@ jobs:
   pages:
     needs: publish
     runs-on: ubuntu-latest
+    # One writer to gh-pages at a time (site.yml uses the same group).
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
