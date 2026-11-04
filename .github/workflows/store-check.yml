@@ -1,9 +1,15 @@
 name: Store check
 
 # Run by hand (Actions > Store check > Run workflow) to check the Microsoft Store login: signs
-# in with the MSSTORE_* secrets and shows B-Rar's Store state. Submits nothing.
+# in with the MSSTORE_* secrets and shows B-Rar's Store state. Submits nothing, unless
+# "screenshots" is ticked: then it submits store/images' screenshots, with the package unchanged.
 on:
   workflow_dispatch:
+    inputs:
+      screenshots:
+        description: Submit the screenshots in store/images (listing only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,8 +23,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Show B-Rar's Microsoft Store state
+        if: ${{ !inputs.screenshots }}
         shell: pwsh
         run: ./installer/publish-store.ps1 -DryRun
+        env:
+          MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+          MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+          MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+      - name: Submit the screenshots
+        if: ${{ inputs.screenshots }}
+        shell: pwsh
+        run: ./installer/publish-store.ps1 -ListingOnly
         env:
           MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
           MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
