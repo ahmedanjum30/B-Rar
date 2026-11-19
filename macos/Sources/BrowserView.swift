@@ -92,6 +92,8 @@ final class BrowserModel: ObservableObject {
             var name = entry.name.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             while name.hasPrefix("./") { name.removeFirst(2) }
             guard !name.isEmpty, name != "." else { continue }
+            // A Mac's metadata for another entry, put back on it when extracting: hidden, as in Finder.
+            if name == "__MACOSX" || name.hasPrefix("__MACOSX/") || (name as NSString).lastPathComponent.hasPrefix("._") { continue }
             addFolder((name as NSString).deletingLastPathComponent)
             if entry.isDir && nodes[name] != nil { continue }
             nodes[name] = Node(id: name, name: (name as NSString).lastPathComponent, isDir: entry.isDir, size: entry.size,

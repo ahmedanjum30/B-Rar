@@ -34,6 +34,10 @@ zstd = "0.14.3"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_SystemInformation"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Extended attributes from zips made on a Mac (apple_double.rs).
+libc = "0.2"
+
 [dev-dependencies]
 # Only to check B-Rar's 7z reading against (and its LZMA bench).
 sevenz-rust2 = { version = "0.24.1", default-features = false, features = ["aes256", "bzip2", "ppmd", "deflate", "zstd", "lz4", "brotli"] }

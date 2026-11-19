@@ -172,6 +172,7 @@ dependencies = [
  "getrandom",
  "hmac",
  "jiff",
+ "libc",
  "libdeflater",
  "liblzma",
  "lz4_flex",

@@ -6,6 +6,7 @@
 //! Files are created with "fail if it exists", so the overwrite prompt costs nothing unless
 //! there really is a conflict.
 
+use crate::apple_double;
 use std::{
     cell::RefCell,
     fs::{self, File, OpenOptions},
@@ -71,6 +72,8 @@ struct Shared {
     bytes: AtomicU64,
     skipped: AtomicU64,
     kept: AtomicU64,
+    /// AppleDouble entries (macOS): where their attributes go, put there once every file is.
+    apple_doubles: Mutex<Vec<(PathBuf, Vec<u8>)>>,
 }
 
 impl Shared {
@@ -209,6 +212,7 @@ impl Sink {
                 bytes: AtomicU64::default(),
                 skipped: AtomicU64::default(),
                 kept: AtomicU64::default(),
+                apple_doubles: Mutex::default(),
             }),
             pick: opts.selection.as_ref().map(|s| Pick {
                 items: s.items.iter().map(|i| normalize_name(i)).filter(|i| !i.is_empty()).collect(),
@@ -283,7 +287,7 @@ impl Sink {
 
     pub(crate) fn dir(&self, name: &str) -> Result<()> {
         self.check()?;
-        if !self.selected(name) {
+        if !self.selected(name) || apple_double::is_resource_folder(name) {
             return Ok(());
         }
         if let Some(path) = self.target(name)? {
@@ -295,6 +299,84 @@ impl Sink {
 
     pub(crate) fn skip(&self) {
         self.shared.skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An AppleDouble entry ([`apple_double`], macOS): kept until [`Sink::finish`], when its
+    /// attributes go on the entry it belongs to. One that turns out not to be AppleDouble is
+    /// written as the file it is.
+    fn apple_double(&self, name: &str, stamp: Stamp, data: Vec<u8>, report: bool) -> Result<()> {
+        if apple_double::attributes(&data).is_none() {
+            if !report {
+                // Already counted toward progress by the decoder.
+                self.shared.take_back(data.len() as u64);
+            }
+            return self.plain_bytes(name, stamp, &data);
+        }
+        if report {
+            self.shared.advance(data.len() as u64);
+        }
+        let partner = apple_double::partner(name).expect("an AppleDouble name");
+        if let Some(path) = self.target(&partner)? {
+            self.shared.apple_doubles.lock().unwrap().push((path, data));
+        }
+        Ok(())
+    }
+
+    /// A symbolic link from a format that keeps its target apart from the data (tar).
+    pub(crate) fn symlink(&self, name: &str, mtime: Option<SystemTime>, target: &[u8]) -> Result<()> {
+        self.check()?;
+        if !self.selected(name) {
+            return Ok(());
+        }
+        let stamp = Stamp {
+            mtime,
+            mode: Some(0o120_777),
+        };
+        self.link(name, stamp, target, false)
+    }
+
+    /// A symbolic link (Unix mode `S_IFLNK`; its data is the target), as zipped apps and
+    /// frameworks have (`Versions/Current`). Made on Unix when the target stays inside the
+    /// destination ([`link_target`]); skipped otherwise, and on Windows.
+    fn link(&self, name: &str, stamp: Stamp, target: &[u8], report: bool) -> Result<()> {
+        self.start(name);
+        let len = target.len() as u64;
+        if report {
+            self.shared.advance(len);
+        }
+        let Some(path) = self.target(name)? else {
+            // Test mode: checked like any entry.
+            self.shared.record_file(len);
+            return Ok(());
+        };
+        #[cfg(unix)]
+        if let (Some(dest), Some(parent)) = (self.dest.as_deref(), path.parent()) {
+            fs::create_dir_all(parent).at(parent)?;
+            if let Some(target) = link_target(dest, parent, target) {
+                let path = match fs::symlink_metadata(&path) {
+                    Err(_) => path,
+                    Ok(existing) => match self.shared.resolve(&path, Some(len), stamp.mtime)? {
+                        None => return Ok(()),
+                        Some(p) if p == path => {
+                            // Replacing: a link can't be made over a file. Folders stay.
+                            if existing.is_dir() {
+                                self.skip();
+                                return Ok(());
+                            }
+                            fs::remove_file(&path).at(&path)?;
+                            path
+                        }
+                        Some(p) => p,
+                    },
+                };
+                std::os::unix::fs::symlink(target, &path).at(&path)?;
+                self.shared.record_file(len);
+                return Ok(());
+            }
+        }
+        let _ = stamp;
+        self.skip();
+        Ok(())
     }
 
     /// Records a file that something else (e.g. unrar) wrote or verified. Its bytes are
@@ -312,6 +394,18 @@ impl Sink {
             // Not picked, but a sequential stream still has to get past it.
             io::copy(reader, &mut io::sink())?;
             return Ok(());
+        }
+        if apple_double::partner(name).is_some() {
+            let mut data = Vec::new();
+            reader.read_to_end(&mut data)?;
+            return self.apple_double(name, stamp, data, true);
+        }
+        if stamp.is_link() {
+            // The target is short; the rest (if any) is drained for the CRC check.
+            let mut target = Vec::new();
+            Read::take(&mut *reader, MAX_LINK as u64 + 1).read_to_end(&mut target)?;
+            io::copy(reader, &mut io::sink())?;
+            return self.link(name, stamp, &target, true);
         }
         self.start(name);
         let shared = &*self.shared;
@@ -339,6 +433,17 @@ impl Sink {
         if !self.selected(name) {
             return Ok(());
         }
+        if apple_double::partner(name).is_some() {
+            return self.apple_double(name, stamp, data.to_vec(), true);
+        }
+        if stamp.is_link() {
+            return self.link(name, stamp, data, true);
+        }
+        self.plain_bytes(name, stamp, data)
+    }
+
+    /// [`Sink::file_bytes`] for an entry known to be an ordinary file.
+    fn plain_bytes(&self, name: &str, stamp: Stamp, data: &[u8]) -> Result<()> {
         self.start(name);
         let shared = &*self.shared;
         let len = data.len() as u64;
@@ -380,6 +485,32 @@ impl Sink {
             });
         }
         self.start(name);
+        if apple_double::partner(name).is_some() {
+            // An AppleDouble entry this big is a large resource fork; it's left out.
+            return Ok(FileOut {
+                shared,
+                file: None,
+                path: None,
+                stamp,
+                len: 0,
+                report: true,
+                record: false,
+            });
+        }
+        if stamp.is_link() {
+            // Links are a few bytes, which decoders hand over whole ([`Sink::link`]); one
+            // this long is no link.
+            self.skip();
+            return Ok(FileOut {
+                shared,
+                file: None,
+                path: None,
+                stamp,
+                len: 0,
+                report: true,
+                record: false,
+            });
+        }
         let Some(path) = self.target(name)? else {
             return Ok(FileOut {
                 shared,
@@ -438,6 +569,12 @@ impl Sink {
         self.check()?;
         if !self.selected(name) {
             return Ok(());
+        }
+        if apple_double::partner(name).is_some() {
+            return self.apple_double(name, stamp, data, report);
+        }
+        if stamp.is_link() {
+            return self.link(name, stamp, &data, report);
         }
         self.start(name);
         let len = data.len() as u64;
@@ -511,6 +648,12 @@ impl Sink {
         drop(guard);
         if let Some(e) = self.shared.error.lock().unwrap().take() {
             return Err(e);
+        }
+        #[cfg(target_os = "macos")]
+        for (path, data) in self.shared.apple_doubles.lock().unwrap().drain(..) {
+            if let Some(attrs) = apple_double::attributes(&data) {
+                apple_double::apply(&path, &attrs);
+            }
         }
         let s = &self.shared;
         Ok(Summary {
@@ -640,6 +783,11 @@ impl From<Option<SystemTime>> for Stamp {
 }
 
 impl Stamp {
+    /// A symbolic link (Unix mode `S_IFLNK`); its data is where it points.
+    fn is_link(&self) -> bool {
+        self.mode.is_some_and(|m| m & 0o170_000 == 0o120_000)
+    }
+
     fn apply(&self, file: &File) {
         // Best effort: a timestamp the filesystem rejects is not worth failing the extraction.
         if let Some(t) = self.mtime {
@@ -652,6 +800,34 @@ impl Stamp {
             let _ = file.set_permissions(fs::Permissions::from_mode(mode & 0o777));
         }
     }
+}
+
+/// Longer link targets are refused (Linux and macOS allow 1024 and 4096 bytes).
+const MAX_LINK: usize = 4096;
+
+/// A link's target, if the link stays inside `dest`: relative, `..` only at the start and
+/// no more of them than the link's folder is deep in the destination (where it really is,
+/// so links made earlier can't be used to climb out), no `..` after a name (a name may
+/// itself be a link), nothing absolute.
+#[cfg(unix)]
+fn link_target<'a>(dest: &Path, parent: &Path, target: &'a [u8]) -> Option<&'a str> {
+    use std::path::Component;
+    let target = std::str::from_utf8(target).ok()?;
+    if target.is_empty() || target.len() > MAX_LINK || target.contains('\0') {
+        return None;
+    }
+    let (dest, parent) = (dest.canonicalize().ok()?, parent.canonicalize().ok()?);
+    let mut depth = parent.strip_prefix(&dest).ok()?.components().count();
+    let mut named = false;
+    for part in Path::new(target).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if !named && depth > 0 => depth -= 1,
+            Component::Normal(_) => named = true,
+            _ => return None,
+        }
+    }
+    Some(target)
 }
 
 fn copy(reader: &mut dyn Read, writer: &mut dyn Write, shared: &Shared) -> io::Result<u64> {

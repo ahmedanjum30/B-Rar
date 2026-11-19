@@ -118,9 +118,11 @@ pub(crate) fn extract(input: &Input, codec: Codec, sink: &Sink, opts: &Options) 
                 mode: entry.header().mode().ok(),
             };
             sink.file_buffered(&name, size, stamp, &mut entry)?;
+        } else if kind.is_symlink() {
+            let target = entry.link_name_bytes().map(|t| t.into_owned()).unwrap_or_default();
+            sink.symlink(&name, modified, &target)?;
         } else {
-            // Symlinks, hard links and devices are skipped: following them safely is a
-            // feature of its own.
+            // Hard links and devices are skipped.
             sink.skip();
         }
     }
