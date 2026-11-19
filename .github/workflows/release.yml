@@ -111,6 +111,21 @@ jobs:
           path: dist/B-Rar-*-linux-x64.tar.gz
           if-no-files-found: error
 
+  # The Mac app for Apple Silicon (M1 and later), zipped for Homebrew (macos/).
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build the app
+        run: sh macos/build-app.sh --native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-files
+          path: dist/B-Rar-*-macos.zip
+          if-no-files-found: error
+
   # The Store package goes to the Microsoft Store: a new submission with this package and the
   # version's CHANGELOG.md entry as "What's new". Skipped without the MSSTORE_* secrets, or
   # while an earlier submission is still in certification.
@@ -132,7 +147,7 @@ jobs:
           MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
 
   publish:
-    needs: [checks, build, linux]
+    needs: [checks, build, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -143,8 +158,12 @@ jobs:
         with:
           name: linux-files
           path: dist
-      - name: Add the Linux file to the checksums
-        run: cd dist && sha256sum B-Rar-*-linux-x64.tar.gz >> SHA256SUMS.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-files
+          path: dist
+      - name: Add the Linux and Mac files to the checksums
+        run: cd dist && sha256sum B-Rar-*-linux-x64.tar.gz B-Rar-*-macos.zip >> SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -161,8 +180,40 @@ jobs:
 
             **Linux:** the `-linux-x64.tar.gz` has the command line, `brar` (x86-64, glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 and later). Unpack it and put `brar` on your PATH, for example `sudo install brar /usr/local/bin/`. Then `brar x archive.rar`, `brar a backup.zip folder`, `brar --help`.
 
+            **Mac** (Apple Silicon, macOS 13 or later): `brew install --cask ahmedanjum30/tap/b-rar`. It adds B-Rar's Quick Actions to Finder's right-click menu and the `brar` command line. Or download **B-Rar-${{ github.ref_name }}-macos.zip**, unzip it and drag B-Rar to Applications; the first time, right-click it and choose **Open**.
+
             **Microsoft Store:** [B-Rar on the Microsoft Store](https://apps.microsoft.com/detail/9MZKQXC7PFCH), signed by Microsoft (no SmartScreen warning), with the Windows 11 short right-click menu and updates through the Store. Or `winget install 9MZKQXC7PFCH`.
           generate_release_notes: true
+
+  # The new version's cask goes to the Homebrew tap (ahmedanjum30/homebrew-tap), so
+  # `brew upgrade` finds it. Skipped without the HOMEBREW_TAP_TOKEN secret (a token that can
+  # push to the tap).
+  homebrew:
+    needs: publish
+    runs-on: macos-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        with:
+          name: macos-files
+          path: dist
+      - name: Update the cask
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ahmedanjum30/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          sh macos/homebrew-cask.sh "$version" "dist/B-Rar-$version-macos.zip" > tap/Casks/b-rar.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/b-rar.rb
+          git commit -m "b-rar $version"
+          git push
 
   # The website (docs/) on GitHub Pages, served from the gh-pages branch, with this version's
   # installer and portable zip at fixed links without redirects:

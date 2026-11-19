@@ -1083,7 +1083,10 @@ impl Ahead {
                 && at < buf.len()
             {
                 // SAFETY: a prefetch of an address inside `buf`; it can't fault.
-                unsafe { std::arch::x86_64::_mm_prefetch(buf.as_ptr().add(at).cast(), std::arch::x86_64::_MM_HINT_T0) };
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch(buf.as_ptr().add(at).cast(), std::arch::x86_64::_MM_HINT_T0)
+                };
             }
             self.pos += len;
         }

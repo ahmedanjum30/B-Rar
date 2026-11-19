@@ -66,6 +66,18 @@ The installer on the Releases page is built by this repository's [release workfl
 
 **Updates:** the Store version updates itself. The installed and portable versions (and the `-x64.msix` signed with B-Rar's own certificate) check GitHub when the window opens and say when a new version is out; nothing is downloaded until you click **Update**. The download is checked against the release's `SHA256SUMS.txt`, then the new setup runs (B-Rar reopens afterwards), the portable files are replaced in place, or the package opens in App Installer.
 
+### Mac
+
+For Macs with Apple Silicon (M1 or later), macOS 13 or later, with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask ahmedanjum30/tap/b-rar
+```
+
+It installs the B-Rar app and the `brar` command line, and `brew upgrade` updates them. In Finder, right-click an archive and choose **Quick Actions** (or **Services**) for **B-Rar: Extract Here**, **Extract to Folder**, **Extract Files…**, **Open in B-Rar** and **Test Archive**; on other files and folders, **B-Rar: Add to ZIP** and **Add to Archive…**. To open archives with a double-click, choose B-Rar under **Open With** (Get Info › Open with › Change All).
+
+Or download `B-Rar-<version>-macos.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest), unzip it and drag B-Rar to Applications. It's signed ad hoc, not with an Apple Developer ID, so open it the first time with a right-click > **Open**, then **Open**.
+
 ### Linux
 
 The command line runs on Linux too: `B-Rar-<version>-linux-x64.tar.gz` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest) has `brar` for x86-64 (glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40 and later). The window and the right-click menu are Windows only.
@@ -93,7 +105,7 @@ B-Rar t archive.7z                       test: decode everything, write nothing
 B-Rar a backup.zip docs photos           make backup.zip from these (-l 0-9, -p password)
 ```
 
-Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all. On Linux the command is `brar`.
+Options: `-y` overwrite without asking, `--skip-existing`, `--rename-existing`, `-p <password>`, `-t <threads>`. `B-Rar --help` lists them all. On Linux and Mac the command is `brar`.
 
 ## Building from source
 
@@ -103,7 +115,7 @@ You need [Rust](https://rustup.rs/) 1.99 or newer with the `x86_64-pc-windows-gn
 cargo build --release
 ```
 
-The programs are in `target/release`. On Linux, `cargo build --release -p brar-cli` builds the command line (with `gcc` and `g++` installed). `installer\build.ps1` packages them as an MSIX signed with a local certificate from `installer\new-cert.ps1` (`-Quick` for a fast test build, `-Install` to install it); `-Store` builds the unsigned package for the Microsoft Store.
+The programs are in `target/release`. On a Mac, `sh macos/build-app.sh --native` builds `dist/B-Rar.app` for that Mac (Xcode or its command-line tools for `swiftc`; leave out `--native` for Apple Silicon and Intel together, with rustup). On Linux, `cargo build --release -p brar-cli` builds the command line (with `gcc` and `g++` installed). `installer\build.ps1` packages them as an MSIX signed with a local certificate from `installer\new-cert.ps1` (`-Quick` for a fast test build, `-Install` to install it); `-Store` builds the unsigned package for the Microsoft Store.
 
 ## Project layout
 
@@ -113,6 +125,8 @@ The programs are in `target/release`. On Linux, `cargo build --release -p brar-c
 | `crates/brar-cli` | `B-Rar.exe`, the command line. |
 | `crates/brar-gui` | `B-Rar-GUI.exe`: the archive browser and the progress window, in plain Win32 (standard Windows controls, no UI framework). |
 | `crates/brar-shell` | `B-Rar-Shell.dll`, the Windows 11 right-click menu. |
+| `crates/brar-ffi` | The engine as a C library (jobs polled for their progress and questions), for the Mac app. |
+| `macos` | The Mac app: its windows in Swift and SwiftUI (`Sources`), the C header, `build-app.sh` (the app, its Finder Quick Actions and archive types) and the Homebrew cask (`homebrew-cask.sh`). |
 | `installer` | The setup's script (`b-rar.toml`, built with [B-Installer](https://github.com/ahmedanjum30/B-Installer) by `build-setup.ps1`), the MSIX manifest and the packaging scripts. |
 | `vendor` | Patched copies of the `unrar` and `unrar_sys` crates. |
 | `benches` | Benchmark scripts and results. |

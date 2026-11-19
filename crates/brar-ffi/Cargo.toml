@@ -1,0 +1,18 @@
+[package]
+name = "brar-ffi"
+description = "B-Rar's engine as a C library, for the macOS app (macos/)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "brar_ffi"
+# The Mac app links the static library; rlib for the tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+brar-core = { path = "../brar-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

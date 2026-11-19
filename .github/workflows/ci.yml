@@ -13,6 +13,7 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/**"
       - ".github/**"
+      - "macos/**"
   pull_request:
     paths:
       - "crates/**"
@@ -23,6 +24,7 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/**"
       - ".github/**"
+      - "macos/**"
   workflow_dispatch:
   # The release workflow runs these checks before building.
   workflow_call:
@@ -62,3 +64,25 @@ jobs:
         run: cargo clippy -p brar-core -p brar-cli --all-targets -- -D warnings
       - name: Test
         run: cargo test -p brar-core -p brar-cli
+
+  # The Mac app on Apple Silicon: the engine, the command line and the C library the Swift
+  # app links (crates/brar-ffi), then the app itself (macos/). The run's artifacts have it.
+  macos:
+    name: macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -p brar-core -p brar-cli -p brar-ffi --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p brar-core -p brar-cli -p brar-ffi
+      - name: Build the app
+        run: sh macos/build-app.sh --native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: B-Rar-macos
+          path: dist/*.zip
