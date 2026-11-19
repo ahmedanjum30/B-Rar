@@ -374,7 +374,8 @@ impl Sink {
                 return Ok(());
             }
         }
-        let _ = stamp;
+        // Used only where links are made (Unix).
+        let _ = (stamp, &path);
         self.skip();
         Ok(())
     }
