@@ -334,13 +334,7 @@ impl Huffman {
     /// Takes the bits by value (not the reader), so the reader isn't forced into memory.
     #[cold]
     fn decode_long(&self, field: u32) -> (u32, usize) {
-        let mut len = 15;
-        for i in self.quick_bits as usize + 1..15 {
-            if field < self.limit[i] {
-                len = i;
-                break;
-            }
-        }
+        let len = (self.quick_bits as usize + 1..15).find(|&i| field < self.limit[i]).unwrap_or(15);
         let dist = field.wrapping_sub(self.limit[len - 1]) >> (16 - len as u32);
         let p = self.first[len].wrapping_add(dist) as usize;
         (len as u32, usize::from(self.symbols[if p < self.size { p } else { 0 }]))
