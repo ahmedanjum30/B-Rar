@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 (2026-11-19)
 
 - **B-Rar for Mac** (Apple Silicon, macOS 13 or later): `brew install --cask ahmedanjum30/tap/b-rar`. The archive browser (folders, search, sorting, opening a file, extracting what you pick), progress with pause and cancel, and the same questions as on Windows (replace, password, a missing part), in a native Mac window (Swift and SwiftUI) around the same Rust engine. Finder's right-click menu gets B-Rar's Quick Actions: Extract Here, Extract to Folder, Extract Files…, Open in B-Rar, Test Archive, Add to ZIP and Add to Archive…. Homebrew also adds the `brar` command line.
 - **Apple Silicon:** the RAR5 decoder builds on ARM processors (one memory prefetch was x86-only).
