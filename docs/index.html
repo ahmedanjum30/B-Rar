@@ -13,7 +13,9 @@
 <meta property="og:url" content="https://ahmedanjum30.github.io/B-Rar/">
 <meta property="og:image" content="https://ahmedanjum30.github.io/B-Rar/images/social.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="theme-color" content="#06101f">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f0f0f0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#252526" media="(prefers-color-scheme: dark)">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -29,207 +31,354 @@
   "url": "https://ahmedanjum30.github.io/B-Rar/",
   "downloadUrl": "https://ahmedanjum30.github.io/B-Rar/download/B-Rar-Setup.exe",
   "codeRepository": "https://github.com/ahmedanjum30/B-Rar",
-  "screenshot": "https://ahmedanjum30.github.io/B-Rar/images/browse.png",
+  "screenshot": "https://ahmedanjum30.github.io/B-Rar/images/browser-light.png",
   "license": "https://github.com/ahmedanjum30/B-Rar/blob/main/LICENSE"
 }
 </script>
 <style>
+  /* B-Rar's Workbench (DESIGN.md): Windows' own greys, one cobalt accent, 1px rules, square
+     corners, label/value grids. Follows the system's light or dark setting. */
   :root {
-    --bg: #ffffff; --bg-soft: #f3f6fb; --card: #ffffff; --line: #e1e6ef;
-    --fg: #121826; --muted: #586274; --accent: #1f6feb; --accent-fg: #ffffff;
-    --hero: linear-gradient(160deg, #e8f1ff 0%, #ffffff 60%);
-    --track: #e6ecf5; --bar: #9db0cc; --bar-us: #1f6feb;
+    --surface: #f0f0f0; --field: #ffffff; --alt: #f7f7f7; --chrome: #ffffff;
+    --rule: #bdbdbd; --rule-soft: #dcdcdc; --text: #141414; --weak: #5a5a5a;
+    --accent: #1f6feb; --on-accent: #ffffff; --select: #cce3ff; --hover: #e5f0ff;
+    --ok: #107c10; --warn: #a35a00; --bar-other: #a9a9a9;
+    --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #06101f; --bg-soft: #0a1628; --card: #0e1b30; --line: #1d2b44;
-      --fg: #eaf0fa; --muted: #9aa7bd; --accent: #3b8cff; --accent-fg: #ffffff;
-      --hero: linear-gradient(160deg, #0c2a57 0%, #06101f 62%);
-      --track: #142238; --bar: #4f6588; --bar-us: #3b8cff;
+      --surface: #252526; --field: #1e1e1e; --alt: #232324; --chrome: #202020;
+      --rule: #4a4a4a; --rule-soft: #383838; --text: #e8e8e8; --weak: #a0a0a0;
+      --accent: #4c9aff; --on-accent: #000000; --select: #264f78; --hover: #2d3a4a;
+      --ok: #6ccb5f; --warn: #e5c07b; --bar-other: #6a6a6a;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #06101f; --bg-soft: #0a1628; --card: #0e1b30; --line: #1d2b44;
-    --fg: #eaf0fa; --muted: #9aa7bd; --accent: #3b8cff; --accent-fg: #ffffff;
-    --hero: linear-gradient(160deg, #0c2a57 0%, #06101f 62%);
-    --track: #142238; --bar: #4f6588; --bar-us: #3b8cff;
+    --surface: #252526; --field: #1e1e1e; --alt: #232324; --chrome: #202020;
+    --rule: #4a4a4a; --rule-soft: #383838; --text: #e8e8e8; --weak: #a0a0a0;
+    --accent: #4c9aff; --on-accent: #000000; --select: #264f78; --hover: #2d3a4a;
+    --ok: #6ccb5f; --warn: #e5c07b; --bar-other: #6a6a6a;
   }
+
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.6 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif; }
-  a { color: var(--accent); }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; scrollbar-color: var(--rule) var(--surface); }
+  body { margin: 0; background: var(--surface); color: var(--text); font: 400 16px/1.6 var(--ui); -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--select); color: var(--text); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  a { color: var(--accent); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
   img { max-width: 100%; height: auto; display: block; }
-  code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.92em; background: var(--bg-soft); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
-  header.bar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
-  header.bar .wrap { display: flex; align-items: center; gap: 16px; height: 60px; }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--fg); text-decoration: none; }
-  .brand img { width: 30px; height: 30px; }
-  nav { margin-left: auto; display: flex; gap: 20px; }
-  nav a { color: var(--muted); text-decoration: none; font-size: 15px; }
-  nav a:hover { color: var(--fg); }
-  @media (max-width: 640px) { nav a.optional { display: none; } }
-  .hero { background: var(--hero); padding: 64px 0 40px; text-align: center; }
-  .hero .mark { width: 112px; height: 112px; margin: 0 auto 18px; filter: drop-shadow(0 12px 30px rgba(31, 111, 235, 0.35)); }
-  .hero h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.1; margin: 0 0 16px; letter-spacing: -0.02em; }
-  .hero p.lead { font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); max-width: 700px; margin: 0 auto 28px; }
-  .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; align-items: center; }
-  .button { display: inline-flex; align-items: center; gap: 10px; padding: 13px 22px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 16px; }
-  .button.primary { background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 24px color-mix(in srgb, var(--accent) 35%, transparent); }
-  .button.primary:hover { filter: brightness(1.08); }
-  .button.secondary { color: var(--fg); border: 1px solid var(--line); background: var(--card); }
-  .meta { margin-top: 14px; color: var(--muted); font-size: 14px; }
-  .brew { display: inline-flex; align-items: center; gap: 10px; margin: 18px auto 0; padding: 8px 8px 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 14.5px; color: var(--muted); max-width: 100%; }
-  .brew code { min-width: 0; border: 0; background: none; padding: 0; color: var(--fg); overflow-wrap: anywhere; text-align: left; }
-  .brew button { flex: none; border: 1px solid var(--line); background: var(--bg-soft); color: var(--fg); border-radius: 7px; padding: 5px 10px; font: inherit; font-size: 13.5px; cursor: pointer; }
-  .brew button:hover { border-color: var(--accent); }
+  svg.g { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  code { font: 0.9em/1 var(--mono); background: var(--field); border: 1px solid var(--rule-soft); border-radius: 3px; padding: 2px 6px; white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+  @media (max-width: 560px) { .wrap { padding: 0 16px; } }
+
+  /* Toolbar: B-Rar's own, glyph over label. */
+  header.toolbar { position: sticky; top: 0; z-index: 10; background: var(--surface); border-bottom: 1px solid var(--rule); }
+  header.toolbar .wrap { display: flex; align-items: center; gap: 4px; height: 68px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: 18px; color: var(--text); text-decoration: none; font: 600 18px/1 var(--display); }
+  .brand img { width: 28px; height: 28px; }
+  .tool { display: grid; justify-items: center; align-content: center; gap: 4px; width: 84px; height: 56px; border-radius: 3px; color: var(--text); text-decoration: none; font-size: 12.5px; line-height: 1; }
+  .tool svg.g { width: 24px; height: 24px; color: var(--accent); }
+  .tool:hover { background: var(--hover); }
+  .tool:active { background: var(--select); }
+  header .get { margin-left: auto; }
+  @media (max-width: 900px) { .tool.optional { display: none; } }
+  @media (max-width: 560px) { .tool { width: 56px; font-size: 11.5px; } .tool.wide { display: none; } .brand { margin-right: 2px; } header .get span.long { display: none; } }
+
+  /* Buttons. The One Fill Rule: only the primary button carries the accent as a fill. */
+  .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 3px; border: 1px solid var(--rule); background: var(--field); color: var(--text); font: 400 15px/1 var(--ui); text-decoration: none; cursor: pointer; transition: background-color 120ms var(--ease), border-color 120ms var(--ease); }
+  .button:hover { background: var(--hover); border-color: var(--accent); }
+  .button:active { background: var(--select); }
+  .button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .button.primary:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+  .button.small { min-height: 32px; padding: 0 12px; font-size: 14px; }
+  .button svg { width: 18px; height: 18px; flex: none; }
+
+  /* First viewport: the offer, and a working progress window. */
+  .hero { padding: 64px 0 72px; border-bottom: 1px solid var(--rule); }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 540px); gap: 56px; align-items: center; }
+  @media (max-width: 960px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } }
+  h1 { font: 600 clamp(40px, 5.6vw, 64px)/1.05 var(--display); letter-spacing: -0.02em; margin: 0 0 20px; text-wrap: balance; }
+  .lead { font-size: clamp(17px, 1.9vw, 19px); color: var(--weak); max-width: 60ch; margin: 0 0 28px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .cta .button.primary { min-height: 44px; padding: 0 20px; font-size: 16px; }
+  .brew { display: flex; align-items: center; gap: 10px; margin: 18px 0 0; max-width: 560px; font-size: 14px; color: var(--weak); }
+  .brew span { flex: none; }
+  .brew code { flex: 1; min-width: 0; padding: 9px 10px; font-size: 13.5px; font-weight: 400; color: var(--text); border-color: var(--rule); white-space: normal; overflow-wrap: anywhere; }
+  .brew .button { min-height: 36px; flex: none; }
   /* On a Mac, Homebrew is the way to install: the command takes the main button's place. */
-  .brew.featured { margin: 0; padding: 10px 10px 10px 18px; font-size: 16px; border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 6px 24px color-mix(in srgb, var(--accent) 25%, transparent); }
-  .brew.featured button { background: var(--accent); color: var(--accent-fg); border: 0; padding: 8px 14px; font-weight: 600; }
-  .alt { margin: 12px 0 0; color: var(--muted); font-size: 14.5px; }
+  .brew.featured { margin: 0; font-size: 15px; width: 100%; flex-wrap: wrap; gap: 6px 10px; }
+  .brew.featured span { flex-basis: 100%; color: var(--text); font-weight: 600; }
+  .brew.featured .button { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  @media (max-width: 560px) { .brew { flex-wrap: wrap; } }
+  .alt { margin: 12px 0 0; color: var(--weak); font-size: 14.5px; }
+  .meta { margin: 18px 0 0; color: var(--weak); font-size: 14px; max-width: 62ch; }
+
+  /* A Windows 11 window, drawn with the Workbench palette. */
+  .win { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; font-size: 15px; line-height: 1.45; text-align: left; }
+  .win .titlebar { display: flex; align-items: center; height: 34px; background: var(--chrome); padding-left: 10px; gap: 8px; font-size: 12.5px; }
+  .win .titlebar img { width: 16px; height: 16px; }
+  .win .titlebar .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .win .caption { display: flex; align-self: stretch; }
+  .win .caption span { width: 44px; display: grid; place-items: center; color: var(--weak); }
+  .win .caption svg { width: 10px; height: 10px; stroke: currentColor; stroke-width: 1; fill: none; }
+  .win .body { padding: 22px 26px; }
+  @media (max-width: 560px) { .win .body { padding: 18px 18px; } }
+  .win .wt { font: 600 18px/1.3 var(--ui); margin: 0; }
+  .win .file { color: var(--weak); font-size: 14px; margin: 6px 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 14px; border: 1px solid var(--rule); border-radius: 2px; background: var(--field); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .bar.paused i { background: var(--warn); }
+  .grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px 24px; margin: 18px 0 0; font-size: 14.5px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: auto 1fr; gap: 4px 16px; } }
+  .grid dt { color: var(--weak); }
+  .grid dd { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .win .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+  .win .buttons .button { min-width: 104px; min-height: 34px; font-size: 14px; }
+  .win .head { display: flex; gap: 12px; align-items: flex-start; }
+  .okmark { width: 26px; height: 26px; border-radius: 50%; background: var(--ok); color: var(--field); display: grid; place-items: center; flex: none; margin-top: 1px; }
+  .okmark svg { width: 15px; height: 15px; stroke: currentColor; stroke-width: 2.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .win .sub { color: var(--weak); font-size: 13px; margin: 2px 0 0; }
+  .demo-note { color: var(--weak); font-size: 13px; margin: 10px 2px 0; }
   [hidden] { display: none !important; }
-  @media (max-width: 640px) { .brew { flex-wrap: wrap; justify-content: center; } }
-  .shot { margin: 44px auto 0; max-width: 1040px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35); }
-  section { padding: 72px 0; }
-  section.soft { background: var(--bg-soft); }
-  h2 { font-size: clamp(26px, 4vw, 36px); margin: 0 0 12px; letter-spacing: -0.01em; text-align: center; }
-  .sub { color: var(--muted); text-align: center; max-width: 660px; margin: 0 auto 40px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
-  .card h3 { margin: 12px 0 6px; font-size: 18px; }
-  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
-  .icon { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-  .icon svg { width: 22px; height: 22px; }
-  .bench { max-width: 820px; margin: 0 auto; display: grid; gap: 26px; }
-  .bench h3 { margin: 0 0 10px; font-size: 17px; }
-  .bench h3 span { color: var(--muted); font-weight: 400; font-size: 15px; }
-  .row { display: grid; grid-template-columns: 110px 1fr 64px; gap: 12px; align-items: center; font-size: 15px; margin: 6px 0; }
-  .row .track { height: 14px; border-radius: 7px; background: var(--track); overflow: hidden; }
-  .row .fill { height: 100%; border-radius: 7px; background: var(--bar); }
-  .row.us .fill { background: var(--bar-us); }
-  .row.us .name, .row.us .time { font-weight: 700; }
+
+  /* Sections */
+  section { padding: 80px 0; border-bottom: 1px solid var(--rule); }
+  section.field { background: var(--field); }
+  h2 { font: 600 clamp(28px, 3.6vw, 38px)/1.15 var(--display); letter-spacing: -0.01em; margin: 0 0 10px; text-wrap: balance; }
+  .sub { color: var(--weak); max-width: 62ch; margin: 0 0 36px; font-size: 17px; }
+  .split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; gap: 24px; } }
+
+  /* List view: column header, alternate rows, hover tint. */
+  .list { width: 100%; border-collapse: collapse; background: var(--field); border: 1px solid var(--rule); font-size: 15px; }
+  .list th { text-align: left; font-weight: 400; font-size: 13px; color: var(--weak); background: var(--field); padding: 7px 12px; border-bottom: 1px solid var(--rule-soft); white-space: nowrap; }
+  .list th + th, .list td + td { border-left: 1px solid var(--rule-soft); }
+  .list td { padding: 10px 12px; vertical-align: top; }
+  .list tbody tr:nth-child(even) { background: var(--alt); }
+  .list tbody tr:hover { background: var(--hover); }
+  .list .name { display: flex; align-items: center; gap: 10px; white-space: nowrap; font-weight: 600; }
+  .list .name svg.g { color: var(--accent); }
+  section.field .list { background: var(--surface); }
+  section.field .list th { background: var(--surface); }
+  section.field .list tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface) 70%, var(--field)); }
+  section.field .list tbody tr:hover { background: var(--hover); }
+  @media (max-width: 640px) {
+    .list.stack, .list.stack tbody, .list.stack tr, .list.stack td { display: block; }
+    .list.stack thead { display: none; }
+    .list.stack td + td { border-left: 0; padding-top: 0; }
+  }
+
+  .browser { margin: 0 0 32px; max-width: 924px; }
+  .list.features td.name { width: 230px; }
+  .browser picture img { border: 1px solid var(--rule); border-radius: 8px; }
+  .browser figcaption { color: var(--weak); font-size: 14px; margin-top: 10px; }
+
+  /* Benchmarks: B-Rar's own progress bars. */
+  .bench { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .run { background: var(--field); border: 1px solid var(--rule); border-radius: 3px; padding: 16px 18px 14px; }
+  .run h3 { font: 600 16px/1.3 var(--ui); margin: 0; }
+  .run p.what { color: var(--weak); font-size: 13.5px; margin: 2px 0 12px; }
+  .row { display: grid; grid-template-columns: 92px 1fr 56px; gap: 12px; align-items: center; font-size: 14px; margin: 7px 0; }
+  .row .bar i { background: var(--bar-other); }
+  .row.us .bar i { background: var(--accent); }
+  .row.us span { font-weight: 600; }
   .row .time { text-align: right; font-variant-numeric: tabular-nums; }
-  .note { color: var(--muted); font-size: 14px; text-align: center; margin-top: 28px; }
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
-  @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
-  .split > * { min-width: 0; }
-  .split h2, .split .sub { text-align: left; margin-left: 0; }
-  .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
-  .list li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 15.5px; }
-  .list b { margin-right: 6px; }
-  .rounded { border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); }
-  pre { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; overflow-x: auto; font: 14.5px/1.7 "Cascadia Mono", Consolas, monospace; margin: 0; }
-  pre .c { color: var(--muted); }
-  details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; }
-  summary { cursor: pointer; font-weight: 600; font-size: 17px; }
-  details p { color: var(--muted); margin: 10px 0 0; }
-  .faq { max-width: 780px; margin: 0 auto; }
-  footer { border-top: 1px solid var(--line); padding: 32px 0; color: var(--muted); font-size: 14.5px; }
-  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; }
-  footer a { color: var(--muted); }
+  .note { color: var(--weak); font-size: 14px; margin: 24px 0 0; max-width: 80ch; }
+
+  pre.terminal { background: var(--field); border: 1px solid var(--rule); border-radius: 3px; padding: 18px 20px; overflow-x: auto; font: 14px/1.75 var(--mono); margin: 0; }
+  pre.terminal .c { color: var(--weak); }
+
+  /* Questions: one list, rows that open. */
+  .faq { max-width: 860px; }
+  .qs { background: var(--field); border: 1px solid var(--rule); border-radius: 3px; }
+  details + details { border-top: 1px solid var(--rule-soft); }
+  summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 13px 16px; font-weight: 600; }
+  summary::-webkit-details-marker { display: none; }
+  summary:hover { background: var(--hover); }
+  summary svg.g { width: 16px; height: 16px; color: var(--weak); transition: transform 160ms var(--ease); }
+  details[open] summary svg.g { transform: rotate(90deg); }
+  details p { margin: 0; padding: 0 16px 16px 42px; max-width: 75ch; }
+
+  /* The close: B-Rar's Done window. */
+  .close { padding: 88px 0; }
+  .close .win { max-width: 720px; margin: 0 auto; }
+  .close .win .body { padding: 24px 28px; }
+  .close .win .sub { font-size: 14.5px; }
+  .close .grid { font-size: 14.5px; }
+  .close .win .buttons { flex-wrap: wrap; }
+  .close .win .buttons .button { min-height: 38px; font-size: 14.5px; }
+
+  /* Status bar */
+  footer { background: var(--surface); border-top: 1px solid var(--rule); color: var(--weak); font-size: 13.5px; }
+  footer .wrap { display: grid; grid-template-columns: 45fr 55fr; }
+  footer .wrap > * { padding: 14px 0; }
+  footer .wrap > * + * { border-left: 1px solid var(--rule); padding-left: 16px; margin-left: 16px; }
+  footer a { color: var(--weak); }
+  footer a:hover { color: var(--text); }
+  @media (max-width: 760px) { footer .wrap { grid-template-columns: 1fr; } footer .wrap > * + * { border-left: 0; border-top: 1px solid var(--rule-soft); padding-left: 0; margin-left: 0; } }
+
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
 </style>
 </head>
 <body>
-<header class="bar">
+<svg width="0" height="0" style="position: absolute" aria-hidden="true">
+  <symbol id="i-speed" viewBox="0 0 24 24"><path d="M13.5 2.75 5 13.25h6.25L10.5 21.25 19 10.75h-6.25z"/></symbol>
+  <symbol id="i-features" viewBox="0 0 24 24"><path d="m3.5 6 1.5 1.5L8 4.5M3.5 12.5 5 14l3-3M3.5 19 5 20.5l3-3M11 6.5h9.5M11 13h9.5M11 19.5h9.5"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M3.75 7.5h16.5v12a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5zM2.75 3.5h18.5v4H2.75zM10 11.5h4"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2.75" y="4.25" width="18.5" height="15.5" rx="1.5"/><path d="m6.75 9.25 3 2.75-3 2.75M12.25 15h5"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.25"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.25v.25"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19.5c-4 1.25-4-2-5.5-2.5M14.75 21.5v-3.4a3 3 0 0 0-.8-2.3c2.7-.3 5.55-1.35 5.55-6a4.7 4.7 0 0 0-1.3-3.25 4.35 4.35 0 0 0-.1-3.25s-1-.3-3.35 1.25a11.5 11.5 0 0 0-6 0C6.4 3 5.4 3.3 5.4 3.3a4.35 4.35 0 0 0-.1 3.25A4.7 4.7 0 0 0 4 9.8c0 4.6 2.85 5.65 5.55 6a3 3 0 0 0-.8 2.3v3.4"/></symbol>
+  <symbol id="i-cores" viewBox="0 0 24 24"><rect x="6.25" y="6.25" width="11.5" height="11.5" rx="1"/><path d="M9.5 9.5h5v5h-5zM9.5 2.75v3.5M14.5 2.75v3.5M9.5 17.75v3.5M14.5 17.75v3.5M2.75 9.5h3.5M2.75 14.5h3.5M17.75 9.5h3.5M17.75 14.5h3.5"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><rect x="4.25" y="3.25" width="15.5" height="17.5" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2.75 6.25a1.5 1.5 0 0 1 1.5-1.5h4.5l2 2h9a1.5 1.5 0 0 1 1.5 1.5v9.5a1.5 1.5 0 0 1-1.5 1.5H4.25a1.5 1.5 0 0 1-1.5-1.5z"/><circle cx="11.5" cy="13" r="2.75"/><path d="m13.5 15 2 2"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.75" y="10.75" width="14.5" height="10.5" rx="1.5"/><path d="M8.25 10.75V7.5a3.75 3.75 0 0 1 7.5 0v3.25M12 15v2"/></symbol>
+  <symbol id="i-parts" viewBox="0 0 24 24"><rect x="2.75" y="4.25" width="5.5" height="15.5" rx="1"/><rect x="9.25" y="4.25" width="5.5" height="15.5" rx="1"/><rect x="15.75" y="4.25" width="5.5" height="15.5" rx="1"/><path d="M5.5 8v2M12 8v2M18.5 8v2"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.75 4.25 5.75v6c0 5 3.4 8.25 7.75 9.5 4.35-1.25 7.75-4.5 7.75-9.5v-6z"/><path d="m8.75 12 2.25 2.25 4.25-4.5"/></symbol>
+  <symbol id="i-zip" viewBox="0 0 24 24"><path d="M5.25 2.75h9.5l4 4v14.5H5.25z"/><path d="M14.75 2.75v4h4M10.5 2.75v1.5M12 5.25v1.5M10.5 7.75v1.5M12 10.25v1.5M10 12.75h3.5v4.5H10z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5.5 6.5 6.5L9 18.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-store" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M3 5.5 10.5 4.5v7H3zM11.5 4.4 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.4z"/></symbol>
+  <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5.5h10"/></symbol>
+  <symbol id="i-max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1"/></symbol>
+  <symbol id="i-x" viewBox="0 0 10 10"><path d="m.5.5 9 9M9.5.5l-9 9"/></symbol>
+</svg>
+
+<header class="toolbar">
   <div class="wrap">
-    <a class="brand" href="#"><img src="images/icon.png" alt="">B-Rar</a>
-    <nav>
-      <a class="optional" href="#features">Features</a>
-      <a class="optional" href="#speed">Speed</a>
-      <a href="#faq">FAQ</a>
-      <a href="https://github.com/ahmedanjum30/B-Rar">GitHub</a>
+    <a class="brand" href="#"><img src="images/icon.png" alt="" width="28" height="28">B-Rar</a>
+    <nav aria-label="Sections" style="display: contents">
+      <a class="tool" href="#speed"><svg class="g"><use href="#i-speed"/></svg>Speed</a>
+      <a class="tool" href="#features"><svg class="g"><use href="#i-features"/></svg>Features</a>
+      <a class="tool optional" href="#formats"><svg class="g"><use href="#i-box"/></svg>Formats</a>
+      <a class="tool optional" href="#cli"><svg class="g"><use href="#i-terminal"/></svg>Command line</a>
+      <a class="tool" href="#faq"><svg class="g"><use href="#i-help"/></svg>FAQ</a>
+      <a class="tool wide" href="https://github.com/ahmedanjum30/B-Rar"><svg class="g"><use href="#i-github"/></svg>GitHub</a>
     </nav>
+    <a class="button primary small get" id="get-top" href="https://apps.microsoft.com/detail/9MZKQXC7PFCH"><svg><use href="#i-store"/></svg>Get <span class="long">B-Rar</span></a>
   </div>
 </header>
 
 <main>
   <div class="hero">
     <div class="wrap">
-      <img class="mark" src="images/logo.png" width="112" height="112" alt="">
-      <h1>Archives, extracted. Fast.</h1>
-      <p class="lead">B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR and 7-Zip, using every core of your computer, on Windows and Mac. Right-click any archive in File Explorer or Finder, or look inside first and take out just what you need. It makes ZIP archives too.</p>
-      <div class="cta">
-        <a class="button primary windows-only" href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10.5 4.5v7H3zM11.5 4.4 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.4z"/></svg>
-          Get it from Microsoft Store
-        </a>
-        <a class="button secondary windows-only" href="download/B-Rar-Setup.exe">Download installer</a>
-        <a class="button secondary windows-only" href="https://github.com/ahmedanjum30/B-Rar/releases/latest">Portable (zip)</a>
-        <a class="button secondary" href="https://github.com/ahmedanjum30/B-Rar">View on GitHub</a>
+      <div>
+        <h1>Archives, extracted. Fast.</h1>
+        <p class="lead">B-Rar opens ZIP, RAR, 7z and tar archives and extracts them faster than WinRAR and 7-Zip, using every core of your computer, on Windows and Mac. Right-click any archive in File Explorer or Finder, or look inside first and take out just what you need. It makes ZIP archives too.</p>
+        <div class="cta">
+          <a class="button primary windows-only" href="https://apps.microsoft.com/detail/9MZKQXC7PFCH"><svg><use href="#i-store"/></svg>Get it from Microsoft Store</a>
+          <a class="button windows-only" href="download/B-Rar-Setup.exe">Download installer</a>
+          <a class="button windows-only" href="https://github.com/ahmedanjum30/B-Rar/releases/latest">Portable (zip)</a>
+          <a class="button" href="https://github.com/ahmedanjum30/B-Rar">View on GitHub</a>
+        </div>
+        <p class="alt" id="mac-zip" hidden>Not using Homebrew? <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">Download the app</a> (B-Rar-&lt;version&gt;-macos.zip) and drag it to Applications.</p>
+        <div class="brew" id="mac"><span>On a Mac:</span><code id="brew-command">brew install --cask ahmedanjum30/tap/b-rar</code><button class="button" type="button" id="brew-copy">Copy</button></div>
+        <p class="meta">Windows 10 and 11 · Mac with Apple Silicon, macOS 13 or later (command line for Linux too) · Free for personal use · No ads, no tracking · Also known as BRar · <code>winget install 9MZKQXC7PFCH</code></p>
       </div>
-      <p class="alt" id="mac-zip" hidden>Not using Homebrew? <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">Download the app</a> (B-Rar-&lt;version&gt;-macos.zip) and drag it to Applications.</p>
-      <p class="meta">Windows 10 and 11 · Mac with Apple Silicon, macOS 13 or later (command line for Linux too) · Free for personal use · No ads, no tracking · Also known as BRar · <code>winget install 9MZKQXC7PFCH</code></p>
-      <div class="brew" id="mac"><span>On a Mac:</span><code id="brew-command">brew install --cask ahmedanjum30/tap/b-rar</code><button type="button" id="brew-copy">Copy</button></div>
-      <div class="shot"><img src="images/browse.png" width="1371" height="939" alt="B-Rar's archive browser showing the folders in Holiday 2026.zip, with Photos and Videos selected"></div>
+
+      <div>
+        <div class="win" id="demo" role="group" aria-label="Demo of B-Rar's progress window">
+          <div class="titlebar">
+            <img src="images/icon.png" alt="" width="16" height="16">
+            <span class="t" data-title>58% Extracting Game assets.zip - B-Rar</span>
+            <span class="caption" aria-hidden="true"><span><svg><use href="#i-min"/></svg></span><span><svg><use href="#i-max"/></svg></span><span><svg><use href="#i-x"/></svg></span></span>
+          </div>
+          <div class="body" data-page="run">
+            <p class="wt">Extracting to E:\Games</p>
+            <div class="file" data-file>common_mp_44.ff</div>
+            <div class="bar" role="progressbar" aria-label="Extracted" aria-valuemin="0" aria-valuemax="100" aria-valuenow="58" data-bar><i style="width: 58%"></i></div>
+            <dl class="grid">
+              <dt>Elapsed</dt><dd data-elapsed>0:04</dd>
+              <dt>Processed</dt><dd data-done>5.6 GB of 9.6 GB</dd>
+              <dt>Left</dt><dd data-left>0:04</dd>
+              <dt>Speed</dt><dd data-speed>1.3 GB/s</dd>
+              <dt>Files</dt><dd data-files>44</dd>
+            </dl>
+            <div class="buttons">
+              <button class="button" type="button" data-pause>Pause</button>
+              <button class="button" type="button" data-cancel>Cancel</button>
+            </div>
+          </div>
+          <div class="body" data-page="done" hidden>
+            <div class="head">
+              <span class="okmark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+              <div><p class="wt">Done: 77 files extracted, no errors</p><p class="sub">Game assets.zip</p></div>
+            </div>
+            <dl class="grid">
+              <dt>Size</dt><dd>9.6 GB</dd>
+              <dt>Time</dt><dd data-time>7.5 s</dd>
+              <dt>Folders</dt><dd>2</dd>
+              <dt>Speed</dt><dd>1.3 GB/s</dd>
+            </dl>
+            <p class="sub" style="margin-top: 10px">Saved to E:\Games</p>
+            <div class="buttons"><button class="button primary" type="button" data-again>Extract again</button></div>
+          </div>
+        </div>
+        <p class="demo-note">A live replay of a real extraction: 9.6 GB, 77 files, in 7.5 seconds. Try Pause.</p>
+      </div>
     </div>
   </div>
 
-  <section id="features">
-    <div class="wrap">
-      <h2>Everything an extractor should do</h2>
-      <p class="sub">Fast where it counts, out of your way everywhere else.</p>
-      <div class="grid">
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
-          <h3>Every core at once</h3>
-          <p>Files are extracted in parallel, so a big archive finishes in a fraction of the time. B-Rar has its own decoders for RAR5, ZIP and 7z.</p>
-        </div>
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h10M7 17h4"/></svg></div>
-          <h3>Right-click menu</h3>
-          <p>In the short Windows 11 menu: Open in B-Rar, Extract files..., Extract to "folder\", Extract here and Test archive. On a Mac, in Finder's Quick Actions.</p>
-        </div>
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m9 13 2 2 4-4"/></svg></div>
-          <h3>Look inside first</h3>
-          <p>Browse an archive's folders, search it, open a single file, and extract only the files and folders you pick.</p>
-        </div>
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
-          <h3>Passwords</h3>
-          <p>Asks when an archive is encrypted, including archives with encrypted file names: AES ZIP, ZipCrypto, 7z and RAR.</p>
-        </div>
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="6" height="16" rx="1"/><rect x="10" y="4" width="5" height="16" rx="1"/><rect x="16" y="4" width="5" height="16" rx="1"/></svg></div>
-          <h3>Archives in parts</h3>
-          <p>RAR volumes (<code>.part1.rar</code>, <code>.r00</code>) and split archives (<code>.001</code>). Start from any part; a missing part is named.</p>
-        </div>
-        <div class="card">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
-          <h3>Safe by default</h3>
-          <p>Asks before replacing a file (replace, skip or keep both), keeps files inside the folder you chose, and checks every file's checksum.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="speed" class="soft">
+  <section id="speed">
     <div class="wrap">
       <h2>Faster than WinRAR and 7-Zip</h2>
       <p class="sub">Time to extract, on the same PC (16 threads, NVMe SSD). Shorter is better.</p>
       <div class="bench">
-        <div>
-          <h3>RAR5 archive <span>1.1 GB, 79 files</span></h3>
-          <div class="row us"><span class="name">B-Rar</span><div class="track"><div class="fill" style="width: 13%"></div></div><span class="time">2.0 s</span></div>
-          <div class="row"><span class="name">WinRAR</span><div class="track"><div class="fill" style="width: 27%"></div></div><span class="time">4.0 s</span></div>
-          <div class="row"><span class="name">7-Zip</span><div class="track"><div class="fill" style="width: 53%"></div></div><span class="time">8.1 s</span></div>
-          <div class="row"><span class="name">Windows tar</span><div class="track"><div class="fill" style="width: 100%"></div></div><span class="time">15.1 s</span></div>
+        <div class="run">
+          <h3>RAR5 archive</h3>
+          <p class="what">1.1 GB, 79 files</p>
+          <div class="row us"><span>B-Rar</span><div class="bar"><i style="width: 13%"></i></div><span class="time">2.0 s</span></div>
+          <div class="row"><span>WinRAR</span><div class="bar"><i style="width: 27%"></i></div><span class="time">4.0 s</span></div>
+          <div class="row"><span>7-Zip</span><div class="bar"><i style="width: 53%"></i></div><span class="time">8.1 s</span></div>
+          <div class="row"><span>Windows tar</span><div class="bar"><i style="width: 100%"></i></div><span class="time">15.1 s</span></div>
         </div>
-        <div>
-          <h3>RAR5 archive with many small files <span>48,000 files, 1 GB</span></h3>
-          <div class="row us"><span class="name">B-Rar</span><div class="track"><div class="fill" style="width: 25%"></div></div><span class="time">7.1 s</span></div>
-          <div class="row"><span class="name">7-Zip</span><div class="track"><div class="fill" style="width: 86%"></div></div><span class="time">24.2 s</span></div>
-          <div class="row"><span class="name">WinRAR</span><div class="track"><div class="fill" style="width: 100%"></div></div><span class="time">28.2 s</span></div>
+        <div class="run">
+          <h3>RAR5 archive with many small files</h3>
+          <p class="what">48,000 files, 1 GB</p>
+          <div class="row us"><span>B-Rar</span><div class="bar"><i style="width: 25%"></i></div><span class="time">7.1 s</span></div>
+          <div class="row"><span>7-Zip</span><div class="bar"><i style="width: 86%"></i></div><span class="time">24.2 s</span></div>
+          <div class="row"><span>WinRAR</span><div class="bar"><i style="width: 100%"></i></div><span class="time">28.2 s</span></div>
         </div>
-        <div>
-          <h3>ZIP archive <span>1.2 GB, 79 files</span></h3>
-          <div class="row us"><span class="name">B-Rar</span><div class="track"><div class="fill" style="width: 37%"></div></div><span class="time">3.0 s</span></div>
-          <div class="row"><span class="name">Windows tar</span><div class="track"><div class="fill" style="width: 50%"></div></div><span class="time">4.1 s</span></div>
-          <div class="row"><span class="name">WinRAR</span><div class="track"><div class="fill" style="width: 88%"></div></div><span class="time">7.1 s</span></div>
-          <div class="row"><span class="name">7-Zip</span><div class="track"><div class="fill" style="width: 100%"></div></div><span class="time">8.1 s</span></div>
+        <div class="run">
+          <h3>ZIP archive</h3>
+          <p class="what">1.2 GB, 79 files</p>
+          <div class="row us"><span>B-Rar</span><div class="bar"><i style="width: 37%"></i></div><span class="time">3.0 s</span></div>
+          <div class="row"><span>Windows tar</span><div class="bar"><i style="width: 50%"></i></div><span class="time">4.1 s</span></div>
+          <div class="row"><span>WinRAR</span><div class="bar"><i style="width: 88%"></i></div><span class="time">7.1 s</span></div>
+          <div class="row"><span>7-Zip</span><div class="bar"><i style="width: 100%"></i></div><span class="time">8.1 s</span></div>
         </div>
       </div>
       <p class="note">One run per tool, all cores. On a 1.1 GB 7z archive made with 7-Zip's defaults, B-Rar takes 3.8 s, 7-Zip 3.9 s, WinRAR 5.0 s. Full method and every result: <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">benches/RESULTS.md</a>.</p>
+    </div>
+  </section>
+
+  <section id="features" class="field">
+    <div class="wrap">
+      <h2>Everything an extractor should do</h2>
+      <p class="sub">Fast where it counts, out of your way everywhere else.</p>
+      <figure class="browser">
+        <picture>
+          <source srcset="images/browser-dark.png" media="(prefers-color-scheme: dark)">
+          <img src="images/browser-light.png" width="924" height="592" alt="B-Rar's archive browser showing the folders and files in Holiday 2026.zip, with the Extract to, Test, Open, Info and Updates toolbar">
+        </picture>
+        <figcaption>The archive browser: look inside, search, then extract just what you pick.</figcaption>
+      </figure>
+      <table class="list stack features">
+          <thead><tr><th scope="col">Name</th><th scope="col">What it does</th></tr></thead>
+          <tbody>
+            <tr><td class="name"><svg class="g"><use href="#i-cores"/></svg>Every core at once</td><td class="desc">Files are extracted in parallel, so a big archive finishes in a fraction of the time. B-Rar has its own decoders for RAR5, ZIP and 7z.</td></tr>
+            <tr><td class="name"><svg class="g"><use href="#i-menu"/></svg>Right-click menu</td><td class="desc">In the short Windows 11 menu: Open in B-Rar, Extract files..., Extract to "folder\", Extract here and Test archive. On a Mac, in Finder's Quick Actions.</td></tr>
+            <tr><td class="name"><svg class="g"><use href="#i-folder"/></svg>Look inside first</td><td class="desc">Browse an archive's folders, search it, open a single file, and extract only the files and folders you pick.</td></tr>
+            <tr><td class="name"><svg class="g"><use href="#i-lock"/></svg>Passwords</td><td class="desc">Asks when an archive is encrypted, including archives with encrypted file names: AES ZIP, ZipCrypto, 7z and RAR.</td></tr>
+            <tr><td class="name"><svg class="g"><use href="#i-parts"/></svg>Archives in parts</td><td class="desc">RAR volumes (<code>.part1.rar</code>, <code>.r00</code>) and split archives (<code>.001</code>). Start from any part; a missing part is named.</td></tr>
+            <tr><td class="name"><svg class="g"><use href="#i-shield"/></svg>Safe by default</td><td class="desc">Asks before replacing a file (replace, skip or keep both), keeps files inside the folder you chose, and checks every file's checksum.</td></tr>
+          </tbody>
+      </table>
     </div>
   </section>
 
@@ -238,24 +387,26 @@
       <div>
         <h2>Opens what you download</h2>
         <p class="sub">Every common archive format, including the ones Windows can't open on its own.</p>
-        <ul class="list">
-          <li><b>ZIP</b>Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd; AES and ZipCrypto</li>
-          <li><b>RAR</b>RAR 4 and RAR 5, solid, encrypted and multi-volume</li>
-          <li><b>7z</b>LZMA, LZMA2, PPMd, BZip2, Deflate, Zstandard, LZ4, Brotli, BCJ2 and the other filters, AES</li>
-          <li><b>tar</b>.tar, .tar.gz, .tar.xz, .tar.zst, .tar.bz2, and single .gz, .xz, .zst, .bz2 files</li>
-        </ul>
       </div>
-      <img class="rounded" src="images/extracting.png" width="1043" height="614" alt="B-Rar extracting a 1.2 GB RAR archive at 767 MB/s">
+      <table class="list">
+        <thead><tr><th scope="col">Format</th><th scope="col">Inside</th></tr></thead>
+        <tbody>
+          <tr><td class="name"><svg class="g"><use href="#i-zip"/></svg>ZIP</td><td class="desc">Deflate, Deflate64, BZip2, LZMA, XZ, Zstandard, PPMd; AES and ZipCrypto</td></tr>
+          <tr><td class="name"><svg class="g"><use href="#i-zip"/></svg>RAR</td><td class="desc">RAR 4 and RAR 5, solid, encrypted and multi-volume</td></tr>
+          <tr><td class="name"><svg class="g"><use href="#i-zip"/></svg>7z</td><td class="desc">LZMA, LZMA2, PPMd, BZip2, Deflate, Zstandard, LZ4, Brotli, BCJ2 and the other filters, AES</td></tr>
+          <tr><td class="name"><svg class="g"><use href="#i-zip"/></svg>tar</td><td class="desc">.tar, .tar.gz, .tar.xz, .tar.zst, .tar.bz2, and single .gz, .xz, .zst, .bz2 files</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
-  <section class="soft">
+  <section id="cli" class="field">
     <div class="wrap split">
       <div>
         <h2>From the command line too</h2>
         <p class="sub">The same engine, from any terminal: <code>B-Rar</code> is on your PATH once it's installed.</p>
       </div>
-      <pre><span class="c"># extract to a folder named after the archive</span>
+      <pre class="terminal"><span class="c"># extract to a folder named after the archive</span>
 B-Rar x archive.rar
 <span class="c"># somewhere else, without asking about existing files</span>
 B-Rar x archive.zip -o D:\out -y
@@ -271,57 +422,76 @@ B-Rar t archive.7z</pre>
     <div class="wrap faq">
       <h2>Questions</h2>
       <p class="sub">Didn't find yours? Open an <a href="https://github.com/ahmedanjum30/B-Rar/issues">issue on GitHub</a>.</p>
-      <details>
-        <summary>Is B-Rar free?</summary>
-        <p>Yes, for personal and other non-commercial use, with every feature included. There are no ads, no trial and no paid version. If you'd like to support it, there's <a href="https://www.patreon.com/cw/ahmedanjum30">Patreon</a>.</p>
-      </details>
-      <details>
-        <summary>Can B-Rar create archives?</summary>
-        <p>ZIP archives, yes: right-click files or folders, <b>B-Rar</b>, and choose <b>Add to archive...</b> (name, compression level, an AES-256 password if you like) or <b>Add to "name.zip"</b>, or run <code>B-Rar a backup.zip folder</code>. It compresses on every core. It doesn't make RAR or 7z archives.</p>
-      </details>
-      <details>
-        <summary>Why is it faster than WinRAR and 7-Zip?</summary>
-        <p>It extracts many files at once, on every core, and writes them in the background while it keeps decoding. RAR5 archives use B-Rar's own decoder, which is faster than 7-Zip's even on a single core, and ZIP uses B-Rar's own Deflate decoder, faster than libdeflate on large files, which even splits a single big file across all your cores. 7z archives use B-Rar's own LZMA2 decoder.</p>
-      </details>
-      <details>
-        <summary>Where's the right-click menu?</summary>
-        <p>Right-click any archive in File Explorer and pick <b>B-Rar</b>. On Windows 11 it's under <b>Show more options</b>; the <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">Microsoft Store version</a> puts it in the short menu.</p>
-      </details>
-      <details>
-        <summary>Is there a Mac version?</summary>
-        <p>Yes, for Macs with Apple Silicon (M1 or later) on macOS 13 or later. Install it with <a href="https://brew.sh">Homebrew</a>: <code>brew install --cask ahmedanjum30/tap/b-rar</code>; <code>brew upgrade</code> keeps it up to date. It's a native Mac app around the same engine, with the archive browser and the same questions as on Windows. In Finder, right-click an archive and choose <b>Quick Actions</b> (or <b>Services</b>) for <b>B-Rar: Extract Here</b>, <b>Extract to Folder</b>, <b>Extract Files…</b>, <b>Open in B-Rar</b> and <b>Test Archive</b>, or files and folders for <b>Add to ZIP</b> and <b>Add to Archive…</b>. Homebrew also adds the <code>brar</code> command line. Zipped apps keep their links and signatures, as with Archive Utility. Or download <b>B-Rar-&lt;version&gt;-macos.zip</b> from the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">latest release</a> and drag B-Rar to Applications; the first time, right-click it and choose <b>Open</b>, since it isn't signed with an Apple Developer ID yet. Intel Macs aren't supported yet.</p>
-      </details>
-      <details>
-        <summary>Windows says "Windows protected your PC"</summary>
-        <p>Click <b>More info</b>, then <b>Run anyway</b>. The installer isn't code-signed yet, so Windows doesn't know the publisher; the <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">Microsoft Store version</a> is signed by Microsoft and doesn't show this. The installer is built from the public source by the project's <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/.github/workflows/release.yml">release workflow</a>; you can check it against <code>SHA256SUMS.txt</code> on the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">release page</a>.</p>
-      </details>
-      <details>
-        <summary>Is it in the Microsoft Store? Can I install it with winget?</summary>
-        <p>Yes: <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">B-Rar on the Microsoft Store</a>, or <code>winget install 9MZKQXC7PFCH</code> in a terminal. The Store version adds B-Rar to the short Windows 11 right-click menu and updates through the Store. It can't ask for administrator rights, so to extract into Program Files, run B-Rar as administrator from the Start menu. The installer above updates itself too: B-Rar says when a new version is out.</p>
-      </details>
-      <details>
-        <summary>Does it send my data anywhere?</summary>
-        <p>No. B-Rar only asks GitHub whether a newer version is out, and downloads it when you click Update (the Microsoft Store version doesn't connect to the internet at all). See the <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md">privacy policy</a>.</p>
-      </details>
-      <details>
-        <summary>Can I use it at work?</summary>
-        <p>B-Rar's license (PolyForm Noncommercial) allows personal use and use by charities, schools and public institutions, but not commercial use. For commercial use, get in touch on GitHub.</p>
-      </details>
-    </div>
-  </section>
-
-  <section class="soft">
-    <div class="wrap" style="text-align: center">
-      <h2>Try it on your next download</h2>
-      <p class="sub">Install B-Rar, then right-click any archive.</p>
-      <div class="cta">
-        <a class="button primary windows-only" href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">Get it from Microsoft Store</a>
-        <a class="button secondary windows-only" href="download/B-Rar-Setup.exe">Download installer</a>
-        <a class="button secondary" id="get-mac" href="#mac">Get it for Mac</a>
-        <a class="button secondary" href="https://www.patreon.com/cw/ahmedanjum30">Support on Patreon</a>
+      <div class="qs">
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Is B-Rar free?</summary>
+          <p>Yes, for personal and other non-commercial use, with every feature included. There are no ads, no trial and no paid version. If you'd like to support it, there's <a href="https://www.patreon.com/cw/ahmedanjum30">Patreon</a>.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Can B-Rar create archives?</summary>
+          <p>ZIP archives, yes: right-click files or folders, <b>B-Rar</b>, and choose <b>Add to archive...</b> (name, compression level, an AES-256 password if you like) or <b>Add to "name.zip"</b>, or run <code>B-Rar a backup.zip folder</code>. It compresses on every core. It doesn't make RAR or 7z archives.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Why is it faster than WinRAR and 7-Zip?</summary>
+          <p>It extracts many files at once, on every core, and writes them in the background while it keeps decoding. RAR5 archives use B-Rar's own decoder, which is faster than 7-Zip's even on a single core, and ZIP uses B-Rar's own Deflate decoder, faster than libdeflate on large files, which even splits a single big file across all your cores. 7z archives use B-Rar's own LZMA2 decoder.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Where's the right-click menu?</summary>
+          <p>Right-click any archive in File Explorer and pick <b>B-Rar</b>. On Windows 11 it's under <b>Show more options</b>; the <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">Microsoft Store version</a> puts it in the short menu.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Is there a Mac version?</summary>
+          <p>Yes, for Macs with Apple Silicon (M1 or later) on macOS 13 or later. Install it with <a href="https://brew.sh">Homebrew</a>: <code>brew install --cask ahmedanjum30/tap/b-rar</code>; <code>brew upgrade</code> keeps it up to date. It's a native Mac app around the same engine, with the archive browser and the same questions as on Windows. In Finder, right-click an archive and choose <b>Quick Actions</b> (or <b>Services</b>) for <b>B-Rar: Extract Here</b>, <b>Extract to Folder</b>, <b>Extract Files…</b>, <b>Open in B-Rar</b> and <b>Test Archive</b>, or files and folders for <b>Add to ZIP</b> and <b>Add to Archive…</b>. Homebrew also adds the <code>brar</code> command line. Zipped apps keep their links and signatures, as with Archive Utility. Or download <b>B-Rar-&lt;version&gt;-macos.zip</b> from the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">latest release</a> and drag B-Rar to Applications; the first time, right-click it and choose <b>Open</b>, since it isn't signed with an Apple Developer ID yet. Intel Macs aren't supported yet.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Windows says "Windows protected your PC"</summary>
+          <p>Click <b>More info</b>, then <b>Run anyway</b>. The installer isn't code-signed yet, so Windows doesn't know the publisher; the <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">Microsoft Store version</a> is signed by Microsoft and doesn't show this. The installer is built from the public source by the project's <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/.github/workflows/release.yml">release workflow</a>; you can check it against <code>SHA256SUMS.txt</code> on the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">release page</a>.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Is it in the Microsoft Store? Can I install it with winget?</summary>
+          <p>Yes: <a href="https://apps.microsoft.com/detail/9MZKQXC7PFCH">B-Rar on the Microsoft Store</a>, or <code>winget install 9MZKQXC7PFCH</code> in a terminal. The Store version adds B-Rar to the short Windows 11 right-click menu and updates through the Store. It can't ask for administrator rights, so to extract into Program Files, run B-Rar as administrator from the Start menu. The installer above updates itself too: B-Rar says when a new version is out.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Does it send my data anywhere?</summary>
+          <p>No. B-Rar only asks GitHub whether a newer version is out, and downloads it when you click Update (the Microsoft Store version doesn't connect to the internet at all). See the <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md">privacy policy</a>.</p>
+        </details>
+        <details>
+          <summary><svg class="g"><use href="#i-chevron"/></svg>Can I use it at work?</summary>
+          <p>B-Rar's license (PolyForm Noncommercial) allows personal use and use by charities, schools and public institutions, but not commercial use. For commercial use, get in touch on GitHub.</p>
+        </details>
       </div>
     </div>
   </section>
+
+  <div class="close">
+    <div class="wrap">
+      <div class="win" role="group" aria-labelledby="close-title">
+        <div class="titlebar">
+          <img src="images/icon.png" alt="" width="16" height="16">
+          <span class="t">Done - B-Rar</span>
+          <span class="caption" aria-hidden="true"><span><svg><use href="#i-min"/></svg></span><span><svg><use href="#i-max"/></svg></span><span><svg><use href="#i-x"/></svg></span></span>
+        </div>
+        <div class="body">
+          <div class="head">
+            <span class="okmark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+            <div><h2 id="close-title" style="font: 600 20px/1.3 var(--ui); margin: 0">Try it on your next download</h2><p class="sub" style="margin: 2px 0 0">Install B-Rar, then right-click any archive.</p></div>
+          </div>
+          <dl class="grid">
+            <dt>Opens</dt><dd>ZIP, RAR, 7z, tar</dd>
+            <dt>Makes</dt><dd>ZIP</dd>
+            <dt>Runs on</dt><dd>Windows 10 and 11, Mac</dd>
+            <dt>Price</dt><dd>Free for personal use</dd>
+          </dl>
+          <div class="buttons">
+            <a class="button primary windows-only" href="https://apps.microsoft.com/detail/9MZKQXC7PFCH"><svg><use href="#i-store"/></svg>Get it from Microsoft Store</a>
+            <a class="button windows-only" href="download/B-Rar-Setup.exe">Download installer</a>
+            <a class="button" id="get-mac" href="#mac">Get it for Mac</a>
+            <a class="button" href="https://www.patreon.com/cw/ahmedanjum30">Support on Patreon</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <footer>
@@ -330,29 +500,93 @@ B-Rar t archive.7z</pre>
     <span><a href="https://github.com/ahmedanjum30/B-Rar">GitHub</a> · <a href="https://github.com/ahmedanjum30/B-Rar/issues">Issues</a> · <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">Benchmarks</a> · <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/PRIVACY.md">Privacy</a> · <a href="https://www.patreon.com/cw/ahmedanjum30">Patreon</a></span>
   </div>
 </footer>
+
 <script>
   // On a Mac, Homebrew is the way to install: its command becomes the main button and the
   // Windows-only buttons step aside.
-  const mac = /mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "");
-  if (mac) {
-    const brew = document.getElementById("mac");
-    brew.classList.add("featured");
-    brew.querySelector("span").textContent = "Install with Homebrew:";
-    document.querySelector(".hero .cta").prepend(brew);
-    document.getElementById("mac-zip").hidden = false;
-    document.querySelectorAll(".windows-only").forEach((el) => (el.hidden = true));
-    const bottom = document.getElementById("get-mac");
-    bottom.textContent = "Install with Homebrew";
-    bottom.className = "button primary";
-  }
-  document.getElementById("brew-copy").addEventListener("click", (e) => {
-    try {
-      navigator.clipboard.writeText(document.getElementById("brew-command").textContent).then(() => {
-        e.target.textContent = "Copied";
-        setTimeout(() => (e.target.textContent = "Copy"), 1500);
-      }, () => {});
-    } catch (_) {}
-  });
+  (() => {
+    const mac = /mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '');
+    if (mac) {
+      const brew = document.getElementById('mac');
+      brew.classList.add('featured');
+      brew.querySelector('span').textContent = 'Install with Homebrew:';
+      document.querySelector('.hero .cta').prepend(brew);
+      document.getElementById('mac-zip').hidden = false;
+      document.querySelectorAll('.windows-only').forEach((el) => (el.hidden = true));
+      const top = document.getElementById('get-top');
+      top.href = '#mac';
+      top.querySelector('svg').remove();
+      const bottom = document.getElementById('get-mac');
+      bottom.textContent = 'Install with Homebrew';
+      bottom.className = 'button primary';
+    }
+    document.getElementById('brew-copy').addEventListener('click', (e) => {
+      try {
+        navigator.clipboard.writeText(document.getElementById('brew-command').textContent).then(() => {
+          e.target.textContent = 'Copied';
+          setTimeout(() => (e.target.textContent = 'Copy'), 1500);
+        }, () => {});
+      } catch (_) {}
+    });
+  })();
+
+  // The hero's progress window: a replay of a real extraction (9.6 GB, 77 files, 7.5 s),
+  // with the window's own Pause and Cancel.
+  (() => {
+    const win = document.getElementById('demo');
+    const $ = (k) => win.querySelector(`[data-${k}]`);
+    const run = win.querySelector('[data-page="run"]'), done = win.querySelector('[data-page="done"]');
+    const bar = $('bar'), fill = bar.firstElementChild, pause = $('pause');
+    const TOTAL = 9.6, SECONDS = 7.5, FILES = 77;
+    const names = ['common_mp', 'ui_mp', 'patch_mp', 'localized_common', 'ita_code_post_gfx', 'mp_terminal', 'zm_transit', 'sound_shared'];
+    const fileName = (i) => `${names[i % names.length]}_${String(i).padStart(2, '0')}.ff`;
+    const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    let t = 0.585 * SECONDS, last = 0, paused = true, raf = 0, started = false;
+
+    function draw() {
+      const p = Math.min(t / SECONDS, 1), pct = Math.floor(p * 100);
+      fill.style.width = `${p * 100}%`;
+      bar.setAttribute('aria-valuenow', pct);
+      bar.classList.toggle('paused', paused);
+      $('title').textContent = paused ? `${pct}% Paused - B-Rar` : `${pct}% Extracting Game assets.zip - B-Rar`;
+      $('file').textContent = fileName(Math.min(Math.floor(p * FILES), FILES - 1));
+      $('elapsed').textContent = clock(t);
+      $('left').textContent = clock(Math.ceil(SECONDS - t));
+      $('done').textContent = `${(p * TOTAL).toFixed(1)} GB of ${TOTAL} GB`;
+      $('speed').textContent = `${(1.22 + 0.1 * Math.sin(t * 2.3)).toFixed(1)} GB/s`;
+      $('files').textContent = Math.floor(p * FILES);
+      pause.textContent = paused ? 'Resume' : 'Pause';
+    }
+    function frame(now) {
+      if (!paused && last) {
+        t += Math.min(Math.max((now - last) / 1000, 0), 0.1);
+        if (t >= SECONDS) return finish();
+      }
+      last = now;
+      draw();
+      raf = requestAnimationFrame(frame);
+    }
+    function play() { paused = false; last = 0; cancelAnimationFrame(raf); raf = requestAnimationFrame(frame); draw(); }
+    function finish() {
+      cancelAnimationFrame(raf); t = SECONDS;
+      run.hidden = true; done.hidden = false;
+      $('title').textContent = 'Done - B-Rar';
+    }
+    function again() { t = 0; done.hidden = true; run.hidden = false; play(); }
+
+    pause.addEventListener('click', () => { paused ? play() : (paused = true, draw()); });
+    $('cancel').addEventListener('click', () => { cancelAnimationFrame(raf); t = 0; paused = true; draw(); pause.textContent = 'Start'; $('title').textContent = 'Cancelled - B-Rar'; });
+    $('again').addEventListener('click', again);
+
+    draw();
+    // Starts from the beginning when it comes into view, unless the visitor prefers no motion
+    // (then it waits, paused, for Resume).
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
+      new IntersectionObserver((entries, obs) => {
+        if (entries[0].isIntersecting && !started) { started = true; obs.disconnect(); t = 0; play(); }
+      }, { threshold: 0.6 }).observe(win);
+    }
+  })();
 </script>
 </body>
 </html>

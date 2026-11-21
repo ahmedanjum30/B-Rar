@@ -26,6 +26,11 @@ colors:
   error-dark: "#F48771"
   warn: "#A35A00"
   warn-dark: "#E5C07B"
+  rule-soft: "#DCDCDC"
+  rule-soft-dark: "#383838"
+  bar-other: "#A9A9A9"
+  bar-other-dark: "#6A6A6A"
+  on-accent-dark: "#000000"
 typography:
   title:
     fontFamily: "Segoe UI Semibold, Segoe UI, sans-serif"
@@ -39,12 +44,25 @@ typography:
     fontFamily: "Segoe UI, sans-serif"
     fontSize: "0.9em"
     fontWeight: 400
+  display-web:
+    fontFamily: "Segoe UI Variable Display, Segoe UI, system-ui, sans-serif"
+    fontSize: "clamp(40px, 5.6vw, 64px) h1; clamp(28px, 3.6vw, 38px) h2"
+    fontWeight: 600
+  body-web:
+    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "16px"
+    fontWeight: 400
+  code-web:
+    fontFamily: "Cascadia Mono, Consolas, ui-monospace, monospace"
+    fontSize: "14px"
+    fontWeight: 400
   glyph:
     fontFamily: "Segoe Fluent Icons, Segoe MDL2 Assets"
     fontSize: "24px (toolbar, status), 14px (small)"
 rounded:
   control: "3px"
   bar: "2px"
+  window: "8px"
 spacing:
   page-x: "24px"
   page-y: "20px"
@@ -163,6 +181,24 @@ Nearly square: 3 px corners on buttons and boxes, 2 px on the progress bar; stat
 
 ### File list
 - Windows' list view in report mode: the system's file-type icons, Workbench row colours (alternate tint, Selection), Size and Packed right-aligned, Packed and Modified in Muted Ink.
+
+### Website
+
+The website (`docs/index.html`) uses the same system, not a marketing skin:
+- navigation is a toolbar of links with a glyph above each label
+- features and formats are list views
+- the benchmarks use B-Rar's progress bars
+- the first screen has a working progress window, replaying a real extraction, with Pause and Cancel
+- the closing call to action is the Done window
+- the footer is a status bar
+
+Additions that apply only to the website:
+- **Type:** Segoe UI Variable Text and Display where available (Windows 11's Segoe UI), falling back to Segoe UI and then the system sans; Cascadia Mono only for commands and code.
+- **Colours:**
+  - **Soft Rule** (#DCDCDC; #383838 dark): dividers inside a list.
+  - **Other Bar** (#A9A9A9; #6A6A6A dark): competitors' benchmark bars, so only B-Rar's bar is Cobalt.
+  - The primary button's text is black in the dark theme.
+- **Shapes:** drawn windows use Windows 11's 8 px frame corner; everything inside them keeps 3 px and 2 px corners.
 
 ## Do's and Don'ts
 
