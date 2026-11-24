@@ -7,6 +7,12 @@
 //! unlikely to appear by chance. The piece is decoded into 16-bit values ([`decode_piece`]):
 //! bytes, and markers for bytes a match copied from the 32 KB before the piece, unknown at the
 //! time. Once the previous piece is complete, [`resolve`] replaces the markers.
+//!
+//! A fixed-Huffman block has no header to find, and some encoders (zlib-ng's and zlib-rs's
+//! fastest level) write the whole stream as one. Its codes are known, though, so a piece can
+//! start inside one ([`fixed_sync`]): decoding from any bit falls into step with the real
+//! symbols within a few of them, and a piece then starts at the first symbol boundary past a
+//! point, where the piece before it, decoded from a real boundary, stops too ([`Edge::Fixed`]).
 
 use super::inflate::{Bad, Bits, Bytes, END, INVALID, LITERAL, Output, Res, Tables, fast};
 
@@ -14,6 +20,14 @@ use super::inflate::{Bad, Bits, Bytes, END, INVALID, LITERAL, Output, Res, Table
 pub(crate) const WINDOW: usize = 32768;
 /// Values from this up are markers: `MARKER + i` is byte `i` of the window before the piece.
 pub(crate) const MARKER: u16 = 0x8000;
+
+/// Where a piece starts or ends: at a block boundary, or between two symbols of a
+/// fixed-Huffman block (with whether that block is the stream's final one, if known).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Edge {
+    Block,
+    Fixed(Option<bool>),
+}
 
 /// One decoded piece: a head of bytes and markers, then (once 32 KB of output have passed
 /// without a marker, so no later match can reach before the piece) plain bytes.
@@ -29,6 +43,13 @@ pub(crate) struct Piece {
     pub end: usize,
     /// It ended with the stream's final block.
     pub last: bool,
+    /// It started inside a fixed-Huffman block.
+    pub start_mid: bool,
+    /// Where `end` is: a block boundary, or inside a fixed-Huffman block.
+    pub end_edge: Edge,
+    /// It started inside a block whose final flag it didn't know, and went on past that
+    /// block's end as if it wasn't the final one: only usable if so.
+    pub open: bool,
 }
 
 impl Piece {
@@ -42,6 +63,24 @@ impl Piece {
 /// [`super::inflate::inflate`] needs. At most `max_out` bytes (a damaged stream can't make it
 /// run away).
 pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usize, stop: usize, max_out: usize) -> Res<Piece> {
+    decode_from(t, input, len, start, Edge::Block, stop, usize::MAX, max_out)
+}
+
+/// [`decode_piece`] from `start` at `from`: a block boundary, or a symbol boundary inside a
+/// fixed-Huffman block. Inside a fixed-Huffman block it also stops at the first symbol
+/// boundary at or after bit `mid_stop` (`usize::MAX`: never). A piece that starts inside a
+/// block not knowing whether it's the final one goes on past it as if not ([`Piece::open`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_from(
+    t: &mut Tables,
+    input: &[u8],
+    len: usize,
+    start: usize,
+    from: Edge,
+    stop: usize,
+    mid_stop: usize,
+    max_out: usize,
+) -> Res<Piece> {
     let mut bits = Bits::new(input, len, start);
     let mut head: Vec<u16> = Vec::with_capacity(1 << 20);
     // Where the last marker in `head` ends (0: the window before the piece is all markers).
@@ -49,10 +88,22 @@ pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usiz
     // Plain bytes once `tail_from > 0`.
     let mut tail: Vec<u8> = Vec::new();
     let mut tail_from = 0usize;
+    // Starting inside a fixed-Huffman block: no header to read for the first one.
+    let mut inside = match from {
+        Edge::Block => None,
+        Edge::Fixed(last) => Some(last),
+    };
+    let mut open = false;
     loop {
-        bits.refill();
-        let last = bits.take(1) == 1;
-        let kind = bits.take(2);
+        // The block's final flag, kind, and whether the flag is known.
+        let (last, kind, known) = match inside.take() {
+            Some(last) => (last.unwrap_or(false), 1, last.is_some()),
+            None => {
+                bits.refill();
+                let last = bits.take(1) == 1;
+                (last, bits.take(2), true)
+            }
+        };
         if tail_from == 0 && head.len() - marked >= WINDOW {
             // No marker in the last 32 KB: nothing later can reach before the piece. Plain bytes
             // from here, after a copy of those 32 KB to copy from.
@@ -60,6 +111,7 @@ pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usiz
             tail.extend(head[head.len() - WINDOW..].iter().map(|&v| v as u8));
             tail_from = WINDOW;
         }
+        let mut ended = true;
         match kind {
             0 => {
                 bits.align_to_byte();
@@ -80,15 +132,17 @@ pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usiz
                 bits = Bits::new(input, len, (at + n) * 8);
             }
             1 | 2 => {
-                if kind == 1 {
+                let pause = if kind == 1 {
                     t.fixed()?;
+                    mid_stop
                 } else {
                     t.dynamic(&mut bits, false)?;
-                }
-                bits = if tail_from > 0 {
-                    block8(t, bits, len, &mut tail, max_out + tail_from)?
+                    usize::MAX
+                };
+                (bits, ended) = if tail_from > 0 {
+                    block8(t, bits, len, &mut tail, max_out + tail_from, pause)?
                 } else {
-                    block16(t, bits, len, &mut head, &mut marked, max_out)?
+                    block16(t, bits, len, &mut head, &mut marked, max_out, pause)?
                 };
             }
             _ => return Err(Bad),
@@ -96,17 +150,62 @@ pub(crate) fn decode_piece(t: &mut Tables, input: &[u8], len: usize, start: usiz
         if bits.overrun(len) || head.len() + tail.len() - tail_from > max_out {
             return Err(Bad);
         }
-        if last || bits.pos() >= stop {
-            return Ok(Piece {
-                head,
-                tail,
-                tail_from,
-                start,
-                end: bits.pos(),
-                last,
-            });
-        }
+        open |= ended && !known;
+        let (end_edge, last) = if !ended {
+            (Edge::Fixed(known.then_some(last)), false)
+        } else if last || bits.pos() >= stop {
+            (Edge::Block, last)
+        } else {
+            continue;
+        };
+        return Ok(Piece {
+            head,
+            tail,
+            tail_from,
+            start,
+            end: bits.pos(),
+            last,
+            start_mid: from != Edge::Block,
+            end_edge,
+            open,
+        });
     }
+}
+
+/// The first symbol boundary at or after bit `to` of a fixed-Huffman block that `from` is
+/// inside, if decoding there looks like one: from `from` (or one of the next few bits) to
+/// `to` with fixed codes, no invalid code, no block end, nothing further back than the
+/// window allows. Anything else (a dynamic block, say) fails within a few symbols. Decoding
+/// from a wrong bit falls into step with the real symbols, so the boundary is the real one;
+/// the caller checks that anyway (the piece before must end there).
+pub(crate) fn fixed_sync(t: &mut Tables, input: &[u8], len: usize, from: usize, to: usize) -> Option<usize> {
+    if to + 64 >= len * 8 || t.fixed().is_err() {
+        return None;
+    }
+    let (lit, dist) = (&t.litlen, &t.dist);
+    'offset: for at in from..from + 8 {
+        let mut bits = Bits::new(input, len, at);
+        let mut out = 0usize;
+        while bits.pos() < to {
+            bits.refill();
+            let (e, v) = lit.decode(&mut bits);
+            if e & LITERAL != 0 {
+                out += 1;
+                continue;
+            }
+            if e & (END | INVALID) != 0 {
+                continue 'offset;
+            }
+            bits.refill();
+            let (d, back) = dist.decode(&mut bits);
+            if d & INVALID != 0 || back > out + WINDOW {
+                continue 'offset;
+            }
+            out += v;
+        }
+        return Some(bits.pos());
+    }
+    None
 }
 
 /// 16-bit values for [`fast`] and [`block16`]: copies from before the piece leave markers, and
@@ -188,8 +287,30 @@ impl Output for Values {
     }
 }
 
+/// How far the unchecked loop may run before a pause at bit `pause` (see [`block16`]): an
+/// output position it can't reach `pause` before, overshoot included. A fixed-Huffman symbol
+/// takes at most 31 bits for 3 bytes (a match) or 9 for 1 (a literal), so under 11 bits per
+/// byte. None: no pause, or too close to it for the unchecked loop.
+fn pause_room(bits: &Bits, pause: usize, pos: usize) -> Option<usize> {
+    if pause == usize::MAX {
+        return None;
+    }
+    let bytes = (pause.saturating_sub(bits.pos()) / 11).saturating_sub(300);
+    (bytes > 0).then_some(pos + bytes)
+}
+
 /// One Huffman-coded block into 16-bit values (see [`Values`]).
-fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, marked: &mut usize, max_out: usize) -> Res<Bits<'a>> {
+/// `pause` (fixed-Huffman blocks; `usize::MAX`: never): stop at the first symbol boundary at or
+/// after this bit instead of at the block's end. Ok(false) when it paused there.
+fn block16<'a>(
+    t: &Tables,
+    mut bits: Bits<'a>,
+    len: usize,
+    out: &mut Vec<u16>,
+    marked: &mut usize,
+    max_out: usize,
+    pause: usize,
+) -> Res<(Bits<'a>, bool)> {
     let (lit, dist) = (&t.litlen, &t.dist);
     // Room for one round (a match, or three literals) plus the copies' overshoot (in values).
     const ROUND: usize = 258 + 3 + 32;
@@ -207,10 +328,42 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
         values.base = out.as_mut_ptr();
         // The unchecked loop while a whole match and the copies' overshoot fit (in the
         // capacity and under max_out); single checked rounds only near those ends.
-        let fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        let mut fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        match pause_room(&bits, pause, pos) {
+            Some(end) => fast_end = fast_end.min(end),
+            None if pause == usize::MAX => {}
+            None => {
+                // Near the pause: one symbol at a time.
+                if bits.pos() >= pause {
+                    break Ok((bits, false));
+                }
+                bits.refill();
+                let (e, v) = lit.decode(&mut bits);
+                if e & LITERAL != 0 {
+                    // SAFETY: the reserve above left ROUND values after pos.
+                    unsafe { Values::literal(values.base.add(pos), (e >> 16) as u8) };
+                    pos += 1;
+                    continue;
+                }
+                if e & (END | INVALID) != 0 {
+                    break if e & INVALID != 0 { Err(Bad) } else { Ok((bits, true)) };
+                }
+                bits.refill();
+                let (d, back) = dist.decode(&mut bits);
+                // SAFETY: as above.
+                if d & INVALID != 0 || pos + v > max_out || !unsafe { values.copy(values.base.add(pos), back, v) } {
+                    break Err(Bad);
+                }
+                pos += v;
+                if bits.overrun(len) {
+                    break Err(Bad);
+                }
+                continue;
+            }
+        }
         // SAFETY: fast_end + 258 and the overshoot are within the capacity.
         if let Some(r) = unsafe { fast(t, &mut bits, &mut values, &mut pos, fast_end) } {
-            break r.map(|()| bits);
+            break r.map(|()| (bits, true));
         }
         if out.capacity() - pos < ROUND {
             // The fast loop ran up to the capacity's end: more room first.
@@ -235,7 +388,7 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
             }
         }
         if e & (END | INVALID) != 0 {
-            break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
+            break if e & INVALID != 0 { Err(Bad) } else { Ok((bits, true)) };
         }
         bits.refill();
         let n = v;
@@ -254,7 +407,9 @@ fn block16<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u16>, m
     result
 }
 /// One Huffman-coded block into plain bytes, copying only from earlier in `out`.
-fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max_out: usize) -> Res<Bits<'a>> {
+/// `pause` (fixed-Huffman blocks; `usize::MAX`: never): stop at the first symbol boundary at or
+/// after this bit instead of at the block's end. Ok(false) when it paused there.
+fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max_out: usize, pause: usize) -> Res<(Bits<'a>, bool)> {
     let (lit, dist) = (&t.litlen, &t.dist);
     // Room for one round (a match, or three literals) plus the copies' overshoot.
     const ROUND: usize = 258 + 3 + super::inflate::OUTPUT_SLACK;
@@ -268,10 +423,43 @@ fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max
         let base = out.as_mut_ptr();
         // The unchecked loop while a whole match and the copies' overshoot fit (in the
         // capacity and under max_out); single checked rounds only near those ends.
-        let fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        let mut fast_end = (out.capacity() - ROUND).min(max_out.saturating_sub(258));
+        match pause_room(&bits, pause, pos) {
+            Some(end) => fast_end = fast_end.min(end),
+            None if pause == usize::MAX => {}
+            None => {
+                // Near the pause: one symbol at a time.
+                if bits.pos() >= pause {
+                    break Ok((bits, false));
+                }
+                bits.refill();
+                let (e, v) = lit.decode(&mut bits);
+                if e & LITERAL != 0 {
+                    // SAFETY: the reserve above left ROUND bytes after pos.
+                    unsafe { *base.add(pos) = (e >> 16) as u8 };
+                    pos += 1;
+                    continue;
+                }
+                if e & (END | INVALID) != 0 {
+                    break if e & INVALID != 0 { Err(Bad) } else { Ok((bits, true)) };
+                }
+                bits.refill();
+                let (d, back) = dist.decode(&mut bits);
+                if d & INVALID != 0 || back > pos || pos + v > max_out {
+                    break Err(Bad);
+                }
+                // SAFETY: as above.
+                unsafe { super::inflate::copy_match(base, pos, back, v) };
+                pos += v;
+                if bits.overrun(len) {
+                    break Err(Bad);
+                }
+                continue;
+            }
+        }
         // SAFETY: fast_end + 258 + OUTPUT_SLACK <= capacity.
         if let Some(r) = unsafe { fast(t, &mut bits, &mut Bytes(base), &mut pos, fast_end) } {
-            break r.map(|()| bits);
+            break r.map(|()| (bits, true));
         }
         if out.capacity() - pos < ROUND {
             // The fast loop ran up to the capacity's end (it stops up to a match past
@@ -297,7 +485,7 @@ fn block8<'a>(t: &Tables, mut bits: Bits<'a>, len: usize, out: &mut Vec<u8>, max
             }
         }
         if e & (END | INVALID) != 0 {
-            break if e & INVALID != 0 { Err(Bad) } else { Ok(bits) };
+            break if e & INVALID != 0 { Err(Bad) } else { Ok((bits, true)) };
         }
         bits.refill();
         let n = v;

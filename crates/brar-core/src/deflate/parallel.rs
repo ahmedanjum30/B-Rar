@@ -11,6 +11,13 @@
 //! found, or a false one) the stretch is decoded there in order instead: slower, never wrong.
 //! Replacing a piece's markers needs only those 32 KB, so the workers do it, in parallel; a
 //! separate thread passes the finished pieces to the output in order.
+//!
+//! A cut inside a fixed-Huffman block (which has no header to find) is tried first: such a
+//! piece starts at a symbol boundary [`SYNC`] bits past the cut ([`chunk::fixed_sync`]), and
+//! every piece stops inside a fixed-Huffman block at the first symbol boundary that far past
+//! the next cut, so the two meet. While the in-order stage is behind (the last cut gave
+//! nothing usable) it decodes the next stretch itself rather than wait for a worker; and if
+//! the whole first round of cuts gives nothing usable, the workers stop looking.
 
 use std::{
     collections::VecDeque,
@@ -21,7 +28,7 @@ use std::{
 };
 
 use super::{
-    chunk::{self, Piece, WINDOW},
+    chunk::{self, Edge, Piece, WINDOW},
     inflate::{Bad, Tables},
 };
 
@@ -30,6 +37,9 @@ pub(crate) const CHUNK: usize = 2 << 20;
 /// Most bytes a piece may decode to: highly compressible data could otherwise expand a 2 MB
 /// piece to gigabytes. Past it the whole stream is left to the single-threaded decoder.
 const MAX_PIECE: usize = 256 << 20;
+/// Bits past a cut where a piece inside a fixed-Huffman block starts: decoding from a wrong bit
+/// falls into step with the real symbols within a few of them, far less than this.
+const SYNC: usize = 1 << 14;
 
 pub(crate) enum Failure<E> {
     /// The stream didn't decode here: another decoder should try (it may be damaged).
@@ -60,9 +70,12 @@ struct Done {
 struct State {
     /// Decoded pieces by cut (`None` inside: no block start found after the cut).
     decoded: Vec<Option<Result<Option<Piece>, Bad>>>,
-    /// Next cut to decode, and how many the in-order stage has taken (bounds memory).
+    /// Next cut to decode, and how many the in-order stage has taken or passed (bounds memory;
+    /// cuts below it aren't needed any more).
     next_cut: usize,
     consumed: usize,
+    /// The first round of cuts gave nothing usable: no more looking for block starts.
+    give_up: bool,
     /// Pieces in order whose markers are to be replaced, and those done, by sequence number.
     jobs: VecDeque<Job>,
     done: Vec<Option<Result<Done, Bad>>>,
@@ -88,6 +101,7 @@ pub(crate) fn inflate_parallel<E: Send>(
         decoded: (0..n).map(|_| None).collect(),
         next_cut: 0,
         consumed: 0,
+        give_up: false,
         jobs: VecDeque::new(),
         done: Vec::new(),
         sequenced: 0,
@@ -125,27 +139,34 @@ pub(crate) fn inflate_parallel<E: Send>(
                         changed.notify_all();
                         continue;
                     }
-                    if s.next_cut < n && s.next_cut < s.consumed + ahead {
+                    if !s.give_up && s.next_cut < n && s.next_cut < s.consumed + ahead {
                         let k = s.next_cut;
                         s.next_cut += 1;
+                        if k < s.consumed {
+                            continue; // the in-order stage decoded past it already
+                        }
                         drop(s);
                         let w = std::time::Instant::now();
                         let start = if k == 0 {
-                            Some(0)
+                            Some((0, Edge::Block))
                         } else {
-                            chunk::find_block(&mut t, input, len, cut(k), cut(k + 1))
+                            chunk::fixed_sync(&mut t, input, len, cut(k), cut(k) + SYNC)
+                                .map(|b| (b, Edge::Fixed(None)))
+                                .or_else(|| chunk::find_block(&mut t, input, len, cut(k), cut(k + 1)).map(|b| (b, Edge::Block)))
                         };
                         let r = match start {
                             None => Ok(None),
-                            Some(b) => chunk::decode_piece(&mut t, input, len, b, cut(k + 1), MAX_PIECE).map(Some),
+                            Some((b, edge)) => chunk::decode_from(&mut t, input, len, b, edge, cut(k + 1), cut(k + 1) + SYNC, MAX_PIECE).map(Some),
                         };
                         decode_ns.fetch_add(w.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         s = state.lock().unwrap();
-                        s.decoded[k] = Some(r);
-                        changed.notify_all();
+                        if k >= s.consumed {
+                            s.decoded[k] = Some(r);
+                            changed.notify_all();
+                        }
                         continue;
                     }
-                    if s.finished && s.jobs.is_empty() && s.next_cut >= n {
+                    if s.finished && s.jobs.is_empty() && (s.next_cut >= n || s.give_up) {
                         return;
                     }
                     s = changed.wait(s).unwrap();
@@ -193,10 +214,16 @@ pub(crate) fn inflate_parallel<E: Send>(
         // In order: check starts, fill gaps, work out each piece's window, hand out jobs.
         let sequence = (|| -> Result<(), Bad> {
             let mut t = Tables::default();
-            let mut expected = 0usize;
+            // Where the stream continues, and what's there (a block boundary, or the inside
+            // of a fixed-Huffman block).
+            let (mut expected, mut edge) = (0usize, Edge::Block);
             let mut window = Arc::new(Vec::<u8>::new());
             let mut done = false;
-            let (mut head_len, mut skipped, mut gaps) = (0usize, 0usize, 0usize);
+            let (mut head_len, mut skipped, mut gaps, mut in_order) = (0usize, 0usize, 0usize, 0usize);
+            // Cuts after the first that workers gave a piece (or nothing) for, and usable ones.
+            let (mut tried, mut hits) = (0usize, 0usize);
+            // The last cut gave nothing usable: decode in order rather than wait.
+            let mut behind = false;
             let t0 = std::time::Instant::now();
             // Queues a piece in order and works out the window after it.
             let mut push = |piece: Piece, window: &mut Arc<Vec<u8>>| -> Result<(), Bad> {
@@ -227,55 +254,119 @@ pub(crate) fn inflate_parallel<E: Send>(
                 *window = Arc::new(next);
                 Ok(())
             };
+            // Where the stream continues after `p`, taken at `expected` (of kind `edge`), and
+            // whether it ended.
+            let advance = |p: &Piece, edge: Edge| -> (usize, Edge, bool) {
+                let block_last = match edge {
+                    Edge::Fixed(last) => last,
+                    Edge::Block => None,
+                };
+                match p.end_edge {
+                    Edge::Fixed(last) => (p.end, Edge::Fixed(last.or(block_last)), false),
+                    Edge::Block => (p.end, Edge::Block, p.last),
+                }
+            };
+            // Does `p` start where the stream continues? (One that went on past the end of the
+            // block it started in only if that block wasn't the final one.)
+            let starts_at = |p: &Piece, expected: usize, edge: Edge| {
+                if p.start_mid {
+                    p.start == expected && (edge == Edge::Fixed(Some(false)) || (!p.open && edge != Edge::Block))
+                } else {
+                    edge == Edge::Block && chunk::same_start(input, expected, p.start)
+                }
+            };
+            enum Next {
+                Piece(Result<Option<Piece>, Bad>),
+                /// Decoded in order past this cut already.
+                Passed,
+                /// Not ready while behind: decode its stretch in order.
+                InOrder,
+            }
             for k in 0..n {
-                let r = {
+                if done {
+                    break;
+                }
+                let next = {
                     let mut s = state.lock().unwrap();
-                    loop {
+                    let next = loop {
                         if s.abort {
                             return Err(Bad);
                         }
+                        if k > 0 && cut(k + 1) <= expected {
+                            s.decoded[k] = None;
+                            break Next::Passed;
+                        }
                         if let Some(r) = s.decoded[k].take() {
-                            s.consumed = k + 1;
-                            break r;
+                            break Next::Piece(r);
+                        }
+                        if behind || s.give_up {
+                            break Next::InOrder;
                         }
                         s = changed.wait(s).unwrap();
-                    }
+                    };
+                    s.consumed = k + 1;
+                    next
                 };
                 changed.notify_all();
-                if done {
-                    continue;
-                }
-                let piece = match r {
-                    Ok(Some(p)) if chunk::same_start(input, expected, p.start) || p.start > expected => p,
-                    // No start found, a false one, or a piece that didn't decode: the stretch is
-                    // decoded in order later (by the next usable piece's gap, or at the end).
-                    _ => {
-                        skipped += 1;
+                let r = match next {
+                    Next::Passed => continue,
+                    Next::InOrder => {
+                        in_order += 1;
+                        let p = chunk::decode_from(&mut t, input, len, expected, edge, cut(k + 1), cut(k + 1) + SYNC, MAX_PIECE)?;
+                        (expected, edge, done) = advance(&p, edge);
+                        push(p, &mut window)?;
                         continue;
                     }
+                    Next::Piece(r) => r,
                 };
-                if !chunk::same_start(input, expected, piece.start) {
-                    // A gap before this piece (blocks the finder skips): decode it in order.
-                    gaps += 1;
-                    let gap = chunk::decode_piece(&mut t, input, len, expected, piece.start, MAX_PIECE)?;
-                    (expected, done) = (gap.end, gap.last);
-                    push(gap, &mut window)?;
-                    if done || !chunk::same_start(input, expected, piece.start) {
-                        continue; // the gap ran past it: the piece started falsely
+                if k > 0 {
+                    tried += 1;
+                }
+                let piece = match r {
+                    Ok(Some(p)) if starts_at(&p, expected, edge) || p.start > expected => Some(p),
+                    // No start found, a false one, or a piece that didn't decode: the stretch is
+                    // decoded in order (by the next usable piece's gap, or by this stage).
+                    _ => None,
+                };
+                let mut used = false;
+                if let Some(piece) = piece {
+                    let mut fits = true;
+                    if !starts_at(&piece, expected, edge) {
+                        // A gap before this piece (blocks the finder skips): decode it in order.
+                        gaps += 1;
+                        let gap = chunk::decode_from(&mut t, input, len, expected, edge, piece.start, piece.start, MAX_PIECE)?;
+                        (expected, edge, done) = advance(&gap, edge);
+                        push(gap, &mut window)?;
+                        // The gap ran past it: the piece started falsely.
+                        fits = !done && starts_at(&piece, expected, edge);
+                    }
+                    if fits {
+                        (expected, edge, done) = advance(&piece, edge);
+                        push(piece, &mut window)?;
+                        used = true;
                     }
                 }
-                (expected, done) = (piece.end, piece.last);
-                push(piece, &mut window)?;
+                if used {
+                    hits += usize::from(k > 0);
+                    behind = false;
+                } else {
+                    skipped += 1;
+                    behind = true;
+                }
+                if hits == 0 && tried >= workers.min(n - 1) {
+                    state.lock().unwrap().give_up = true;
+                }
             }
             // Whatever is left after the last usable piece, in order.
             while !done {
-                let p = chunk::decode_piece(&mut t, input, len, expected, expected + CHUNK * 8, MAX_PIECE)?;
-                (expected, done) = (p.end, p.last);
+                let stop = expected + CHUNK * 8;
+                let p = chunk::decode_from(&mut t, input, len, expected, edge, stop, stop, MAX_PIECE)?;
+                (expected, edge, done) = advance(&p, edge);
                 push(p, &mut window)?;
             }
             if stats {
                 eprintln!(
-                    "deflate: {n} pieces, {skipped} skipped, {gaps} gaps; heads {} MB; in order {:.3} s",
+                    "deflate: {n} pieces, {skipped} skipped, {gaps} gaps, {in_order} in order; heads {} MB; in order {:.3} s",
                     head_len >> 20,
                     t0.elapsed().as_secs_f64()
                 );
@@ -285,6 +376,7 @@ pub(crate) fn inflate_parallel<E: Send>(
 
         let mut s = state.lock().unwrap();
         s.finished = true;
+        s.give_up = true; // no more cuts needed
         if sequence.is_err() {
             s.abort = true;
         }
@@ -413,5 +505,106 @@ mod tests {
         }
         check(b"tiny", 6, 4);
         check(&[], 6, 4);
+    }
+
+    /// Text in base64's alphabet: zlib-rs's level 1 writes it as one fixed-Huffman block.
+    fn base64ish(size: usize, seed: u64) -> Vec<u8> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut x = seed;
+        (0..size)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                if i % 77 == 76 { b'\n' } else { ALPHABET[(x % 64) as usize] }
+            })
+            .collect()
+    }
+
+    fn decode_all(packed: &[u8], len: usize, threads: usize) -> Option<Vec<u8>> {
+        let mut got = Vec::new();
+        inflate_parallel::<()>(packed, len, threads, &mut |b: &[u8]| {
+            got.extend_from_slice(b);
+            Ok(())
+        })
+        .ok()
+        .map(|total| {
+            assert_eq!(total as usize, got.len());
+            got
+        })
+    }
+
+    /// One stream from parts compressed at different levels: each part sync-flushed (an empty
+    /// stored block, byte-aligned) and the last finished, so blocks of each kind follow each other.
+    fn mixed(parts: &[(&[u8], u32)]) -> Vec<u8> {
+        let mut packed = Vec::new();
+        for (i, &(data, level)) in parts.iter().enumerate() {
+            let mut c = flate2::Compress::new(flate2::Compression::new(level), false);
+            let flush = if i + 1 == parts.len() {
+                flate2::FlushCompress::Finish
+            } else {
+                flate2::FlushCompress::Sync
+            };
+            let mut out = Vec::with_capacity(data.len() * 2 + 1024);
+            c.compress_vec(data, &mut out, flush).unwrap();
+            packed.extend_from_slice(&out);
+        }
+        packed
+    }
+
+    #[test]
+    fn fixed_huffman_streams() {
+        // One fixed-Huffman block of 40 MB: pieces must start inside it.
+        let data = base64ish(40 << 20, 11);
+        for threads in [4, 16] {
+            check(&data, 1, threads);
+        }
+        // Fixed and dynamic blocks in turn, ending with either kind.
+        let (a, b, c, d) = (
+            base64ish(9 << 20, 1),
+            base64ish(7 << 20, 2),
+            base64ish(13 << 20, 3),
+            base64ish(5 << 20, 4),
+        );
+        for parts in [
+            vec![(&a[..], 1), (&b[..], 6), (&c[..], 1), (&d[..], 6)],
+            vec![(&a[..], 6), (&b[..], 1), (&c[..], 6), (&d[..], 1)],
+            vec![(&a[..], 1), (&b[..], 1), (&c[..], 6), (&d[..], 1)],
+        ] {
+            let want: Vec<u8> = parts.iter().flat_map(|p| p.0.iter().copied()).collect();
+            let mut packed = mixed(&parts);
+            let len = packed.len();
+            packed.resize(len + INPUT_PADDING, 0);
+            for threads in [4, 16] {
+                let got = decode_all(&packed, len, threads).expect("decodes");
+                assert!(
+                    got == want,
+                    "{threads} threads, levels {:?}",
+                    parts.iter().map(|p| p.1).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_fixed_stream_fails_cleanly() {
+        let data = base64ish(24 << 20, 5);
+        let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+        e.write_all(&data).unwrap();
+        let good = e.finish().unwrap();
+        let len = good.len();
+        let mut x = 99u64;
+        for _ in 0..8 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let mut packed = good.clone();
+            packed[(x as usize) % len] ^= 1 << ((x >> 40) % 8);
+            packed.resize(len + INPUT_PADDING, 0);
+            // Wrong output or an error, never a hang or a panic (the caller checks the CRC).
+            if let Some(got) = decode_all(&packed, len, 8) {
+                assert!(got != data || packed[..len] == good[..]);
+            }
+        }
     }
 }

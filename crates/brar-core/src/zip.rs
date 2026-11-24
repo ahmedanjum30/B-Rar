@@ -231,16 +231,18 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
 fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, threads: usize) -> Result<()> {
     sink.check()?;
     sink.start(&e.name);
-    let parallel = !e.stored && e.size >= PARALLEL_MIN && threads >= 4;
+    let mut parallel = !e.stored && e.size >= PARALLEL_MIN && threads >= 4;
     if parallel {
         // Straight from the archive's memory map: no serial read of the whole entry first, the
         // workers fault in their own pieces. The decoder reads up to INPUT_PADDING bytes past
         // the data; a ZIP always has its central directory after it.
         let (start, len) = (e.data_start as usize, e.packed as usize);
-        if let Some(input) = map.and_then(|m| m.get(start..start + len + INPUT_PADDING))
-            && extract_parallel(input, e, sink, threads)?
-        {
-            return Ok(());
+        if let Some(input) = map.and_then(|m| m.get(start..start + len + INPUT_PADDING)) {
+            if extract_parallel(input, e, sink, threads)? {
+                return Ok(());
+            }
+            // It gave up on these same bytes: straight to the single-core decoder, not again.
+            parallel = false;
         }
     }
     let _lease = budget.take(e.packed + if e.stored { 0 } else { e.size });
