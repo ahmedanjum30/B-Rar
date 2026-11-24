@@ -25,7 +25,7 @@
   "operatingSystem": "Windows 10, Windows 11, macOS 13 or later (Apple Silicon)",
   "applicationCategory": "UtilitiesApplication",
   "description": "A fast archive extractor for Windows and Mac: ZIP, RAR, 7z and tar archives extracted in parallel on every core, with a Windows 11 right-click menu, an archive browser, passwords and multi-part archives.",
-  "softwareVersion": "1.5.0",
+  "softwareVersion": "1.5.1",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
   "author": { "@type": "Person", "name": "Ahmad Anjum", "url": "https://github.com/ahmedanjum30" },
   "url": "https://ahmedanjum30.github.io/B-Rar/",
@@ -352,8 +352,16 @@
           <div class="row"><span>WinRAR</span><div class="bar"><i style="width: 88%"></i></div><span class="time">7.1 s</span></div>
           <div class="row"><span>7-Zip</span><div class="bar"><i style="width: 100%"></i></div><span class="time">8.1 s</span></div>
         </div>
+        <div class="run">
+          <h3>ZIP archive on a Mac</h3>
+          <p class="what">M3 Pro · 3.4 GB, 20,008 files</p>
+          <div class="row us"><span>B-Rar</span><div class="bar"><i style="width: 10%"></i></div><span class="time">2.3 s</span></div>
+          <div class="row"><span>bsdtar</span><div class="bar"><i style="width: 46%"></i></div><span class="time">10.4 s</span></div>
+          <div class="row"><span>ditto</span><div class="bar"><i style="width: 48%"></i></div><span class="time">11.0 s</span></div>
+          <div class="row"><span>unzip</span><div class="bar"><i style="width: 100%"></i></div><span class="time">22.7 s</span></div>
+        </div>
       </div>
-      <p class="note">One run per tool, all cores. On a 1.1 GB 7z archive made with 7-Zip's defaults, B-Rar takes 3.8 s, 7-Zip 3.9 s, WinRAR 5.0 s. Full method and every result: <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">benches/RESULTS.md</a>.</p>
+      <p class="note">One run per tool, all cores (on the Mac, best of three; ditto is what Archive Utility extracts with). On a 1.1 GB 7z archive made with 7-Zip's defaults, B-Rar takes 3.8 s, 7-Zip 3.9 s, WinRAR 5.0 s. Full method and every result: <a href="https://github.com/ahmedanjum30/B-Rar/blob/main/benches/RESULTS.md">benches/RESULTS.md</a>.</p>
     </div>
   </section>
 
@@ -441,7 +449,7 @@ B-Rar t archive.7z</pre>
         </details>
         <details>
           <summary><svg class="g"><use href="#i-chevron"/></svg>Is there a Mac version?</summary>
-          <p>Yes, for Macs with Apple Silicon (M1 or later) on macOS 13 or later. Install it with <a href="https://brew.sh">Homebrew</a>: <code>brew install --cask ahmedanjum30/tap/b-rar</code>; <code>brew upgrade</code> keeps it up to date. It's a native Mac app around the same engine, with the archive browser and the same questions as on Windows. In Finder, right-click an archive and choose <b>Quick Actions</b> (or <b>Services</b>) for <b>B-Rar: Extract Here</b>, <b>Extract to Folder</b>, <b>Extract Files…</b>, <b>Open in B-Rar</b> and <b>Test Archive</b>, or files and folders for <b>Add to ZIP</b> and <b>Add to Archive…</b>. Homebrew also adds the <code>brar</code> command line. Zipped apps keep their links and signatures, as with Archive Utility. Or download <b>B-Rar-&lt;version&gt;-macos.zip</b> from the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">latest release</a> and drag B-Rar to Applications; the first time, right-click it and choose <b>Open</b>, since it isn't signed with an Apple Developer ID yet. Intel Macs aren't supported yet.</p>
+          <p>Yes, for Macs with Apple Silicon (M1 or later) on macOS 13 or later. Install it with <a href="https://brew.sh">Homebrew</a>: <code>brew install --cask ahmedanjum30/tap/b-rar</code>; <code>brew upgrade</code> keeps it up to date. It's a native Mac app around the same engine, with the archive browser and the same questions as on Windows. In Finder, right-click an archive and choose <b>Quick Actions</b> (or <b>Services</b>) for <b>B-Rar: Extract Here</b>, <b>Extract to Folder</b>, <b>Extract Files…</b>, <b>Open in B-Rar</b> and <b>Test Archive</b>, or files and folders for <b>Add to ZIP</b> and <b>Add to Archive…</b>. Homebrew also adds the <code>brar</code> command line. Zipped apps keep their links and signatures, as with Archive Utility. It's fast there too: on an M3 Pro, a 3.4 GB ZIP of 20,008 files extracts in 2.3 s, against 11.0 s with ditto (Archive Utility's engine), 10.4 s with bsdtar and 22.7 s with unzip. Or download <b>B-Rar-&lt;version&gt;-macos.zip</b> from the <a href="https://github.com/ahmedanjum30/B-Rar/releases/latest">latest release</a> and drag B-Rar to Applications; the first time, right-click it and choose <b>Open</b>, since it isn't signed with an Apple Developer ID yet. Intel Macs aren't supported yet.</p>
         </details>
         <details>
           <summary><svg class="g"><use href="#i-chevron"/></svg>Windows says "Windows protected your PC"</summary>
