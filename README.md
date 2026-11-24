@@ -76,6 +76,8 @@ brew install --cask ahmedanjum30/tap/b-rar
 
 It installs the B-Rar app and the `brar` command line, and `brew upgrade` updates them. In Finder, right-click an archive and choose **Quick Actions** (or **Services**) for **B-Rar: Extract Here**, **Extract to Folder**, **Extract Files…**, **Open in B-Rar** and **Test Archive**; on other files and folders, **B-Rar: Add to ZIP** and **Add to Archive…**. To open archives with a double-click, choose B-Rar under **Open With** (Get Info › Open with › Change All).
 
+On an M3 Pro, a 3.4 GB ZIP of 20,008 files extracts in **2.3 s**, against 11.0 s with `ditto` (what Archive Utility extracts with), 10.4 s with `bsdtar` and 22.7 s with `unzip` ([details](benches/RESULTS.md#2026-11-24-mac-zip-against-ditto-bsdtar-and-unzip-fixed-huffman-streams-on-all-cores)).
+
 Or download `B-Rar-<version>-macos.zip` from [Releases](https://github.com/ahmedanjum30/B-Rar/releases/latest), unzip it and drag B-Rar to Applications. It's signed ad hoc, not with an Apple Developer ID, so open it the first time with a right-click > **Open**, then **Open**.
 
 ### Linux

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 (2026-11-24)
+
+- **Big ZIP entries made of fixed-Huffman blocks extract on all cores**, instead of 15x slower than on one. zlib-ng's and zlib-rs's fastest level (B-Rar's own "Fastest" among them) write one long fixed-Huffman block, which the parallel decoder couldn't find a starting point in: it searched every bit on every core, then decoded the file alone. It now starts pieces inside such blocks. A 290 MB entry: 10.5 s → 0.15 s; a 3.4 GB ZIP of them on a Mac: 80.7 s → 5.2 s. Every other ZIP is as fast as before.
+- **On a Mac, B-Rar extracts ZIPs about 5x faster than macOS's own tools:** a 3.4 GB ZIP of 20,008 files in 2.3 s, against 11.0 s with ditto (Archive Utility's engine), 10.4 s with bsdtar and 22.7 s with unzip (M3 Pro).
+- Built with Rust 1.100.
+
 ## 1.5.0 (2026-11-19)
 
 - **B-Rar for Mac** (Apple Silicon, macOS 13 or later): `brew install --cask ahmedanjum30/tap/b-rar`. The archive browser (folders, search, sorting, opening a file, extracting what you pick), progress with pause and cancel, and the same questions as on Windows (replace, password, a missing part), in a native Mac window (Swift and SwiftUI) around the same Rust engine. Finder's right-click menu gets B-Rar's Quick Actions: Extract Here, Extract to Folder, Extract Files…, Open in B-Rar, Test Archive, Add to ZIP and Add to Archive…. Homebrew also adds the `brar` command line.

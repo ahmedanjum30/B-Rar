@@ -18,6 +18,59 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-11-24: Mac: ZIP against ditto, bsdtar and unzip; fixed-Huffman streams on all cores
+
+On a Mac, not the test machine above: MacBook Pro, **Apple M3 Pro** (11 cores), macOS,
+internal SSD (95% full), B-Rar's `brar` command line (release build, Rust 1.99). Against the
+extractors macOS comes with: `ditto -x -k` (what Archive Utility extracts with), `bsdtar -xf`
+and `unzip`. Archive in the file cache, output folder deleted before each run, best of three
+(B-Rar 1.5.0 on `fixed.zip`: one run).
+
+The files: 8 of 290 MB and 20,000 of 48 KB, 3.4 GB of base64 text (random bytes, so it
+compresses to about 75%), in two ZIPs:
+
+- `dynamic.zip` (2.5 GB): made with macOS's `zip -6`. Dynamic-Huffman blocks, as from
+  almost every ZIP tool.
+- `fixed.zip` (3.3 GB): made with `B-Rar add -l 1`. zlib-rs's level 1 (as zlib-ng's) writes
+  fixed-Huffman blocks only, one per 2 MB piece: on this text, no smaller than the input.
+
+| | `dynamic.zip` | `fixed.zip` |
+|---|---|---|
+| **B-Rar 1.5.1** | **2.28 s** | **5.17 s** |
+| B-Rar 1.5.1, one thread (`-t 1`) | 8.76 s | 10.55 s |
+| B-Rar 1.5.0 | 2.06 s | 80.69 s |
+| ditto (Archive Utility) | 11.01 s | 10.36 s |
+| bsdtar | 10.44 s | 11.07 s |
+| unzip | 22.72 s | 29.76 s |
+
+1.5.1 against 1.5.0 on `dynamic.zip`, five runs each, in turn: 1.76, 1.79, 1.83, 1.88, 3.40 s
+against 1.70, 1.87, 1.87, 3.83, 3.87 s (the 3-4 s runs: the nearly full SSD stalling). The
+same speed.
+
+**Why 1.5.0 was slow on `fixed.zip`.** The parallel Deflate decoder cuts the stream every
+2 MB and finds where a block starts after each cut; it knows dynamic and stored block
+headers, but a fixed-Huffman block has nothing to check. Every cut was searched bit by bit on
+every core and given up on, then the whole entry decoded on one core after all the searches.
+One 290 MB entry (`BRAR_STATS=1`):
+
+| | Time | CPU time | Pieces |
+|---|---|---|---|
+| 1.5.0, all cores | 10.5 s | 101 s | 147, 146 skipped |
+| 1.5.0, one thread | 0.71 s | 0.54 s | |
+| 1.5.1, all cores | 0.12-0.17 s | | 147, 1 skipped, 0 gaps |
+
+1.5.1 starts a piece inside a fixed-Huffman block: decoding from any bit falls into step with
+the real symbols within a few of them, so a piece starts at the first symbol boundary 16 Kbit
+past its cut, where the piece before stops too. The in-order stage checks that they meet, as
+for every piece. Output identical to `unzip`'s.
+
+**Memory** (macOS's peak memory footprint), 1.5.0, a 9 GB ZIP with two 2.9 GB entries too
+(larger than the 2 GB in-memory budget, so streamed): the whole archive 187 MB, the 290 MB
+and small entries only 1.2 GB, one 2.9 GB entry 12 MB, the small entries only 186 MB.
+(The maximum resident set, up to 5.2 GB, counts the memory-mapped archive's pages.)
+
+---
+
 ## 2026-10-29 (02:00): making ZIP archives
 
 B-Rar's first archive writer (`crates/brar-core/src/create.rs`): files cut into 1 MB pieces,
