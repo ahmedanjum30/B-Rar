@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.5.2 (2026-11-27)
 
 - **Extract part 1 while part 2 is still downloading.** When the next part of a RAR archive isn't there yet (not next to the others, nor where an earlier part was found), B-Rar now extracts everything in the parts it has first, and asks for the missing part only when it gets to it. It used to ask before extracting anything, because it reads every part's file list up front. Until the part is found the progress bar sweeps instead of filling (the total isn't known yet), and the archive goes through unRAR, one file at a time. Archives with all their parts at hand are unchanged. An empty file under a part's name (Firefox makes one while it downloads) no longer counts as the part.
+- **A memory over-read fixed** in the bridge to unRAR: when unRAR moved on to the next part of an archive, B-Rar read the part's name past the end of the buffer holding it. It went unnoticed in practice, but could have crashed.
 
 ## 1.5.1 (2026-11-24)
 
