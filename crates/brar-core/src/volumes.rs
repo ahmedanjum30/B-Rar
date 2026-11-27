@@ -76,18 +76,24 @@ impl PartFinder {
 
     /// [`PartFinder::locate`] without asking.
     pub(crate) fn known(&self, expected: &Path) -> Option<PathBuf> {
-        if expected.is_file() {
+        if is_part(expected) {
             return Some(expected.to_path_buf());
         }
         let name = expected.file_name()?;
         let state = self.state.lock().unwrap();
-        state.dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+        state.dirs.iter().map(|d| d.join(name)).find(|p| is_part(p))
     }
 
     /// The first part asked for and not given, for the error message.
     pub(crate) fn declined(&self) -> Option<PathBuf> {
         self.state.lock().unwrap().declined.first().cloned()
     }
+}
+
+/// A file that can be a part: an empty one can't (Firefox puts an empty file under the final
+/// name while the download goes to `name.part`).
+fn is_part(path: &Path) -> bool {
+    path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 impl fmt::Debug for PartFinder {

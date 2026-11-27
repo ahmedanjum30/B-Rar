@@ -1,6 +1,7 @@
 //! Parts of a multi-part archive in different folders: the missing part is asked for once,
 //! later parts are found next to it without asking, and declining stops with the part named.
-//! RAR5 runs on B-Rar's own decoder, RAR4 on unRAR, and .001 split files on B-Rar's reader.
+//! A RAR part that isn't at hand is only asked for once everything before it is extracted (it
+//! may still be downloading). .001 split files go through B-Rar's reader.
 //! The RAR cases need WinRAR's Rar.exe and are skipped without it.
 
 use std::{
@@ -35,8 +36,9 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
 }
 
 /// Moves every part from the second on to `elsewhere`, and returns a finder that answers
-/// with `elsewhere/<name>` and records what it was asked for.
-fn scatter(parts: &[PathBuf], elsewhere: &Path) -> (PartFinder, Arc<Mutex<Vec<PathBuf>>>) {
+/// with `elsewhere/<name>` and records what it was asked for, and whether `ready` (a file
+/// wholly in part 1) was already extracted by then.
+fn scatter(parts: &[PathBuf], elsewhere: &Path, ready: PathBuf) -> (PartFinder, Arc<Mutex<Vec<(PathBuf, bool)>>>) {
     fs::create_dir_all(elsewhere).unwrap();
     for p in &parts[1..] {
         fs::rename(p, elsewhere.join(p.file_name().unwrap())).unwrap();
@@ -44,7 +46,15 @@ fn scatter(parts: &[PathBuf], elsewhere: &Path) -> (PartFinder, Arc<Mutex<Vec<Pa
     let asked = Arc::new(Mutex::new(Vec::new()));
     let (log, dir) = (Arc::clone(&asked), elsewhere.to_path_buf());
     let finder = PartFinder::new(move |expected: &Path| {
-        log.lock().unwrap().push(expected.to_path_buf());
+        // Small files are written in the background: give the write a moment.
+        let out = (0..300).any(|_| {
+            let there = ready.is_file();
+            if !there {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            there
+        });
+        log.lock().unwrap().push((expected.to_path_buf(), out));
         Some(dir.join(expected.file_name()?))
     });
     (finder, asked)
@@ -73,6 +83,9 @@ fn check_rar(name: &str, format: &str, first: &str) {
     fs::create_dir_all(&src).unwrap();
     fs::create_dir_all(&here).unwrap();
     let data = noise(3 << 20, 99);
+    // `a.bin` comes first and fits in part 1; `data.bin` runs on through the other parts.
+    let first_file = noise(200_000, 5);
+    fs::write(src.join("a.bin"), &first_file).unwrap();
     fs::write(src.join("data.bin"), &data).unwrap();
     fs::write(src.join("note.txt"), "hello\n").unwrap();
     let made = Command::new(RAR)
@@ -84,17 +97,21 @@ fn check_rar(name: &str, format: &str, first: &str) {
     assert!(made.success());
     let parts = rar_parts(&here);
     assert!(parts.len() >= 3, "{name}: expected several volumes, got {parts:?}");
-    let (finder, asked) = scatter(&parts, &root.join("elsewhere"));
+    let out = root.join("out");
+    let (finder, asked) = scatter(&parts, &root.join("elsewhere"), out.join("a.bin"));
 
     let opts = Options {
         find_part: finder,
         ..Options::default()
     };
-    let out = root.join("out");
     brar_core::extract(&here.join(first), &out, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
     assert_eq!(fs::read(out.join("data.bin")).unwrap(), data, "{name}");
-    // Asked once, for part 2; part 3 on was found next to it.
-    assert_eq!(asked.lock().unwrap().len(), 1, "{name}: asked {:?}", asked.lock().unwrap());
+    assert_eq!(fs::read(out.join("a.bin")).unwrap(), first_file, "{name}");
+    // Asked once, for part 2, after part 1's file was out; part 3 on was found next to it.
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1, "{name}: asked {asked:?}");
+    assert_eq!(asked[0].0, parts[1], "{name}");
+    assert!(asked[0].1, "{name}: part 2 was asked for before part 1's file was extracted");
 
     // Declining stops, naming the part.
     let opts = Options {

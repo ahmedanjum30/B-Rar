@@ -334,8 +334,11 @@ pub(crate) fn parse(path: &Path, password: Option<&str>, finder: &PartFinder) ->
             break;
         }
         let Some(set) = &set else { return Ok(None) };
-        let Some(next) = finder.locate(&set.part(volumes.len() + 1)) else {
-            return Ok(None); // unRAR names the missing volume
+        // Only looked for, never asked for: a part that isn't at hand (still downloading, say)
+        // leaves the archive to unRAR, which extracts everything before it first and asks
+        // when it gets there (and names it if it never turns up).
+        let Some(next) = finder.known(&set.part(volumes.len() + 1)) else {
+            return Ok(None);
         };
         volumes.push(next);
     }

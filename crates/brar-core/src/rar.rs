@@ -59,6 +59,41 @@ impl Drop for VolumeHook {
     }
 }
 
+/// While unRAR only reads headers (for the progress total), a part that isn't at hand is
+/// looked for but not asked for: it may still be downloading. The extraction asks for it when
+/// it gets there, after everything before it is out. Puts the asking hook back when dropped.
+struct LookOnly<'a> {
+    opts: &'a Options,
+    missing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<'a> LookOnly<'a> {
+    fn install(opts: &'a Options) -> Self {
+        let missing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (finder, flag) = (opts.find_part.clone(), missing.clone());
+        unrar::set_volume_hook(Some(Box::new(move |expected| {
+            let found = finder.known(expected);
+            if found.is_none() {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            found
+        })));
+        Self { opts, missing }
+    }
+
+    /// Whether a part wasn't at hand.
+    fn missed(&self) -> bool {
+        self.missing.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for LookOnly<'_> {
+    fn drop(&mut self) {
+        let finder = self.opts.find_part.clone();
+        unrar::set_volume_hook(Some(Box::new(move |expected| finder.locate(expected))));
+    }
+}
+
 pub(crate) fn list(path: &Path, opts: &Options) -> Result<Vec<EntryInfo>> {
     let _volumes = VolumeHook::install(opts);
     let mut entries = Vec::new();
@@ -522,17 +557,30 @@ fn extract_unrar(path: &Path, sink: &Sink, opts: &Options, only: Option<&HashSet
     let independent = !probe.is_solid() && matches!(probe.volume_info(), VolumeInfo::None) && crate::volumes::RarSet::of(path).is_none();
     drop(probe);
 
-    // Header-only pass (cheap): sizes for the progress total and for load balancing.
-    let sizes: Vec<Option<u64>> = open(path, opts)
-        .open_for_listing()?
-        .enumerate()
-        .map(|(i, h)| {
-            h.map(|h| {
-                let picked = wanted(i) && sink.selected(&h.filename.to_string_lossy());
-                (picked && !h.is_directory() && !h.is_split_before()).then_some(h.unpacked_size)
+    // Header-only pass (cheap): sizes for the progress total and for load balancing. It only
+    // looks for the parts: one that isn't at hand yet leaves the total unknown, and the one
+    // pass in order below asks for it when it gets there.
+    let sizes = {
+        let look = LookOnly::install(opts);
+        let listed: std::result::Result<Vec<Option<u64>>, _> = open(path, opts)
+            .open_for_listing()?
+            .enumerate()
+            .map(|(i, h)| {
+                h.map(|h| {
+                    let picked = wanted(i) && sink.selected(&h.filename.to_string_lossy());
+                    (picked && !h.is_directory() && !h.is_split_before()).then_some(h.unpacked_size)
+                })
             })
-        })
-        .collect::<std::result::Result<_, _>>()?;
+            .collect();
+        match listed {
+            _ if look.missed() => None,
+            Ok(sizes) => Some(sizes),
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let Some(sizes) = sizes else {
+        return extract_where(path, sink, opts, wanted);
+    };
     if only.is_none() {
         sink.set_total(sizes.iter().flatten().sum());
     }

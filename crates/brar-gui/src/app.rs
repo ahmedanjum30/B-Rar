@@ -554,7 +554,8 @@ impl App {
         }
         let item = |id| win::item(self.hwnd, id);
         let fraction = if total > 0 { done.min(total) as f64 / total as f64 } else { 0.0 };
-        theme::set_bar(item(ID_PROGRESS), (fraction * 10_000.0) as u32, paused, false);
+        // No total (a part of the archive not at hand yet): the bar sweeps.
+        theme::set_bar(item(ID_PROGRESS), (fraction * 10_000.0) as u32, paused, total == 0 && done > 0);
 
         let amount = if total > 0 {
             format!("{} of {}", human(done), human(total))

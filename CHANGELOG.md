@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Extract part 1 while part 2 is still downloading.** When the next part of a RAR archive isn't there yet (not next to the others, nor where an earlier part was found), B-Rar now extracts everything in the parts it has first, and asks for the missing part only when it gets to it. It used to ask before extracting anything, because it reads every part's file list up front. Until the part is found the progress bar sweeps instead of filling (the total isn't known yet), and the archive goes through unRAR, one file at a time. Archives with all their parts at hand are unchanged. An empty file under a part's name (Firefox makes one while it downloads) no longer counts as the part.
+
 ## 1.5.1 (2026-11-24)
 
 - **Big ZIP entries made of fixed-Huffman blocks extract on all cores**, instead of 15x slower than on one. zlib-ng's and zlib-rs's fastest level (B-Rar's own "Fastest" among them) write one long fixed-Huffman block, which the parallel decoder couldn't find a starting point in: it searched every bit on every core, then decoded the file alone. It now starts pieces inside such blocks. A 290 MB entry: 10.5 s → 0.15 s; a 3.4 GB ZIP of them on a Mac: 80.7 s → 5.2 s. Every other ZIP is as fast as before.
