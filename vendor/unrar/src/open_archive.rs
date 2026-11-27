@@ -541,10 +541,17 @@ impl<M: ProcessMode> Internal<M> {
         let user_data = unsafe { &mut *(user_data as *mut Userdata<M::Output>) };
         match msg {
             native::UCM_CHANGEVOLUMEW => {
-                // 2048 seems to be the buffer size in unrar,
-                // also it's the maximum path length since 5.00.
-                let next =
-                    unsafe { widestring::WideCString::from_ptr_truncate(p1 as *const _, 2048) };
+                // brar patch: read only up to the name's NUL. With RAR_VOL_NOTIFY, unRAR passes
+                // its std::wstring's own buffer, exactly as long as the name, so a fixed-length
+                // read (2048 units, as before) ran past its end.
+                let next = unsafe {
+                    let name = p1 as *const widestring::WideChar;
+                    let mut len = 0;
+                    while len < VOLUME_NAME_BUF && *name.add(len) != 0 {
+                        len += 1;
+                    }
+                    widestring::WideCString::from_vec_truncate(std::slice::from_raw_parts(name, len).to_vec())
+                };
                 if p2 != native::RAR_VOL_ASK {
                     user_data.1 = Some(next);
                     return 0; // found: continue

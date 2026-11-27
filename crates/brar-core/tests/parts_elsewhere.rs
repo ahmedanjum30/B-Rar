@@ -35,10 +35,13 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
         .collect()
 }
 
+/// The parts a finder was asked for, each with whether part 1's file was out by then.
+type Asked = Arc<Mutex<Vec<(PathBuf, bool)>>>;
+
 /// Moves every part from the second on to `elsewhere`, and returns a finder that answers
 /// with `elsewhere/<name>` and records what it was asked for, and whether `ready` (a file
 /// wholly in part 1) was already extracted by then.
-fn scatter(parts: &[PathBuf], elsewhere: &Path, ready: PathBuf) -> (PartFinder, Arc<Mutex<Vec<(PathBuf, bool)>>>) {
+fn scatter(parts: &[PathBuf], elsewhere: &Path, ready: PathBuf) -> (PartFinder, Asked) {
     fs::create_dir_all(elsewhere).unwrap();
     for p in &parts[1..] {
         fs::rename(p, elsewhere.join(p.file_name().unwrap())).unwrap();
@@ -92,9 +95,14 @@ fn check_rar(name: &str, format: &str, first: &str) {
         .args(["a", format, "-m0", "-v1m", "-idq", "-ep1"])
         .arg(here.join("t.rar"))
         .arg(src.join("*"))
-        .status()
+        .output()
         .unwrap();
-    assert!(made.success());
+    if !made.status.success() && format == "-ma4" && String::from_utf8_lossy(&made.stdout).contains("Unknown option") {
+        eprintln!("skipping: WinRAR 7 and later can't create RAR4 archives");
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+    assert!(made.status.success(), "{name}: Rar.exe failed: {}", String::from_utf8_lossy(&made.stdout));
     let parts = rar_parts(&here);
     assert!(parts.len() >= 3, "{name}: expected several volumes, got {parts:?}");
     let out = root.join("out");
