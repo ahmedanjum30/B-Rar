@@ -31,14 +31,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
     name: windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - uses: Swatinem/rust-cache@v2
 
@@ -55,7 +54,7 @@ jobs:
     name: linux (command line)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
@@ -71,7 +70,7 @@ jobs:
     name: macos
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
@@ -82,7 +81,7 @@ jobs:
         run: cargo test -p brar-core -p brar-cli -p brar-ffi
       - name: Build the app
         run: sh macos/build-app.sh --native
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: B-Rar-macos
           path: dist/*.zip

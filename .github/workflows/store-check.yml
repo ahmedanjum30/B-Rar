@@ -14,14 +14,11 @@ on:
 permissions:
   contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   msstore:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Show B-Rar's Microsoft Store state
         if: ${{ !inputs.screenshots }}
         shell: pwsh

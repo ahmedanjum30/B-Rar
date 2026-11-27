@@ -13,7 +13,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # The same format, lint and test checks as CI. They run alongside the build; nothing is
@@ -29,7 +28,7 @@ jobs:
       MSIX_CERT_PFX: ${{ secrets.MSIX_CERT_PFX }}
       MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
 
       # Unsigned, with the identity Partner Center assigned (installer\store-identity.json).
@@ -70,7 +69,7 @@ jobs:
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist\SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-files
           path: |
@@ -81,7 +80,7 @@ jobs:
           if-no-files-found: error
 
       # For Partner Center (Packages > upload); not a download for users.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: store-package
           path: dist/B-Rar-*-store.msix
@@ -92,7 +91,7 @@ jobs:
     # Pinned: the glibc it is built against is the oldest the program runs on.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: rustup toolchain install stable --profile minimal
       - name: Build
@@ -105,7 +104,7 @@ jobs:
           cp target/release/B-Rar "dist/$name/brar"
           cp README.md LICENSE installer/unrar-license.txt "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-files
           path: dist/B-Rar-*-linux-x64.tar.gz
@@ -115,12 +114,12 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: rustup toolchain install stable --profile minimal
       - name: Build the app
         run: sh macos/build-app.sh --native
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-files
           path: dist/B-Rar-*-macos.zip
@@ -133,8 +132,8 @@ jobs:
     needs: [checks, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: store-package
           path: dist
@@ -150,15 +149,15 @@ jobs:
     needs: [checks, build, linux, macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-files
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-files
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: macos-files
           path: dist
@@ -167,7 +166,7 @@ jobs:
 
       # The notes: this version's section of CHANGELOG.md, then how to install.
       # GitHub adds the list of changes below them.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: source
           sparse-checkout: CHANGELOG.md
@@ -209,7 +208,7 @@ jobs:
           sed -i "s/__TAG__/$GITHUB_REF_NAME/g" notes.md
           cat notes.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           # This version's changes and how to install, above the generated list.
@@ -225,8 +224,8 @@ jobs:
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         if: env.HOMEBREW_TAP_TOKEN != ''
         with:
           name: macos-files
@@ -258,14 +257,14 @@ jobs:
       group: gh-pages
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: main
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: gh-pages
           path: site
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-files
           path: release
