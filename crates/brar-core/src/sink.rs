@@ -369,8 +369,13 @@ impl Sink {
                         Some(p) => p,
                     },
                 };
-                std::os::unix::fs::symlink(target, &path).at(&path)?;
-                self.shared.record_file(len);
+                match std::os::unix::fs::symlink(target, &path) {
+                    Ok(()) => self.shared.record_file(len),
+                    // Entries go in parallel: another one may have made a folder of this name
+                    // since the check above (`name/file` before `name`). Folders stay, as there.
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => self.skip(),
+                    Err(e) => return Err(e).at(&path),
+                }
                 return Ok(());
             }
         }
