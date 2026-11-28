@@ -84,6 +84,13 @@ fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
     }
 }
 
+/// Single-file ZIPs up to this size are memory-mapped, so a big entry's all-cores decode starts
+/// at once instead of after reading the entry in (0.92 s against 1.06 s for a 1.15 GB entry).
+/// Bigger ones aren't: every page read stays mapped, which Windows counts as memory in use (14 GB
+/// for a 14 GB archive), and the map's small page-fault reads were slower than 16 MB reads (40 s
+/// against 26 s for that archive, of big entries, SSD to SSD).
+const MAP_AT_MOST: u64 = 2 << 30;
+
 /// Deflate entries this big decode on all cores; smaller ones on one.
 const PARALLEL_MIN: u64 = 64 << 20;
 
@@ -125,9 +132,9 @@ pub(crate) fn extract(input: &Input, sink: &Sink, opts: &Options) -> Result<()> 
             let running = || sink.running();
             let reader = disk::Reader::new(&file, disk::seeks_slowly(&input.first), &running);
             let read = |offset, buf: &mut [u8]| reader.read_at(offset, buf);
-            if reader.in_order() {
-                let len = file.metadata().at(&input.first)?.len();
-                return extract_from(disk::Buffered::new(&reader, len), &read, None, true, sink, opts);
+            let len = file.metadata().at(&input.first)?.len();
+            if reader.in_order() || len > MAP_AT_MOST {
+                return extract_from(disk::Buffered::new(&reader, len), &read, None, reader.in_order(), sink, opts);
             }
             let map = mmap(&input.first)?;
             extract_from(Cursor::new(&map[..]), &read, Some(&map[..]), false, sink, opts)
@@ -223,15 +230,19 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(
     let budget = Budget::new(FAST_PATH_BUDGET);
     let threads = opts.thread_count();
     let failure = Mutex::new(None);
+    // One all-cores decode at a time: each already uses every core, and keeps its pieces in
+    // memory while it works, so several at once only compete for the cores and multiply the
+    // memory (12 GB on a 15 GB archive of big entries, against a 2 GB budget).
+    let all_cores = Mutex::new(());
     opts.pool()?.scope_fifo(|s| {
         for (_, _, job) in &jobs {
-            let (archive, failure, budget) = (&archive, &failure, &budget);
+            let (archive, failure, budget, all_cores) = (&archive, &failure, &budget, &all_cores);
             s.spawn_fifo(move |_| {
                 if failure.lock().unwrap().is_some() {
                     return;
                 }
                 let result = match job {
-                    Job::Fast(entry) => extract_fast(read_at, map, entry, sink, budget, threads),
+                    Job::Fast(entry) => extract_fast(read_at, map, entry, sink, budget, all_cores, threads),
                     Job::Own(entry) => extract_own(read_at, entry, password, sink),
                     Job::Fallback(i) => extract_entry(archive.clone(), *i, password, sink),
                 };
@@ -244,7 +255,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(
     failure.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
-fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, threads: usize) -> Result<()> {
+fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, all_cores: &Mutex<()>, threads: usize) -> Result<()> {
     sink.check()?;
     sink.start(&e.name);
     let mut parallel = !e.stored && e.size >= PARALLEL_MIN && threads >= 4;
@@ -254,7 +265,7 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
         // the data; a ZIP always has its central directory after it.
         let (start, len) = (e.data_start as usize, e.packed as usize);
         if let Some(input) = map.and_then(|m| m.get(start..start + len + INPUT_PADDING)) {
-            if extract_parallel(input, e, sink, threads)? {
+            if extract_parallel(input, e, sink, all_cores, threads)? {
                 return Ok(());
             }
             // It gave up on these same bytes: straight to the single-core decoder, not again.
@@ -266,7 +277,7 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
     let len = e.packed as usize;
     let mut packed = vec![0u8; len + if e.stored { 0 } else { INPUT_PADDING }];
     read_at(e.data_start, &mut packed[..len]).map_err(|_| Error::Damaged(e.name.clone()))?;
-    if parallel && extract_parallel(&packed, e, sink, threads)? {
+    if parallel && extract_parallel(&packed, e, sink, all_cores, threads)? {
         return Ok(());
     }
     let data = if e.stored {
@@ -294,7 +305,9 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
 /// A big Deflate entry on all cores, written as it decodes. `Ok(false)`: the parallel decoder
 /// gave up or the CRC didn't match (the partial file is removed); the single-core decoder
 /// takes over, and reports real damage.
-fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, threads: usize) -> Result<bool> {
+fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, all_cores: &Mutex<()>, threads: usize) -> Result<bool> {
+    let _turn = all_cores.lock().unwrap_or_else(|e| e.into_inner());
+    sink.check()?;
     let mut file = sink.begin_file(&e.name, Some(e.size), e.stamp)?;
     let mut crc = crc32fast::Hasher::new();
     let result = inflate_parallel(packed, e.packed as usize, threads, &mut |b: &[u8]| {
