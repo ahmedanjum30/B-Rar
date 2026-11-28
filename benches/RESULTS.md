@@ -18,6 +18,58 @@ file) unless noted otherwise.
 
 ---
 
+## 2026-11-28: 1.5.4 against 1.5.3 and 1.5.2: big ZIPs' memory and speed
+
+B-Rar builds only (`benches/builds.ps1`): 1.5.2, 1.5.3 and 1.5.4's code, all built on this
+machine with Rust 1.100 (windows-gnu, WinLibs GCC 16). Archives on E: (bench-data) extract to
+C:, the 14 GB ZIP (on C:) to D:; three runs each, builds in rotating order, 3 s pauses;
+**Defender real-time protection off**. "Own" is B-Rar's peak private memory; "in use" the rise in
+the system's memory in use (it counts a memory-mapped archive's pages). Every build wrote the
+same files on every archive.
+
+- `sekiro.zip` (14.3 GB, named `.rar`): 139 Deflate entries, 15.1 GB, mostly big game files that
+  barely compress (`Data5.bdt` 6.36 GB → 6.29 GB).
+- `big-entry.zip` (525 MB): one 1.15 GB Deflate entry of text. `small-files.zip` (454 MB):
+  30,000 text files of 2-60 KB. Both in `bench-data/zip`.
+
+| Archive | 1.5.2 | 1.5.3 | 1.5.4 | own / in use, 1.5.3 → 1.5.4 |
+|---|---|---|---|---|
+| `sekiro.zip` | 39.32 s | 39.60 s | **24.75 s** | 13.86 → 3.92 GB / +14.75 → +4.09 GB |
+| `italian.zip` | 0.93 s | 0.94 s | 0.93 s | 2.78 → 3.26 GB / same |
+| `single.zip` | 0.74 s | 0.74 s | 0.72 s | 0.93 → 0.85 GB |
+| `corpus.zip` | 10.92 s | 10.92 s | 11.04 s | same |
+| `big-entry.zip` | 1.13 s | 1.08 s | 1.09 s | same |
+| `small-files.zip` | 5.09 s | 4.99 s | 5.03 s | same |
+| `italian-repack.rar` | 0.94 s | 0.93 s | 0.95 s | same |
+| `game-solid.rar` | 1.13 s | 0.99 s | 1.01 s | same |
+| `mt.7z` | 3.94 s | 4.15 s | 3.97 s | same |
+| `c.tar` | 9.94 s | 10.00 s | 9.83 s | same |
+
+(Medians. 1.5.4's column is the build before the memory cap; on this 32 GB machine the cap is
+the same 2 GB, and a check run of 1.5.4 itself gave `sekiro.zip` 25.89-26.51 s, `italian.zip`
+0.89-0.91 s.)
+
+**Why 1.5.3 took 14 GB.** Big ZIP entries decoded on all cores straight from the memory-mapped
+archive, outside the 2 GB budget, as many at once as there were threads, each with its pieces in
+memory; and Windows counts the mapped archive as memory in use page by page. The map was also
+slower than 16 MB reads on `sekiro.zip`. 1.5.4 maps only ZIPs up to 2 GB (a 1.15 GB entry
+starts sooner mapped: 0.92 s against 1.06 s) and runs at most two all-cores decodes at once:
+
+| All-cores decodes at once | 1 | **2** | 3 | 16 |
+|---|---|---|---|---|
+| `italian.zip` (median of 5) | 1.12 s | **0.92 s** | 0.93 s | 0.92 s |
+| `sekiro.zip` | 25.6-29.8 s | 26.2-26.9 s | 25.5-25.9 s | 25.8-26.4 s |
+
+**A bigger memory budget isn't faster.** `sekiro.zip` with the budget at 2, 3, 6 and 8 GB
+(`BRAR_BUDGET_MB`), three runs each: 25.1-26.2, 25.5-26.8, 26.2-27.4 and 25.6-27.8 s, while
+B-Rar's own peak went from 2.6-3.1 GB to 7.9-10.1 GB (6 GB) and 8.3-15.6 GB (8 GB): its big
+entries barely compress, so decoding them is light and the drives set the pace. So the budget
+is 3/16 of the PC's memory up to 2 GB, never more.
+
+**On a hard drive** (1.5.3, a friend's PC): `sekiro.zip` from a hard drive to an SSD took 27 min
+with 1.5.2 (3-4 MB/s), 3 min 25 s with WinRAR and 2 min 50 s with 1.5.3, which reads in order
+when Windows reports a seek penalty.
+
 ## 2026-11-24: Mac: ZIP against ditto, bsdtar and unzip; fixed-Huffman streams on all cores
 
 On a Mac, not the test machine above: MacBook Pro, **Apple M3 Pro** (11 cores), macOS,
