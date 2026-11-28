@@ -7,9 +7,29 @@ use std::{
     sync::{Condvar, Mutex},
 };
 
-/// Most bytes the fast paths hold in memory at once (compressed + decoded, across threads).
-/// Larger entries take the streaming paths instead.
-pub(crate) const BUDGET: u64 = 2 << 30;
+/// Most bytes the fast paths hold in memory at once (compressed + decoded, across threads):
+/// 3/16 of the PC's memory, at most 2 GB (768 MB with 4 GB, 1.5 GB with 8 GB, 2 GB from
+/// about 11 GB), so a small PC isn't pushed into swapping; 2 GB when the memory can't be read.
+/// Larger entries take the streaming paths instead. Not more on big PCs: on a 14 GB ZIP of
+/// big, barely compressible entries, 6 and 8 GB were no faster than 2 GB (25-28 s each) and
+/// took 8-15 GB of memory. `BRAR_BUDGET_MB` overrides it (for testing).
+pub(crate) fn budget() -> u64 {
+    static BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        if let Some(mb) = std::env::var("BRAR_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+            return mb << 20;
+        }
+        installed_memory().map_or(2 << 30, |m| (m / 16 * 3).clamp(256 << 20, 2 << 30))
+    })
+}
+
+/// Most bytes of decoded small files waiting to be written in the background: 1/32 of the
+/// PC's memory, at most 512 MB (128 MB with 4 GB, 512 MB from 16 GB); 512 MB when it can't
+/// be read.
+pub(crate) fn writes_in_flight() -> u64 {
+    static BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| installed_memory().map_or(512 << 20, |m| (m / 32).clamp(64 << 20, 512 << 20)))
+}
 
 /// The PC's installed memory, if it can tell.
 pub(crate) fn installed_memory() -> Option<u64> {

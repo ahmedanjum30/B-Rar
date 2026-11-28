@@ -20,7 +20,7 @@ use std::sync::{Condvar, Mutex};
 
 use crate::{
     deflate::inflate::{Bad, Res},
-    whole::{BUDGET, Budget, Lease, installed_memory},
+    whole::{Budget, Lease, budget as fast_path_budget, installed_memory},
 };
 
 const NUM_STATES: usize = 12;
@@ -1282,7 +1282,7 @@ fn decode_segment(input: &[u8], s: &Segment) -> Result<Vec<u8>, Bad> {
 /// least 512 MB and at most 4 GB.
 fn budget() -> u64 {
     static BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *BYTES.get_or_init(|| installed_memory().map_or(BUDGET, |m| (m / 8).clamp(512 << 20, 4 << 30)))
+    *BYTES.get_or_init(|| installed_memory().map_or(fast_path_budget(), |m| (m / 8).clamp(512 << 20, 4 << 30)))
 }
 
 /// Whether `parts` are worth decoding in parallel (and fit in memory).

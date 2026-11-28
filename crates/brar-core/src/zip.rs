@@ -32,7 +32,7 @@ use crate::{
     sink::{SMALL_FILE, Sink, Stamp},
     time,
     volumes::Input,
-    whole::{BUDGET as FAST_PATH_BUDGET, Budget},
+    whole::{Budget, budget},
     zip_own,
 };
 
@@ -90,6 +90,12 @@ fn open<R: Read + Seek + Clone>(reader: R) -> Result<ZipArchive<R>> {
 /// for a 14 GB archive), and the map's small page-fault reads were slower than 16 MB reads (40 s
 /// against 26 s for that archive, of big entries, SSD to SSD).
 const MAP_AT_MOST: u64 = 2 << 30;
+
+/// All-cores decodes that may run at once. Each keeps its pieces in memory while it works, so
+/// an unbounded number (one per thread that got a big entry) piled up gigabytes. One at a time
+/// leaves cores idle while a decode does its in-order part: `italian.zip`, a few big entries,
+/// 1.12 s with one, 0.92 s with two, 0.93 s with three.
+const ALL_CORES_AT_ONCE: u64 = 2;
 
 /// Deflate entries this big decode on all cores; smaller ones on one.
 const PARALLEL_MIN: u64 = 64 << 20;
@@ -173,7 +179,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(
             let method = f.compression();
             let fast = !f.encrypted()
                 && matches!(method, CompressionMethod::Deflated | CompressionMethod::Stored)
-                && f.compressed_size() + f.size() <= FAST_PATH_BUDGET;
+                && f.compressed_size() + f.size() <= budget();
             // The zip crate names LZMA and XZ only with the features B-Rar leaves out.
             #[allow(deprecated)]
             let own = match method {
@@ -227,13 +233,11 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(
     // parallel iterator splits the list into ranges instead, which let the two largest
     // entries of an archive run back to back on one thread.)
     let password = opts.password.as_deref().map(str::as_bytes);
-    let budget = Budget::new(FAST_PATH_BUDGET);
+    let budget = Budget::new(budget());
     let threads = opts.thread_count();
     let failure = Mutex::new(None);
-    // One all-cores decode at a time: each already uses every core, and keeps its pieces in
-    // memory while it works, so several at once only compete for the cores and multiply the
-    // memory (12 GB on a 15 GB archive of big entries, against a 2 GB budget).
-    let all_cores = Mutex::new(());
+    // A few all-cores decodes at a time (ALL_CORES_AT_ONCE), each holding its pieces in memory.
+    let all_cores = Budget::new(ALL_CORES_AT_ONCE);
     opts.pool()?.scope_fifo(|s| {
         for (_, _, job) in &jobs {
             let (archive, failure, budget, all_cores) = (&archive, &failure, &budget, &all_cores);
@@ -255,7 +259,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(
     failure.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
-fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, all_cores: &Mutex<()>, threads: usize) -> Result<()> {
+fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, budget: &Budget, all_cores: &Budget, threads: usize) -> Result<()> {
     sink.check()?;
     sink.start(&e.name);
     let mut parallel = !e.stored && e.size >= PARALLEL_MIN && threads >= 4;
@@ -305,8 +309,8 @@ fn extract_fast(read_at: ReadAt, map: Option<&[u8]>, e: &Plain, sink: &Sink, bud
 /// A big Deflate entry on all cores, written as it decodes. `Ok(false)`: the parallel decoder
 /// gave up or the CRC didn't match (the partial file is removed); the single-core decoder
 /// takes over, and reports real damage.
-fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, all_cores: &Mutex<()>, threads: usize) -> Result<bool> {
-    let _turn = all_cores.lock().unwrap_or_else(|e| e.into_inner());
+fn extract_parallel(packed: &[u8], e: &Plain, sink: &Sink, all_cores: &Budget, threads: usize) -> Result<bool> {
+    let _turn = all_cores.take(1);
     sink.check()?;
     let mut file = sink.begin_file(&e.name, Some(e.size), e.stamp)?;
     let mut crc = crc32fast::Hasher::new();

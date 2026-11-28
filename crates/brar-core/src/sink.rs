@@ -24,7 +24,6 @@ use crate::{Conflict, ConflictPolicy, Error, IoContext, Options, Progress, Resol
 /// Files up to this size are buffered in memory and written in the background.
 pub(crate) const SMALL_FILE: u64 = 8 << 20;
 /// Cap on bytes buffered for background writes, so memory stays bounded.
-const MAX_IN_FLIGHT: u64 = 512 << 20;
 const COPY_BUF: usize = 1 << 20;
 
 thread_local! {
@@ -593,7 +592,7 @@ impl Sink {
         };
         {
             let mut guard = self.shared.in_flight.lock().unwrap();
-            while guard.0 > 0 && guard.1 + len > MAX_IN_FLIGHT {
+            while guard.0 > 0 && guard.1 + len > crate::whole::writes_in_flight() {
                 guard = self.shared.drained.wait(guard).unwrap();
             }
             guard.0 += 1;

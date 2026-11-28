@@ -24,7 +24,7 @@ use crate::{
     },
     sink::{FileOut, SMALL_FILE, Sink},
     time,
-    whole::{BUDGET, Budget},
+    whole::{Budget, budget},
 };
 
 thread_local! {
@@ -160,7 +160,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
             sink.dir(&e.name)?;
         } else if !e.supported {
             retry.push(e.index);
-        } else if e.method != 0 && e.packed.saturating_add(e.size) > BUDGET {
+        } else if e.method != 0 && e.packed.saturating_add(e.size) > budget() {
             // Too big to decode in memory: the engine streams it. (Big stored files are
             // streamed by the fast path.)
             big.push(e);
@@ -181,7 +181,7 @@ fn extract_rar5(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Options
     fast.sort_unstable_by_key(|e| Reverse(e.packed));
 
     let src = Source::open(&archive)?;
-    let budget = Budget::new(BUDGET);
+    let budget = Budget::new(budget());
     let failed = Mutex::new(Vec::new());
     let damaged = Mutex::new(Vec::new());
     let stop = Mutex::new(None);
@@ -303,7 +303,7 @@ fn extract_solid(path: &Path, archive: rar5::Archive, sink: &Sink, opts: &Option
         }
     }
     // After the engine: had it failed, unRAR would redo everything, these too.
-    let budget = Budget::new(BUDGET);
+    let budget = Budget::new(budget());
     let mut retry = HashSet::new();
     let mut damaged = None;
     for e in stored.into_iter().filter(|e| sink.selected(&e.name)) {
