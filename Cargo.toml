@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/brar-core", "crates/brar-cli", "crates/brar-gui", "crates/brar-shell", "crates/brar-ffi"]
 
 [workspace.package]
-version = "1.5.2"
+version = "1.5.3"
 edition = "2024"
 rust-version = "1.100"
 license = "PolyForm-Noncommercial-1.0.0"

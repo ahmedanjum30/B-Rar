@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "brar-cli"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "brar-core",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "brar-core"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "aes",
  "blake2s_simd",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "brar-ffi"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "brar-core",
  "serde",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "brar-gui"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "brar-core",
  "embed-resource",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "brar-shell"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "embed-resource",
  "windows",
