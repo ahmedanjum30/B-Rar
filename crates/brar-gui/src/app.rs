@@ -581,6 +581,15 @@ impl App {
             .unwrap_or_default();
         win::set_text(item(ID_LEFT), &left);
         win::set_text(item(ID_FILES), &p.files().to_string());
+        // Cancelled: say so while the workers finish their current piece (the files already
+        // extracted stay).
+        if p.is_cancelled() {
+            win::set_text(item(ID_CURRENT), "Cancelling...");
+            win::enable(item(ID_PAUSE), false);
+            win::enable(item(IDCANCEL.0), false);
+            win::set_title(self.hwnd, "Cancelling - B-Rar");
+            return;
+        }
         let current = p.current_file();
         win::set_text(item(ID_CURRENT), current.rsplit(['/', '\\']).next().unwrap_or_default());
         win::set_text(item(ID_PAUSE), if paused { "Resume" } else { "Pause" });

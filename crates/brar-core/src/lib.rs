@@ -4,6 +4,7 @@ mod apple_double;
 mod bcj;
 mod create;
 mod deflate;
+mod disk;
 mod format;
 mod lzma;
 mod path;

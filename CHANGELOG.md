@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **ZIPs on a hard drive extract at the drive's speed.** B-Rar read a ZIP from as many places at once as there are cores, which is what makes it fast on an SSD; on a hard drive it kept the head jumping between them, and a 14 GB ZIP took 27 minutes at 3-4 MB/s where WinRAR took 3. When Windows says the archive is on a drive that seeks slowly, B-Rar now reads it in order, one big piece at a time, while still decoding and writing on every core.
+- **Cancel stops straight away.** A ZIP entry (up to 2 GB) was read in one go before B-Rar checked for a cancel, which on a slow drive could take minutes. Reads now come in 16 MB pieces with a check between each, and the window says "Cancelling..." until it stops. The files already extracted stay; only the one being written is removed, since it would be incomplete.
 - **Mac and Linux: an archive with a link and a folder of the same name** no longer stops with "File exists" now and then. The entries are extracted in parallel, so the folder could appear just before the link was made; the link is now skipped as it is when the folder was there first.
 
 ## 1.5.2 (2026-11-27)

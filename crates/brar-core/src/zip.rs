@@ -28,11 +28,11 @@ use crate::{
         inflate::{INPUT_PADDING, OUTPUT_SLACK, Tables, inflate},
         parallel::{Failure, inflate_parallel},
     },
-    mmap,
+    disk, mmap,
     sink::{SMALL_FILE, Sink, Stamp},
     time,
     volumes::Input,
-    whole::{BUDGET as FAST_PATH_BUDGET, Budget, read_at},
+    whole::{BUDGET as FAST_PATH_BUDGET, Budget},
     zip_own,
 };
 
@@ -119,23 +119,34 @@ enum Job {
 pub(crate) fn extract(input: &Input, sink: &Sink, opts: &Options) -> Result<()> {
     match &input.split {
         None => {
-            let map = mmap(&input.first)?;
             let file = File::open(&input.first).at(&input.first)?;
-            extract_from(
-                Cursor::new(&map[..]),
-                &|offset, buf| read_at(&file, offset, buf),
-                Some(&map[..]),
-                sink,
-                opts,
-            )
+            // Reads in pieces that a cancel or pause can come between; on a hard drive, one
+            // at a time and in the archive's order (disk.rs).
+            let running = || sink.running();
+            let reader = disk::Reader::new(&file, disk::seeks_slowly(&input.first), &running);
+            let read = |offset, buf: &mut [u8]| reader.read_at(offset, buf);
+            if reader.in_order() {
+                let len = file.metadata().at(&input.first)?.len();
+                return extract_from(disk::Buffered::new(&reader, len), &read, None, true, sink, opts);
+            }
+            let map = mmap(&input.first)?;
+            extract_from(Cursor::new(&map[..]), &read, Some(&map[..]), false, sink, opts)
         }
-        Some(parts) => extract_from(parts.clone(), &|offset, buf| parts.read_at(offset, buf), None, sink, opts),
+        Some(parts) => extract_from(parts.clone(), &|offset, buf| parts.read_at(offset, buf), None, false, sink, opts),
     }
 }
 
-/// `map`: the whole archive in memory (a single-file archive), which big entries decode from
-/// directly.
-fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt, map: Option<&[u8]>, sink: &Sink, opts: &Options) -> Result<()> {
+/// `map`: the whole archive in memory (a single-file archive on an SSD), which big entries
+/// decode from directly. `in_order`: the archive is on a hard drive, so entries go in the
+/// archive's order, read one at a time ([`disk::Reader`]).
+fn extract_from<R: Read + Seek + Clone + Send + Sync>(
+    reader: R,
+    read_at: ReadAt,
+    map: Option<&[u8]>,
+    in_order: bool,
+    sink: &Sink,
+    opts: &Options,
+) -> Result<()> {
     let archive = open(reader)?;
 
     let mut jobs = Vec::with_capacity(archive.len());
@@ -193,12 +204,17 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
                 }),
                 _ => Job::Fallback(i),
             };
-            jobs.push((f.compressed_size(), job));
+            jobs.push((f.compressed_size(), f.header_start(), job));
         }
     }
     sink.set_total(total);
-    // Biggest first, so a huge entry never starts last and leaves the other cores idle.
-    jobs.sort_unstable_by_key(|j| std::cmp::Reverse(j.0));
+    if in_order {
+        // A hard drive: in the archive's order, so its reads follow each other on the disk.
+        jobs.sort_unstable_by_key(|j| j.1);
+    } else {
+        // Biggest first, so a huge entry never starts last and leaves the other cores idle.
+        jobs.sort_unstable_by_key(|j| std::cmp::Reverse(j.0));
+    }
 
     // One FIFO job per entry: jobs start strictly in that order, one per free thread. (A
     // parallel iterator splits the list into ranges instead, which let the two largest
@@ -208,7 +224,7 @@ fn extract_from<R: Read + Seek + Clone + Send + Sync>(reader: R, read_at: ReadAt
     let threads = opts.thread_count();
     let failure = Mutex::new(None);
     opts.pool()?.scope_fifo(|s| {
-        for (_, job) in &jobs {
+        for (_, _, job) in &jobs {
             let (archive, failure, budget) = (&archive, &failure, &budget);
             s.spawn_fifo(move |_| {
                 if failure.lock().unwrap().is_some() {

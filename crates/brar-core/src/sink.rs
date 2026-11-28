@@ -628,6 +628,12 @@ impl Sink {
         Ok(())
     }
 
+    /// Whether to carry on: blocks while paused, `false` after a cancel. For loops that can't
+    /// take [`Sink::check`]'s background-write error (reading the archive).
+    pub(crate) fn running(&self) -> bool {
+        self.shared.check_running().is_ok()
+    }
+
     /// Fails fast after a cancel or a failed background write; blocks while paused.
     pub(crate) fn check(&self) -> Result<()> {
         self.shared.check_running()?;
