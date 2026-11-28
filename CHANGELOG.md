@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.4 (2026-11-28)
 
 - **Big ZIPs use far less memory, and extract faster.** Extracting a 14 GB ZIP of big files took up to 12 GB of B-Rar's own memory, against a 2 GB limit, and Windows counted more on top: big entries decoded on all cores straight from the memory-mapped archive, outside the limit, as many at once as there were threads, each with its own pieces in memory; and Windows counts a mapped archive as memory in use page by page. Now a ZIP over 2 GB is read in 16 MB pieces instead of mapped, and at most two entries decode on all cores at once. That ZIP, SSD to SSD: 40 s and 14.5 GB more memory in use before, now 25 s and 3.9 GB. ZIPs of 2 GB or less are still mapped, which starts a big entry's decode sooner.
 - **Memory limits follow the PC.** The most B-Rar decodes in memory at once is now 3/16 of the PC's memory, up to the 2 GB it was everywhere before (768 MB on a 4 GB PC, 1.5 GB on 8 GB), and the small files waiting to be written 1/32, up to 512 MB, so a small PC isn't pushed into swapping. PCs with 11 GB or more are unchanged: a larger limit was tried and was no faster.
